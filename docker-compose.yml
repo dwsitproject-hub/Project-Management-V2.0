@@ -57,6 +57,8 @@ services:
       - ./docs:/app/docs:ro
       # Root .env file (optional; dotenv in container). Use a file, not a folder.
       - ./.env:/app/.env:ro
+      # Persist uploaded documents on the host so they survive container recreation
+      - ./uploads:/app/uploads
     networks:
       - app-network
     restart: unless-stopped
