@@ -8922,7 +8922,7 @@ async function renderMasterDwsApplications() {
         <h2 style="margin:0;">Master DWS Application</h2>
         <button class="primary" id="btn-add-dws">+ Add Application</button>
       </div>
-      <p class="muted" style="margin-top:8px;">Used as the source for CR field “System Impacted”.</p>
+      <p class="muted" style="margin-top:8px;">Used as the source for CR field “System Impacted”. Click a system name to view the CRs impacting it.</p>
 
       <div style="margin-top: 16px; overflow:auto;">
         <table>
@@ -8938,7 +8938,7 @@ async function renderMasterDwsApplications() {
           <tbody>
             ${apps.map(a => `
               <tr>
-                <td><strong>${escape(a.systemName)}</strong></td>
+                <td><a href="#" data-action="view-crs" data-id="${escape(a.id)}" title="View CRs impacting this system" style="font-weight:700; text-decoration:none; color: var(--primary, #2563eb);">${escape(a.systemName)}</a></td>
                 <td>${a.productionUrl ? `<a href="${escape(a.productionUrl)}" target="_blank" rel="noopener">Open</a>` : '<span class="muted">-</span>'}</td>
                 <td>${a.stagingUrl ? `<a href="${escape(a.stagingUrl)}" target="_blank" rel="noopener">Open</a>` : '<span class="muted">-</span>'}</td>
                 <td style="max-width:320px;white-space:pre-wrap;word-break:break-word;">${a.githubUrl ? escape(String(a.githubUrl)) : '<span class="muted">-</span>'}</td>
@@ -9013,7 +9013,109 @@ async function renderMasterDwsApplications() {
     };
   };
 
+  const openCrsModal = async (appRow) => {
+    const modal = document.createElement('div');
+    modal.className = 'modal-backdrop';
+    modal.innerHTML = `
+      <div class="modal-content" style="max-width: 1100px; width: 95%;">
+        <div style="display:flex; justify-content: space-between; align-items:center; gap:12px;">
+          <h3 style="margin:0;">CRs Impacting: ${escape(appRow.systemName)}</h3>
+          <button type="button" id="btn-close-crs">Close</button>
+        </div>
+        <div id="dws-crs-body" style="margin-top:12px;"><p class="muted">Loading...</p></div>
+      </div>
+    `;
+    document.body.appendChild(modal);
+    modal.querySelector('#btn-close-crs').onclick = () => modal.remove();
+    modal.onclick = (e) => {
+      if (e.target === modal) modal.remove();
+    };
+
+    const body = modal.querySelector('#dws-crs-body');
+    try {
+      const result = await fetchJSON(`/api/dws-applications/${encodeURIComponent(appRow.id)}/crs`);
+      const crs = Array.isArray(result?.items) ? result.items : [];
+      if (!crs.length) {
+        body.innerHTML = '<p class="muted">No CRs impact this system yet.</p>';
+        return;
+      }
+      const clampStyle = 'display:-webkit-box;-webkit-line-clamp:5;-webkit-box-orient:vertical;overflow:hidden;white-space:pre-wrap;word-break:break-word;';
+      const thStyle = 'white-space:nowrap; position:sticky; top:0; z-index:2; background:#f8fafc;';
+      body.innerHTML = `
+        <p class="muted" style="margin-top:0;">${crs.length} CR${crs.length === 1 ? '' : 's'} found. Click a long Business Impact/Remark to expand it.</p>
+        <div style="overflow:auto; max-height: 60vh; border:1px solid var(--border, #e2e8f0); border-radius:8px;">
+          <table style="table-layout:fixed; width:100%; min-width:980px; border-collapse:collapse;">
+            <colgroup>
+              <col style="width:150px;" />
+              <col style="width:20%;" />
+              <col style="width:85px;" />
+              <col style="width:120px;" />
+              <col style="width:140px;" />
+              <col style="width:105px;" />
+              <col />
+              <col />
+            </colgroup>
+            <thead>
+              <tr>
+                <th style="${thStyle}">Ticket</th>
+                <th style="${thStyle}">CR Name</th>
+                <th style="${thStyle}">Priority</th>
+                <th style="${thStyle}">Status</th>
+                <th style="${thStyle}">Milestone</th>
+                <th style="${thStyle}">Created</th>
+                <th style="${thStyle}">Business Impact</th>
+                <th style="${thStyle}">Remark</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${crs.map((c) => {
+                const statusClass = (c.status || '').toLowerCase().replace(/\s+/g, '-');
+                const milestoneLabel = normalizeCrMilestoneForDisplay({ type: 'CR', milestone: c.milestone }) || '-';
+                return `
+                <tr>
+                  <td style="white-space:nowrap;vertical-align:top;"><a href="#view/${escape(c.id)}" data-cr-link>${escape(c.ticket || '-')}</a></td>
+                  <td style="white-space:normal;word-break:break-word;vertical-align:top;"><strong>${escape(c.name || '-')}</strong></td>
+                  <td style="vertical-align:top;">${c.priority ? `<span class="priority-badge priority-${escape(String(c.priority).toLowerCase())}">${escape(c.priority)}</span>` : '<span class="muted">-</span>'}</td>
+                  <td style="white-space:normal;vertical-align:top;">${c.status ? `<span class="status-badge status-${escape(statusClass)}">${escape(c.status)}</span>` : '<span class="muted">-</span>'}</td>
+                  <td style="white-space:normal;vertical-align:top;">${escape(milestoneLabel)}</td>
+                  <td style="white-space:nowrap;vertical-align:top;">${c.createdAt ? escape(String(c.createdAt).slice(0, 10)) : '<span class="muted">-</span>'}</td>
+                  <td style="vertical-align:top;">${c.businessImpact ? `<div class="dws-cr-clamp" style="${clampStyle}">${escape(c.businessImpact)}</div>` : '<span class="muted">-</span>'}</td>
+                  <td style="vertical-align:top;">${c.remark ? `<div class="dws-cr-clamp" style="${clampStyle}">${escape(c.remark)}</div>` : '<span class="muted">-</span>'}</td>
+                </tr>
+              `;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+      `;
+      body.querySelectorAll('a[data-cr-link]').forEach((link) => {
+        link.addEventListener('click', () => modal.remove());
+      });
+      // Click-to-expand for clamped Business Impact / Remark cells
+      body.querySelectorAll('.dws-cr-clamp').forEach((el) => {
+        if (el.scrollHeight <= el.clientHeight + 2) return; // not truncated
+        el.style.cursor = 'pointer';
+        el.title = 'Click to expand/collapse';
+        el.addEventListener('click', () => {
+          const expanded = el.dataset.expanded === '1';
+          el.style.webkitLineClamp = expanded ? '5' : 'unset';
+          el.dataset.expanded = expanded ? '' : '1';
+        });
+      });
+    } catch (err) {
+      body.innerHTML = `<div class="error">Failed to load CRs: ${escape(err.message || String(err))}</div>`;
+    }
+  };
+
   document.getElementById('btn-add-dws').onclick = () => openModal('create');
+
+  app.querySelectorAll('a[data-action="view-crs"]').forEach((link) => {
+    link.onclick = (e) => {
+      e.preventDefault();
+      const existing = apps.find((a) => a.id === link.dataset.id);
+      if (existing) openCrsModal(existing);
+    };
+  });
 
   app.querySelectorAll('button[data-action="edit"]').forEach((btn) => {
     btn.onclick = () => {
