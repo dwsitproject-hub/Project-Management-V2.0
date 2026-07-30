@@ -50,3 +50,13 @@ See **[docs/DEPLOYMENT-ALICLOUD-STAGING.md](DEPLOYMENT-ALICLOUD-STAGING.md)** fo
 - Frontend `8.215.6.189` / `172.28.92.56` — port **3030**
 - Backend `172.28.92.57` — port **3010**
 - DB `172.28.92.60` — Postgres port **5440**
+
+**Staging frontend — check / free disk (unused Docker images & build cache):**
+
+```bash
+cd /opt/Project-Management-V2.0
+git pull origin SIT
+chmod +x scripts/docker-cleanup-frontend-staging.sh
+./scripts/docker-cleanup-frontend-staging.sh        # check
+./scripts/docker-cleanup-frontend-staging.sh clean  # prune after review
+```

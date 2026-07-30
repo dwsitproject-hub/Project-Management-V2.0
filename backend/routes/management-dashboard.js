@@ -38,6 +38,11 @@ function getMilestoneLabel(m) {
   return v || '—';
 }
 
+function isLiveWarrantyMilestone(p) {
+  const m = normalizeProjectMilestone(p.milestone);
+  return m === PROJECT_MILESTONE_LIVE_WARRANTY || p.milestone === PROJECT_MILESTONE_LEGACY_LIVE;
+}
+
 function departmentNameById(departments, id) {
   if (!id) return '—';
   const dept = (departments || []).find((d) => d.id === id);
@@ -78,6 +83,7 @@ router.get('/', async (req, res) => {
   // Timeline Progress:
   // - show projects with status On Track / At Risk / Delayed
   // - plus Live projects where Actual End Date happens within this month
+  // - exclude Live (Warranty Period) milestone (shown in IT PROJECT LIVE section)
   const today = new Date();
   const monthStart = new Date(today.getFullYear(), today.getMonth(), 1);
   const monthEnd = new Date(today.getFullYear(), today.getMonth() + 1, 0);
@@ -136,6 +142,7 @@ router.get('/', async (req, res) => {
   };
 
   const timelineProjects = [...inProgressProjects, ...liveThisMonth]
+    .filter((p) => !isLiveWarrantyMilestone(p))
     .slice()
     .sort((a, b) => String(b.updatedAt || '').localeCompare(String(a.updatedAt || '')))
     .map((p) => ({
@@ -152,11 +159,6 @@ router.get('/', async (req, res) => {
       createdAt: p.createdAt || null,
       updatedAt: p.updatedAt || null,
     }));
-
-  const isLiveWarrantyMilestone = (p) => {
-    const m = normalizeProjectMilestone(p.milestone);
-    return m === PROJECT_MILESTONE_LIVE_WARRANTY || p.milestone === PROJECT_MILESTONE_LEGACY_LIVE;
-  };
 
   // IT Project Live (Warranty Period): projects at Live (Warranty Period) milestone
   const itProjectLiveWarranty = projects

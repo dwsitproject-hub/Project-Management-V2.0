@@ -326,6 +326,42 @@ docker compose -f docker-compose.staging.backend.yml --env-file .env.staging up 
 docker compose -f docker-compose.staging.frontend.yml up -d --build
 ```
 
+### Free disk space on frontend staging (unused images & build cache)
+
+Run on **frontend server** (`172.28.92.56` via AliCloud Workbench). Keeps `project_management_frontend_staging` running; does not delete volumes.
+
+```bash
+cd /opt/Project-Management-V2.0
+git pull origin SIT   # optional: get scripts/docker-cleanup-frontend-staging.sh
+chmod +x scripts/docker-cleanup-frontend-staging.sh
+
+# 1) Check only — disk usage, images, reclaimable space
+./scripts/docker-cleanup-frontend-staging.sh
+
+# 2) Clean — after reviewing the report above
+./scripts/docker-cleanup-frontend-staging.sh clean
+```
+
+One-off check (no script):
+
+```bash
+df -h /
+docker system df
+docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'
+docker images
+```
+
+One-off clean (same as production; safe while staging container is running):
+
+```bash
+docker image prune -f
+docker image prune -a -f
+docker builder prune -f
+docker container prune -f
+docker network prune -f
+docker system df
+```
+
 ---
 
 ## Troubleshooting

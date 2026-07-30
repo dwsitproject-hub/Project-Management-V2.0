@@ -2,6 +2,7 @@ import express from 'express';
 import store from '../store.js';
 import crypto from 'crypto';
 import { requireAdmin } from '../middleware/auth.js';
+import { normalizeCrMilestonePhase } from '../crTaskTemplates.js';
 
 const router = express.Router();
 
@@ -14,6 +15,50 @@ router.get('/', async (_req, res) => {
   const data = await store.read();
   const apps = (data.dwsApplications || []).slice().sort((a, b) => String(a.systemName || '').localeCompare(String(b.systemName || '')));
   res.json(apps);
+});
+
+// List CRs impacting a given DWS application (via initiatives.systemImpactedIds)
+router.get('/:id/crs', async (req, res) => {
+  const { id } = req.params;
+  const data = await store.read();
+  const appRow = (data.dwsApplications || []).find((a) => a.id === id);
+  if (!appRow) return res.status(404).json({ error: 'Not found' });
+
+  const items = (data.initiatives || [])
+    .filter((i) => i.type === 'CR')
+    .filter((i) => {
+      const raw = i.systemImpactedIds || [];
+      const ids = Array.isArray(raw)
+        ? raw
+        : String(raw).split(',').map((x) => x.trim()).filter(Boolean);
+      return ids.includes(id);
+    })
+    .map((i) => ({
+      id: i.id,
+      ticket: i.ticket || null,
+      name: i.name || null,
+      priority: i.priority || null,
+      status: i.status || null,
+      milestone: normalizeCrMilestonePhase(i.milestone),
+      businessImpact: i.businessImpact || null,
+      remark: i.remark || null,
+      createdAt: i.createdAt || null,
+    }));
+
+  // Sort: open CRs first (Live/Cancelled last), then priority P0 > P1 > P2, then oldest created first
+  const CLOSED_STATUSES = new Set(['LIVE', 'CANCELLED']);
+  const statusRank = (s) => (CLOSED_STATUSES.has(String(s || '').trim().toUpperCase()) ? 1 : 0);
+  const priorityRank = (p) => {
+    const v = String(p || '').trim().toUpperCase();
+    return v === 'P0' ? 0 : v === 'P1' ? 1 : v === 'P2' ? 2 : 3;
+  };
+  items.sort((a, b) =>
+    (statusRank(a.status) - statusRank(b.status)) ||
+    (priorityRank(a.priority) - priorityRank(b.priority)) ||
+    String(a.createdAt || '9999').localeCompare(String(b.createdAt || '9999'))
+  );
+
+  res.json({ systemName: appRow.systemName, items });
 });
 
 router.post('/', async (req, res) => {

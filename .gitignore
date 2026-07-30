@@ -82,3 +82,6 @@ ntuser.*
 .lesshst
 test-results/
 
+# User-uploaded documents (persisted on host via docker volume; may be sensitive)
+uploads/
+
