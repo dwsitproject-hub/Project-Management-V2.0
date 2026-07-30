@@ -10903,6 +10903,52 @@ async function renderCRDashboard() {
   }
 }
 
+// SSO landing route. The backend redirects here after a DWS Hub login with the
+// app token (or an error) in the URL fragment: #sso?token=... / #sso?error=...
+async function renderSso() {
+  setActive('#auth');
+  const h = location.hash || '';
+  const qs = h.includes('?') ? h.slice(h.indexOf('?') + 1) : '';
+  const params = new URLSearchParams(qs);
+  const token = params.get('token');
+  const error = params.get('error');
+
+  const failCard = (msg) => {
+    app.innerHTML = `
+      <div class="card auth-card">
+        <h2>SSO Sign-in Failed</h2>
+        <p class="error">${escapeHtml(msg)}</p>
+        <a href="#auth"><button class="primary">Back to Login</button></a>
+      </div>`;
+  };
+
+  if (error) {
+    // Drop the error from the URL so it doesn't linger in history.
+    history.replaceState(null, '', location.pathname + location.search);
+    return failCard(error);
+  }
+
+  if (token) {
+    setToken(token);
+    // Strip the token from the URL/history immediately.
+    history.replaceState(null, '', location.pathname + location.search);
+    try {
+      const user = await getCurrentUser();
+      if (user) {
+        currentUser = user;
+        updateNavAuth();
+        location.hash = '#user-dashboard';
+        return;
+      }
+    } catch (_) { /* fall through to failure */ }
+    setToken(null);
+    return failCard('Could not establish your session. Please try again.');
+  }
+
+  // Nothing actionable — go to the normal login page.
+  location.hash = '#auth';
+}
+
 function renderAuth() {
   setActive('#auth');
   app.innerHTML = `
@@ -10969,6 +11015,31 @@ function renderAuth() {
       });
     };
   });
+
+  // SSO (DWS Hub): show a "Sign in with DWS Hub" button only if the backend has
+  // OIDC configured. Local email/password login above is unaffected either way.
+  (async () => {
+    try {
+      const res = await fetch('/api/auth/sso/config');
+      if (!res.ok) return;
+      const cfg = await res.json();
+      if (!cfg || !cfg.oidc) return;
+      const loginForm = document.getElementById('form-login');
+      if (!loginForm) return;
+      // Guard against double-injection if renderAuth() runs more than once
+      // before this async probe resolves.
+      if (loginForm.querySelector('.sso-button')) return;
+      const divider = document.createElement('div');
+      divider.className = 'sso-divider';
+      divider.innerHTML = '<span>or</span>';
+      const ssoBtn = document.createElement('a');
+      ssoBtn.href = '/api/auth/sso/oidc/login';
+      ssoBtn.className = 'sso-button';
+      ssoBtn.textContent = 'Sign in with DWS Hub';
+      loginForm.appendChild(divider);
+      loginForm.appendChild(ssoBtn);
+    } catch (_) { /* SSO is optional; ignore probe failures */ }
+  })();
 
   document.getElementById('form-login').onsubmit = async e => {
     e.preventDefault();
@@ -11313,6 +11384,7 @@ async function router() {
   }
   
   try {
+    if (h.startsWith('#sso')) return renderSso();
     if (h.startsWith('#auth')) return renderAuth();
     if (h.startsWith('#activate/')) return renderActivate(h.split('/')[1]);
     if (h.startsWith('#reset-password/')) return renderResetPassword(h.split('/')[1]);
