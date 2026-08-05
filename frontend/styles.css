@@ -770,8 +770,12 @@ main {
     overflow-x: auto;
     -webkit-overflow-scrolling: touch;
   }
+
+  .table-scroll-pair .table-wrapper {
+    max-height: min(65vh, calc(100vh - 220px));
+  }
   
-  .table-wrapper table {
+  .table-wrapper table:not(#initiatives-table):not(#cr-table) {
     min-width: 800px;
   }
   
@@ -1416,6 +1420,8 @@ button.primary:hover {
 /* Synced top + bottom horizontal scroll for wide lists */
 .table-scroll-pair {
   position: relative;
+  /* Shrink to table content; don't leave a full-width empty card */
+  width: fit-content;
   max-width: 100%;
 }
 
@@ -1502,15 +1508,25 @@ tr.list-empty-row td {
   max-width: 100%;
 }
 
+/* Project / CR lists: fit content width + internal scroll for sticky headers */
+.table-scroll-pair .table-wrapper {
+  width: fit-content;
+  max-width: 100%;
+  max-height: min(70vh, calc(100vh - 260px));
+  overflow: auto;
+}
+
 /* Ensure table background extends when scrolling horizontally.
    Use max-content so many columns keep readable widths instead of
-   being crushed to fit the viewport (which caused vertical letter stacking). */
+   being crushed to fit the viewport (which caused vertical letter stacking).
+   No min-width:100% — that stretched tables into empty horizontal space. */
 #initiatives-table,
 #cr-table {
   background: var(--color-bg-lighter);
   table-layout: fixed;
   width: max-content;
-  min-width: 100%;
+  max-width: none;
+  min-width: 0;
   border-collapse: separate;
   border-spacing: 0;
 }
@@ -1518,9 +1534,6 @@ tr.list-empty-row td {
 #initiatives-table thead,
 #cr-table thead {
   background: var(--color-bg-lighter);
-  position: sticky;
-  top: 0;
-  z-index: 20;
 }
 
 #initiatives-table thead tr,
@@ -1530,6 +1543,9 @@ tr.list-empty-row td {
 
 #initiatives-table thead th,
 #cr-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 20;
   background: var(--color-bg-lighter);
   white-space: nowrap;
   word-break: normal;
@@ -1537,6 +1553,7 @@ tr.list-empty-row td {
   line-height: 1.3;
   vertical-align: middle;
   box-sizing: border-box;
+  box-shadow: inset 0 -1px 0 var(--border-light);
 }
 
 #initiatives-table tbody td,
@@ -3399,8 +3416,16 @@ button.btn-fixed.primary:hover {
 #cr-table td.col-ticket {
   position: sticky;
   left: 0;
-  z-index: 30;
+  z-index: 15;
   background: var(--color-bg-lighter);
+}
+
+/* Corner cell: sticky top + left stays above body + other headers */
+#initiatives-table thead th.col-ticket,
+#cr-table thead th.col-ticket {
+  z-index: 40;
+  top: 0;
+  left: 0;
 }
 
 .milestone-cell {
