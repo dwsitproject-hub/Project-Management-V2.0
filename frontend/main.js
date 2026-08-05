@@ -132,6 +132,709 @@ function setActive(hash) {
   if (el) el.classList.add('active');
 }
 
+function showToast(message, type = 'info', options = {}) {
+  const root = document.getElementById('toast-root') || (() => {
+    const el = document.createElement('div');
+    el.id = 'toast-root';
+    el.className = 'toast-root';
+    el.setAttribute('aria-live', 'polite');
+    document.body.appendChild(el);
+    return el;
+  })();
+  const toast = document.createElement('div');
+  toast.className = `toast toast-${type}`;
+  toast.setAttribute('role', type === 'error' ? 'alert' : 'status');
+  toast.innerHTML = `
+    <div class="toast-message">${escapeHtml(String(message ?? ''))}</div>
+    <button type="button" class="toast-close" aria-label="Dismiss">×</button>
+  `;
+  const remove = () => {
+    toast.remove();
+  };
+  toast.querySelector('.toast-close').onclick = remove;
+  root.appendChild(toast);
+  const duration = options.duration ?? (type === 'error' ? 6000 : 3500);
+  if (duration > 0) setTimeout(remove, duration);
+  return toast;
+}
+
+/** Drop-in replacement for notify() with smarter toast typing */
+function notify(message, type) {
+  const msg = String(message ?? '');
+  let t = type;
+  if (!t) {
+    if (/fail|error|required|unable|must|do not match|denied|invalid|not found|at least/i.test(msg)) t = 'error';
+    else if (/success|saved|sent|updated|created|removed|deleted|undo|available/i.test(msg)) t = 'success';
+    else t = 'info';
+  }
+  return showToast(msg, t);
+}
+
+function confirmDialog(message, options = {}) {
+  const {
+    title = 'Please confirm',
+    confirmText = 'Confirm',
+    cancelText = 'Cancel',
+    danger = false,
+  } = options;
+  return new Promise((resolve) => {
+    const modal = document.createElement('div');
+    modal.className = 'modal confirm-dialog';
+    modal.innerHTML = `
+      <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="confirm-dialog-title">
+        <h3 class="confirm-title" id="confirm-dialog-title">${escapeHtml(title)}</h3>
+        <p class="confirm-message">${escapeHtml(String(message ?? ''))}</p>
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" data-action="cancel">${escapeHtml(cancelText)}</button>
+          <button type="button" class="${danger ? 'btn-danger' : 'btn-primary'}" data-action="confirm">${escapeHtml(confirmText)}</button>
+        </div>
+      </div>
+    `;
+    const finish = (value) => {
+      document.removeEventListener('keydown', onKey);
+      modal.remove();
+      resolve(value);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') finish(false);
+      if (e.key === 'Enter') finish(true);
+    };
+    modal.addEventListener('click', (e) => {
+      if (e.target === modal) finish(false);
+    });
+    modal.querySelector('[data-action="cancel"]').onclick = () => finish(false);
+    modal.querySelector('[data-action="confirm"]').onclick = () => finish(true);
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(modal);
+    modal.querySelector('[data-action="confirm"]').focus();
+  });
+}
+
+function setButtonLoading(btn, loading, loadingText = 'Working…') {
+  if (!btn) return;
+  if (loading) {
+    if (!btn.dataset.originalText) btn.dataset.originalText = btn.textContent;
+    btn.classList.add('is-loading');
+    btn.disabled = true;
+    btn.setAttribute('aria-busy', 'true');
+    btn.textContent = loadingText;
+  } else {
+    btn.classList.remove('is-loading');
+    btn.disabled = false;
+    btn.removeAttribute('aria-busy');
+    if (btn.dataset.originalText) {
+      btn.textContent = btn.dataset.originalText;
+      delete btn.dataset.originalText;
+    }
+  }
+}
+
+function nameByIdSafe(list, id) {
+  if (!id || !Array.isArray(list)) return null;
+  const found = list.find(x => String(x.id) === String(id));
+  return found?.name || found?.systemName || null;
+}
+
+function buildListFilterChips(filter, q, options = {}) {
+  const chips = [];
+  const prefix = options.paramPrefix || 'project';
+  if (q) chips.push({ param: `${prefix}_q`, label: `Search: ${q}` });
+
+  const pushMulti = (paramKey, label, values, resolve) => {
+    (values || []).forEach(v => {
+      chips.push({
+        param: paramKey,
+        value: v,
+        label: `${label}: ${resolve ? (resolve(v) || v) : v}`,
+      });
+    });
+  };
+
+  pushMulti(`${prefix}_departmentId`, 'Department', filter.departmentId, (id) => nameByIdSafe(LOOKUPS.departments, id));
+  pushMulti(`${prefix}_priority`, 'Priority', filter.priority);
+  pushMulti(`${prefix}_status`, 'Status', filter.status);
+  pushMulti(`${prefix}_milestone`, 'Milestone', filter.milestone);
+  pushMulti(`${prefix}_itPicId`, 'IT PIC', filter.itPicId, (id) => nameByIdSafe(LOOKUPS.users, id));
+  pushMulti(`${prefix}_itPmId`, 'IT PM', filter.itPmId, (id) => nameByIdSafe(LOOKUPS.users, id));
+  pushMulti(`${prefix}_itManagerId`, 'IT Manager', filter.itManagerId, (id) => nameByIdSafe(LOOKUPS.users, id));
+  pushMulti(`${prefix}_systemImpactedId`, 'System', filter.systemImpactedId, (id) => nameByIdSafe(LOOKUPS.dwsApplications, id));
+
+  const pushDate = (paramKey, label, dateFilter) => {
+    if (!dateFilter) return;
+    chips.push({
+      param: paramKey,
+      label: `${label}: ${dateFilter.operator} ${dateFilter.date}`,
+    });
+  };
+  pushDate(`${prefix}_createdAt`, 'Create Date', filter.createdAt);
+  pushDate(`${prefix}_startDate`, 'Start Date', filter.startDate);
+  pushDate(`${prefix}_endDate`, 'End Date', filter.endDate);
+
+  if (!chips.length) return '';
+  return `
+    <div class="filter-chips" id="active-filter-chips">
+      ${chips.map(c => `
+        <button type="button" class="filter-chip" data-param="${escapeHtml(c.param)}" data-value="${escapeHtml(c.value || '')}" title="Remove filter">
+          ${escapeHtml(c.label)} <span aria-hidden="true">×</span>
+        </button>
+      `).join('')}
+      <button type="button" class="filter-chip-clear" id="clear-all-list-filters">Clear all</button>
+    </div>
+  `;
+}
+
+function hasAdvancedListFilters(filter) {
+  return Boolean(
+    (filter.departmentId && filter.departmentId.length) ||
+    (filter.itPicId && filter.itPicId.length) ||
+    (filter.itPmId && filter.itPmId.length) ||
+    (filter.itManagerId && filter.itManagerId.length) ||
+    (filter.systemImpactedId && filter.systemImpactedId.length) ||
+    filter.createdAt ||
+    filter.startDate ||
+    filter.endDate
+  );
+}
+
+function wireListFilterChips(prefix, applyFn) {
+  const chips = document.getElementById('active-filter-chips');
+  if (!chips) return;
+  chips.querySelectorAll('.filter-chip').forEach(chip => {
+    chip.onclick = () => {
+      const url = new URL(location.href);
+      const param = chip.dataset.param;
+      const value = chip.dataset.value;
+      if (!param) return;
+      if (value) {
+        const current = (url.searchParams.get(param) || '').split(',').filter(Boolean);
+        const next = current.filter(v => v !== value);
+        if (next.length) url.searchParams.set(param, next.join(','));
+        else url.searchParams.delete(param);
+      } else {
+        url.searchParams.delete(param);
+      }
+      history.pushState({}, '', url);
+      applyFn();
+    };
+  });
+  const clearAll = document.getElementById('clear-all-list-filters');
+  if (clearAll) {
+    clearAll.onclick = () => {
+      const url = new URL(location.href);
+      [...url.searchParams.keys()].forEach(key => {
+        if (key.startsWith(`${prefix}_`)) url.searchParams.delete(key);
+      });
+      history.pushState({}, '', url);
+      applyFn();
+    };
+  }
+}
+
+function wireFiltersToggle() {
+  const btn = document.getElementById('filters-toggle-btn');
+  const panel = document.getElementById('toolbar-advanced');
+  if (!btn || !panel) return;
+  btn.onclick = () => {
+    const open = panel.classList.toggle('open');
+    btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+    btn.textContent = open ? 'Hide filters' : 'More filters';
+  };
+}
+
+function updateMultiSelectButtonLabel(dropdown) {
+  const wrapper = dropdown.closest('.multi-select-wrapper');
+  if (!wrapper) return;
+  const checkedCount = dropdown.querySelectorAll('.multi-select-option input[type="checkbox"]:checked').length;
+
+  const filterBtn = wrapper.querySelector('.multi-select-btn[data-filter]');
+  if (filterBtn) {
+    const baseLabel = (filterBtn.textContent || '')
+      .replace(/\s*\(\d+\)\s*$/, '')
+      .replace(/\s*▼\s*$/, '')
+      .trim();
+    filterBtn.textContent = checkedCount > 0 ? `${baseLabel} (${checkedCount})` : baseLabel;
+    return;
+  }
+
+  const fieldBtn = wrapper.querySelector('.multi-select-btn[data-field]');
+  if (fieldBtn) {
+    fieldBtn.textContent = checkedCount > 0 ? `${checkedCount} selected` : 'Select...';
+  }
+}
+
+/** Adds Select all / Uncheck all to checkbox multi-select dropdowns */
+function wireMultiSelectBulkActions(root = document) {
+  root.querySelectorAll('.multi-select-dropdown').forEach((dropdown) => {
+    if (dropdown.closest('.date-filter-wrapper')) return;
+    if (dropdown.querySelector('.date-filter-content')) return;
+    const options = dropdown.querySelectorAll('.multi-select-option input[type="checkbox"]');
+    if (!options.length) return;
+    if (dropdown.querySelector('.multi-select-bulk-actions')) return;
+
+    const bar = document.createElement('div');
+    bar.className = 'multi-select-bulk-actions';
+    bar.innerHTML = `
+      <button type="button" class="btn-link multi-select-check-all">Select all</button>
+      <span class="control-separator">|</span>
+      <button type="button" class="btn-link multi-select-uncheck-all">Uncheck all</button>
+    `;
+
+    const optionsContainer = dropdown.querySelector('.multi-select-options');
+    const searchBox = dropdown.querySelector('.multi-select-search');
+    if (optionsContainer) {
+      optionsContainer.parentNode.insertBefore(bar, optionsContainer);
+    } else if (searchBox) {
+      searchBox.insertAdjacentElement('afterend', bar);
+    } else {
+      dropdown.insertBefore(bar, dropdown.firstChild);
+    }
+
+    const setAll = (checked) => {
+      dropdown.querySelectorAll('.multi-select-option').forEach((opt) => {
+        if (opt.style.display === 'none') return;
+        const cb = opt.querySelector('input[type="checkbox"]');
+        if (!cb || cb.disabled) return;
+        if (cb.checked === checked) return;
+        cb.checked = checked;
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+      updateMultiSelectButtonLabel(dropdown);
+    };
+
+    bar.querySelector('.multi-select-check-all').onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setAll(true);
+    };
+    bar.querySelector('.multi-select-uncheck-all').onclick = (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setAll(false);
+    };
+    bar.onclick = (e) => e.stopPropagation();
+  });
+}
+
+function wireMilestoneGraphToggle() {
+  const btn = document.getElementById('milestone-graph-toggle');
+  const body = document.getElementById('milestone-graph-body');
+  if (!btn || !body) return;
+  btn.onclick = () => {
+    const hidden = body.classList.toggle('hidden');
+    btn.setAttribute('aria-expanded', hidden ? 'false' : 'true');
+    btn.querySelector('.milestone-graph-toggle-label').textContent = hidden
+      ? 'Show milestone distribution'
+      : 'Hide milestone distribution';
+  };
+}
+
+const __listSoftRefreshSeq = { list: 0, crlist: 0 };
+
+function listSearchFieldHtml(q = '') {
+  const value = escapeHtml(q || '');
+  return `
+    <div class="search-group">
+      <div class="list-search-field">
+        <input id="search" type="search" placeholder="Search by name, ticket, or description..." value="${value}" autocomplete="off">
+        <button type="button" id="search-clear-btn" class="list-search-clear ${q ? '' : 'hidden'}" aria-label="Clear search" title="Clear search">×</button>
+      </div>
+    </div>
+  `;
+}
+
+function listResultsMetaHtml(count, q, noun = 'result') {
+  const safeQ = escapeHtml(q || '');
+  if (!count) {
+    return q
+      ? `No matches for “${safeQ}”`
+      : `No ${noun}s found`;
+  }
+  const label = count === 1 ? noun : `${noun}s`;
+  return q
+    ? `Showing <strong>${count}</strong> ${label} for “${safeQ}”`
+    : `Showing <strong>${count}</strong> ${label}`;
+}
+
+function listEmptyStateRow(colSpan, q, noun = 'items') {
+  const title = q ? `No matches for “${escapeHtml(q)}”` : `No ${noun} found`;
+  const sub = q
+    ? 'Try a different search term, or clear search to see all results.'
+    : 'Try adjusting your filters.';
+  return `
+    <tr class="list-empty-row">
+      <td colspan="${Math.max(1, colSpan)}">
+        <div class="empty-state list-empty-state">
+          <div class="empty-state-text">${title}</div>
+          <div class="empty-state-subtext">${sub}</div>
+        </div>
+      </td>
+    </tr>
+  `;
+}
+
+function countVisibleTableColumns(table) {
+  if (!table) return 1;
+  const ths = [...table.querySelectorAll('thead th')];
+  const visible = ths.filter((th) => th.style.display !== 'none');
+  return visible.length || ths.length || 1;
+}
+
+function setListTableLoading(container, loading) {
+  if (!container) return;
+  let overlay = container.querySelector('.table-loading-overlay');
+  if (loading) {
+    container.classList.add('is-loading');
+    if (!overlay) {
+      overlay = document.createElement('div');
+      overlay.className = 'table-loading-overlay';
+      overlay.innerHTML = `<div class="table-loading-panel"><span class="table-loading-spinner" aria-hidden="true"></span><span>Updating results…</span></div>`;
+      container.appendChild(overlay);
+    }
+    overlay.classList.remove('hidden');
+  } else {
+    container.classList.remove('is-loading');
+    if (overlay) overlay.classList.add('hidden');
+  }
+}
+
+function updateListResultsMeta(count, q, noun = 'result') {
+  const meta = document.getElementById('list-results-meta');
+  if (meta) meta.innerHTML = listResultsMetaHtml(count, q, noun);
+}
+
+function updateListFilterChipsHost(filter, q, prefix) {
+  const host = document.getElementById('list-filter-chips-host');
+  if (!host) return;
+  host.innerHTML = buildListFilterChips(filter, q, { paramPrefix: prefix });
+  wireListFilterChips(prefix, () => {
+    if (prefix === 'cr') renderCRList();
+    else renderList();
+  });
+}
+
+function syncSearchClearButton() {
+  const searchEl = document.getElementById('search');
+  const clearBtn = document.getElementById('search-clear-btn');
+  if (!searchEl || !clearBtn) return;
+  clearBtn.classList.toggle('hidden', !searchEl.value);
+}
+
+function parseListUrlState(prefix) {
+  const urlParams = new URLSearchParams(location.search);
+  const parseFilter = (key) => {
+    const val = urlParams.get(key);
+    return val ? val.split(',').filter((v) => v) : [];
+  };
+  const parseDateFilter = (key) => {
+    const val = urlParams.get(key);
+    if (!val) return null;
+    const parts = val.split(':');
+    if (parts.length === 2) return { operator: parts[0], date: parts[1] };
+    return null;
+  };
+  return {
+    q: urlParams.get(`${prefix}_q`) || '',
+    sortParam: urlParams.get(`${prefix}_sort`) || '',
+    filter: {
+      departmentId: parseFilter(`${prefix}_departmentId`),
+      priority: parseFilter(`${prefix}_priority`),
+      status: parseFilter(`${prefix}_status`),
+      milestone: parseFilter(`${prefix}_milestone`),
+      itPicId: parseFilter(`${prefix}_itPicId`),
+      itPmId: parseFilter(`${prefix}_itPmId`),
+      itManagerId: parseFilter(`${prefix}_itManagerId`),
+      systemImpactedId: parseFilter(`${prefix}_systemImpactedId`),
+      createdAt: parseDateFilter(`${prefix}_createdAt`),
+      startDate: parseDateFilter(`${prefix}_startDate`),
+      endDate: parseDateFilter(`${prefix}_endDate`),
+    },
+  };
+}
+
+function applyClientDateAndManagerFilters(data, filter) {
+  let rows = data;
+  const applyDate = (field, dateFilter) => {
+    if (!dateFilter) return;
+    const filterDate = new Date(dateFilter.date);
+    rows = rows.filter((i) => {
+      if (!i[field]) return false;
+      const itemDate = new Date(i[field]);
+      if (dateFilter.operator === 'eq') return itemDate.toDateString() === filterDate.toDateString();
+      if (dateFilter.operator === 'gte') return itemDate >= filterDate;
+      if (dateFilter.operator === 'lte') return itemDate <= filterDate;
+      return true;
+    });
+  };
+  applyDate('createdAt', filter.createdAt);
+  applyDate('startDate', filter.startDate);
+  applyDate('endDate', filter.endDate);
+  if (filter.itManagerId.length > 0) {
+    rows = rows.filter((i) => {
+      const raw = i.itManagerIds || i.itManagerId || [];
+      const ids = Array.isArray(raw)
+        ? raw
+        : String(raw).split(',').map((v) => v.trim()).filter(Boolean);
+      return filter.itManagerId.some((sel) => ids.includes(sel));
+    });
+  }
+  return rows;
+}
+
+function wireListTableRowActions(viewType) {
+  const isCR = viewType === 'crlist';
+  const refresh = () => (isCR
+    ? softRefreshListTable('crlist')
+    : softRefreshListTable('list'));
+
+  document.querySelectorAll('button.delete').forEach((btn) => {
+    btn.onclick = async () => {
+      const ok = await confirmDialog(isCR ? 'Delete this CR?' : 'Delete this initiative?', {
+        title: isCR ? 'Delete CR' : 'Delete initiative',
+        confirmText: 'Delete',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        const result = await fetchJSON(`/api/initiatives/${btn.dataset.id}`, { method: 'DELETE' });
+        if (result?.trashId) {
+          const undo = await confirmDialog(isCR ? 'CR deleted. Undo?' : 'Initiative deleted. Undo?', {
+            title: 'Undo delete',
+            confirmText: 'Undo',
+          });
+          if (undo) {
+            await fetchJSON(`/api/initiatives/restore/${result.trashId}`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            });
+          }
+        }
+        refresh();
+      } catch (e) {
+        notify(`Failed to delete ${isCR ? 'CR' : 'initiative'}: ` + (e.message || String(e)));
+      }
+    };
+  });
+  document.querySelectorAll('button.view').forEach((btn) => {
+    btn.onclick = () => { location.hash = `#view/${btn.dataset.id}`; };
+  });
+  document.querySelectorAll('button.edit').forEach((btn) => {
+    btn.onclick = () => { location.hash = `#edit/${btn.dataset.id}`; };
+  });
+}
+
+function wireListSearchControls(viewType) {
+  const isCR = viewType === 'crlist';
+  const prefix = isCR ? 'cr' : 'project';
+  const searchEl = document.getElementById('search');
+  const clearBtn = document.getElementById('search-clear-btn');
+  if (!searchEl) return;
+
+  syncSearchClearButton();
+
+  let debounceTimer = null;
+  const commitSearch = (immediate = false) => {
+    const run = () => {
+      const url = new URL(location.href);
+      const val = searchEl.value.trim();
+      if (val) url.searchParams.set(`${prefix}_q`, val);
+      else url.searchParams.delete(`${prefix}_q`);
+      // Keep typed value even with trailing spaces visually; store trimmed in URL
+      history.pushState({}, '', url);
+      syncSearchClearButton();
+      softRefreshListTable(viewType, { preserveSearch: true });
+    };
+    if (immediate) {
+      if (debounceTimer) clearTimeout(debounceTimer);
+      run();
+      return;
+    }
+    if (debounceTimer) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(run, 350);
+  };
+
+  searchEl.addEventListener('input', () => {
+    syncSearchClearButton();
+    commitSearch(false);
+  });
+  searchEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitSearch(true);
+      return;
+    }
+    if (e.key === 'Escape') {
+      // Let Escape close an open filter dropdown first; only then clear search.
+      if (document.querySelector('.multi-select-dropdown.open, .date-filter-dropdown.open')) return;
+      if (!searchEl.value) return;
+      e.preventDefault();
+      searchEl.value = '';
+      syncSearchClearButton();
+      commitSearch(true);
+    }
+  });
+
+  if (clearBtn) {
+    clearBtn.onclick = (e) => {
+      e.preventDefault();
+      searchEl.value = '';
+      syncSearchClearButton();
+      searchEl.focus();
+      commitSearch(true);
+    };
+  }
+}
+
+async function softRefreshListTable(viewType = 'list', options = {}) {
+  const isCR = viewType === 'crlist';
+  const tableId = isCR ? 'cr-table' : 'initiatives-table';
+  const table = document.getElementById(tableId);
+  if (!table) {
+    return isCR ? renderCRList() : renderList();
+  }
+
+  const seq = ++__listSoftRefreshSeq[viewType];
+  const prefix = isCR ? 'cr' : 'project';
+  const noun = isCR ? 'CR' : 'project';
+  const scrollPair = table.closest('.table-scroll-pair') || table.parentElement;
+  const searchEl = document.getElementById('search');
+  const selection = options.preserveSearch && searchEl
+    ? { start: searchEl.selectionStart, end: searchEl.selectionEnd }
+    : null;
+
+  setListTableLoading(scrollPair, true);
+  try {
+    await ensureLookups();
+    const access = await getUserAccess();
+    const user = currentUser || (await getCurrentUser());
+    if (!access || !user) {
+      app.innerHTML = `<div class="card"><h2>Access Denied</h2><p class="error">You must be logged in.</p></div>`;
+      return;
+    }
+    if (!isCR && !access.canViewProjectList) {
+      app.innerHTML = `<div class="card"><h2>Access Denied</h2><p class="error">You do not have access to Project List.</p></div>`;
+      return;
+    }
+
+    const { q, sortParam, filter } = parseListUrlState(prefix);
+    const apiQs = new URLSearchParams();
+    apiQs.set('type', isCR ? 'CR' : 'Project');
+    if (q) apiQs.set('q', q);
+    if (filter.departmentId.length) apiQs.set('departmentId', filter.departmentId.join(','));
+    if (filter.priority.length) apiQs.set('priority', filter.priority.join(','));
+    if (filter.status.length) apiQs.set('status', filter.status.join(','));
+    if (filter.milestone.length) apiQs.set('milestone', filter.milestone.join(','));
+    if (filter.itPicId.length) apiQs.set('itPicId', filter.itPicId.join(','));
+    if (filter.itPmId.length) apiQs.set('itPmId', filter.itPmId.join(','));
+    if (filter.systemImpactedId.length) apiQs.set('systemImpactedId', filter.systemImpactedId.join(','));
+
+    let data = await fetchJSON('/api/initiatives?' + apiQs.toString());
+    if (seq !== __listSoftRefreshSeq[viewType]) return;
+
+    if (!isCR && access.restrictProjectVisibilityToOwnTeamOnly && user) {
+      const userId = String(user.id);
+      const normalizeIds = (val) => {
+        if (!val) return [];
+        if (Array.isArray(val)) return val.map((v) => String(v).trim()).filter(Boolean);
+        if (typeof val === 'string') return val.split(',').map((v) => v.trim()).filter(Boolean);
+        return [];
+      };
+      const check = (id) => id && String(id) === userId;
+      data = data.filter((initiative) => {
+        if (check(initiative.itPicId)) return true;
+        if (normalizeIds(initiative.itPicIds).some(check)) return true;
+        if (check(initiative.itPmId)) return true;
+        if (normalizeIds(initiative.itPmIds).some(check)) return true;
+        if (normalizeIds(initiative.itManagerIds).some(check)) return true;
+        if (check(initiative.businessOwnerId)) return true;
+        if (normalizeIds(initiative.businessUserIds).some(check)) return true;
+        return false;
+      });
+    }
+
+    data = applyClientDateAndManagerFilters(data, filter);
+
+    if (sortParam) {
+      const [key, dir] = sortParam.split(':');
+      const dirMul = dir === 'desc' ? -1 : 1;
+      const nameFor = (keyName, id) => {
+        if (keyName === 'departmentId') return nameById(LOOKUPS.departments, id);
+        if (keyName === 'businessOwnerId' || keyName === 'itPicId') return nameById(LOOKUPS.users, id);
+        return id || '';
+      };
+      data = data.slice().sort((a, b) => {
+        let va;
+        let vb;
+        if (key === 'systemImpactedIds') {
+          va = dwsSystemNamesFromInitiative(a).toLowerCase();
+          vb = dwsSystemNamesFromInitiative(b).toLowerCase();
+        } else if (key === 'milestone' && isCR) {
+          va = String(normalizeCrMilestoneForDisplay(a) || '').toLowerCase();
+          vb = String(normalizeCrMilestoneForDisplay(b) || '').toLowerCase();
+        } else if (key.endsWith('Id')) {
+          va = nameFor(key, a[key]);
+          vb = nameFor(key, b[key]);
+        } else if (key === 'businessImpact' || key === 'remark' || key === 'documentationLink') {
+          va = String(a[key] || '').toLowerCase();
+          vb = String(b[key] || '').toLowerCase();
+        } else {
+          va = a[key] || '';
+          vb = b[key] || '';
+        }
+        return String(va).localeCompare(String(vb)) * dirMul;
+      });
+    }
+
+    const colVisibility = resolveColumnVisibility(viewType);
+    const tbody = table.querySelector('tbody');
+    const colSpan = countVisibleTableColumns(table);
+    if (!data.length) {
+      tbody.innerHTML = listEmptyStateRow(colSpan, q, isCR ? 'CRs' : 'projects');
+    } else if (isCR) {
+      const dataWithCR = data.map((initiative) => ({ initiative, crData: initiative.cr }));
+      window.__crListExport = { rows: dataWithCR, colVisibility };
+      tbody.innerHTML = dataWithCR.map((item) => initiativeRow(item.initiative, item.crData, colVisibility)).join('');
+    } else {
+      tbody.innerHTML = data.map((i) => initiativeRow(i, null, colVisibility)).join('');
+    }
+
+    updateListResultsMeta(data.length, q, noun);
+    updateListFilterChipsHost(filter, q, prefix);
+    syncSearchClearButton();
+    wireListTableRowActions(viewType);
+    applyColumnWidths(viewType, `#${tableId}`);
+
+    // Refresh scroll affordances without rebinding listeners (avoid stacking on soft refresh)
+    if (scrollPair) {
+      const wrap = scrollPair.querySelector('.table-wrapper');
+      const inner = scrollPair.querySelector('.table-scroll-top-inner');
+      if (wrap && inner) {
+        inner.style.width = `${Math.max(wrap.scrollWidth, wrap.clientWidth)}px`;
+        const { scrollLeft, scrollWidth, clientWidth } = wrap;
+        wrap.classList.toggle('has-left-shadow', scrollLeft > 1);
+        wrap.classList.toggle('has-right-shadow', scrollWidth - clientWidth - scrollLeft > 1);
+      }
+    }
+
+    // Keep typed text if URL was trimmed differently
+    if (searchEl && document.activeElement === searchEl && selection) {
+      try {
+        searchEl.setSelectionRange(selection.start, selection.end);
+      } catch (_) {
+        /* ignore */
+      }
+    }
+  } catch (e) {
+    if (seq === __listSoftRefreshSeq[viewType]) {
+      notify(`Failed to update ${isCR ? 'CR' : 'project'} list: ${e.message || String(e)}`);
+    }
+  } finally {
+    if (seq === __listSoftRefreshSeq[viewType]) {
+      setListTableLoading(scrollPair, false);
+    }
+  }
+}
+
 function getToken() {
   return localStorage.getItem('pm_token') || null;
 }
@@ -401,6 +1104,36 @@ if (typeof window !== 'undefined' && !window.__pmColumnModalBackdropBound) {
 }
 
 // Column width management (persist per viewType)
+const COLUMN_WIDTH_DEFAULTS = {
+  'col-ticket': 140,
+  'col-name': 220,
+  'col-priority': 100,
+  'col-status': 120,
+  'col-milestone': 140,
+  'col-department': 140,
+  'col-system-impacted': 150,
+  'col-owner': 150,
+  'col-pic': 120,
+  'col-start-date': 120,
+  'col-create-date': 120,
+  'col-end-date': 120,
+  'col-plan-start-date': 120,
+  'col-plan-end-date': 120,
+  'col-age-created-to-start': 120,
+  'col-cycle-time': 120,
+  'col-description': 220,
+  'col-impact': 200,
+  'col-remark': 160,
+  'col-doc': 160,
+  'col-doc-link': 200,
+  'col-timeline': 280,
+  'col-actions': 140,
+};
+
+function getColumnMinWidth(colClass) {
+  return COLUMN_WIDTH_DEFAULTS[colClass] || 100;
+}
+
 function getColumnWidths(viewType = 'list') {
   const key = `pm_column_widths_${viewType}`;
   const saved = localStorage.getItem(key);
@@ -422,21 +1155,23 @@ function saveColumnWidths(viewType, widths) {
 function applyColumnWidths(viewType, tableSelector) {
   const table = document.querySelector(tableSelector);
   if (!table) return;
-  const widths = getColumnWidths(viewType);
-  if (!widths) return;
+  const saved = getColumnWidths(viewType) || {};
 
-  // Apply to headers (by data-col)
+  // Always apply defaults first so missing/broken saved widths can't crush columns.
   table.querySelectorAll('thead th[data-col]').forEach(th => {
     const col = th.dataset.col;
-    const w = widths[col];
-    if (w) th.style.width = `${w}px`;
-  });
-
-  // Apply to body cells (by matching class name like "col-description")
-  Object.entries(widths).forEach(([colClass, w]) => {
-    if (!w) return;
-    table.querySelectorAll(`tbody td.${colClass}`).forEach(td => {
+    if (!col) return;
+    const minW = getColumnMinWidth(col);
+    let w = Number(saved[col]);
+    if (!Number.isFinite(w) || w < minW) w = minW;
+    w = Math.min(560, w);
+    th.style.width = `${w}px`;
+    th.style.minWidth = `${w}px`;
+    th.style.maxWidth = `${w}px`;
+    table.querySelectorAll(`tbody td.${col}`).forEach(td => {
       td.style.width = `${w}px`;
+      td.style.minWidth = `${w}px`;
+      td.style.maxWidth = `${w}px`;
     });
   });
 }
@@ -1663,7 +2398,7 @@ function exportCellValueForCR(i, key) {
 window.exportCRListToExcel = function exportCRListToExcel() {
   const pack = window.__crListExport;
   if (!pack || !Array.isArray(pack.rows) || pack.rows.length === 0) {
-    alert('No CR rows to export. Apply filters or refresh the list.');
+    notify('No CR rows to export. Apply filters or refresh the list.');
     return;
   }
   const colVisibility = pack.colVisibility || getDefaultColumns('crlist');
@@ -2043,46 +2778,37 @@ async function renderList() {
     return String(raw);
   };
 
+  const advancedOpen = hasAdvancedListFilters(filter);
   app.innerHTML = `
-    <div class="milestone-graph">
-      <h3>Milestone Distribution</h3>
-      <div class="milestone-flow">
-        ${uiMilestones.map((m, index) => {
-          const count = milestoneCounts[m] || 0;
-          const isLast = index === uiMilestones.length - 1;
-          const displayName = milestoneDisplayNames[m] || m;
-          const color = milestoneColors[m] || 'var(--brand)';
-          return `
-            <div class="milestone-step">
-              <div class="milestone-circle ${count > 0 ? 'active' : ''}" style="${count > 0 ? `border-color: ${color}; background: linear-gradient(135deg, ${color}15 0%, ${color}25 100%);` : ''}">
-                <div class="milestone-name">${displayName}</div>
-                <div class="milestone-count-badge" style="background: ${count > 0 ? color : 'var(--muted)'}">${count}</div>
+    <div class="milestone-graph collapsed-by-default">
+      <button type="button" class="milestone-graph-toggle" id="milestone-graph-toggle" aria-expanded="false">
+        <span class="milestone-graph-toggle-label">Show milestone distribution</span>
+      </button>
+      <div class="milestone-graph-body hidden" id="milestone-graph-body">
+        <h3>Milestone Distribution</h3>
+        <div class="milestone-flow">
+          ${uiMilestones.map((m, index) => {
+            const count = milestoneCounts[m] || 0;
+            const isLast = index === uiMilestones.length - 1;
+            const displayName = milestoneDisplayNames[m] || m;
+            const color = milestoneColors[m] || 'var(--brand)';
+            return `
+              <div class="milestone-step">
+                <div class="milestone-circle ${count > 0 ? 'active' : ''}" style="${count > 0 ? `border-color: ${color}; background: linear-gradient(135deg, ${color}15 0%, ${color}25 100%);` : ''}">
+                  <div class="milestone-name">${displayName}</div>
+                  <div class="milestone-count-badge" style="background: ${count > 0 ? color : 'var(--muted)'}">${count}</div>
+                </div>
+                ${!isLast ? '<div class="milestone-arrow">→</div>' : ''}
               </div>
-              ${!isLast ? '<div class="milestone-arrow">→</div>' : ''}
-            </div>
-          `;
-        }).join('')}
+            `;
+          }).join('')}
+        </div>
       </div>
     </div>
     <div class="toolbar">
-      <div class="toolbar-row">
-        <div class="search-group">
-          <input id="search" placeholder="Search by name, ticket..." value="${q}">
-        </div>
-        <div class="filter-group">
-          <div class="multi-select-wrapper">
-            <button class="multi-select-btn" data-filter="fDepartment">
-              Department ${filter.departmentId.length > 0 ? `(${filter.departmentId.length})` : ''}
-            </button>
-            <div class="multi-select-dropdown" id="dropdown-fDepartment">
-              ${LOOKUPS.departments.map(d => `
-                <label class="multi-select-option">
-                  <input type="checkbox" value="${d.id}" ${filter.departmentId.includes(d.id) ? 'checked' : ''}>
-                  ${d.name}
-                </label>
-              `).join('')}
-            </div>
-          </div>
+      <div class="toolbar-primary">
+        ${listSearchFieldHtml(q)}
+        <div class="filter-group" id="basic-filters">
           <div class="multi-select-wrapper">
             <button class="multi-select-btn" data-filter="fPriority">
               Priority ${filter.priority.length > 0 ? `(${filter.priority.length})` : ''}
@@ -2122,113 +2848,135 @@ async function renderList() {
               `).join('')}
             </div>
           </div>
-          <div class="multi-select-wrapper">
-            <button class="multi-select-btn" data-filter="fItPic">
-              IT PIC ${filter.itPicId.length > 0 ? `(${filter.itPicId.length})` : ''}
-            </button>
-            <div class="multi-select-dropdown" id="dropdown-fItPic">
-              ${itPicFilterUsers.map(u => `
-                <label class="multi-select-option">
-                  <input type="checkbox" value="${u.id}" ${filter.itPicId.includes(u.id) ? 'checked' : ''}>
-                  ${u.name}
-                </label>
-              `).join('')}
-            </div>
-          </div>
-          <div class="multi-select-wrapper">
-            <button class="multi-select-btn" data-filter="fItPm">
-              IT PM ${filter.itPmId.length > 0 ? `(${filter.itPmId.length})` : ''}
-            </button>
-            <div class="multi-select-dropdown" id="dropdown-fItPm">
-              ${itPmFilterUsers.map(u => `
-                <label class="multi-select-option">
-                  <input type="checkbox" value="${u.id}" ${filter.itPmId.includes(u.id) ? 'checked' : ''}>
-                  ${u.name}
-                </label>
-              `).join('')}
-            </div>
-          </div>
-          <div class="multi-select-wrapper">
-            <button class="multi-select-btn" data-filter="fItManager">
-              IT Manager ${filter.itManagerId.length > 0 ? `(${filter.itManagerId.length})` : ''}
-            </button>
-            <div class="multi-select-dropdown" id="dropdown-fItManager">
-              ${itManagerFilterUsers.map(u => `
-                <label class="multi-select-option">
-                  <input type="checkbox" value="${u.id}" ${filter.itManagerId.includes(u.id) ? 'checked' : ''}>
-                  ${u.name}
-                </label>
-              `).join('')}
-            </div>
-          </div>
-          <div class="multi-select-wrapper">
-            <button class="multi-select-btn" data-filter="fSystemImpacted">
-              System Impacted ${filter.systemImpactedId.length > 0 ? `(${filter.systemImpactedId.length})` : ''}
-            </button>
-            <div class="multi-select-dropdown" id="dropdown-fSystemImpacted">
-              ${(LOOKUPS.dwsApplications || []).map(a => `
-                <label class="multi-select-option">
-                  <input type="checkbox" value="${a.id}" ${filter.systemImpactedId.includes(a.id) ? 'checked' : ''}>
-                  ${a.systemName}
-                </label>
-              `).join('')}
-            </div>
-          </div>
-        </div>
-        <div class="date-filters-group" id="date-filters">
-          <div class="date-filter-wrapper">
-            <button class="multi-select-btn" data-filter="fCreateDate">
-              <span class="filter-label">Create Date</span> ${filter.createdAt ? '<span class="filter-active">✓</span>' : ''}
-            </button>
-            <div class="date-filter-dropdown" id="dropdown-fCreateDate">
-              <div class="date-filter-content">
-                <select id="createDate-operator" class="date-operator-select">
-                  <option value="eq" ${filter.createdAt?.operator === 'eq' ? 'selected' : ''}>Equal</option>
-                  <option value="gte" ${filter.createdAt?.operator === 'gte' ? 'selected' : ''}>≥ Greater or Equal</option>
-                  <option value="lte" ${filter.createdAt?.operator === 'lte' ? 'selected' : ''}>≤ Less or Equal</option>
-                </select>
-                <input type="date" id="createDate-value" value="${filter.createdAt?.date || ''}" class="date-input">
-              </div>
-            </div>
-          </div>
-          <div class="date-filter-wrapper">
-            <button class="multi-select-btn" data-filter="fStartDate">
-              <span class="filter-label">Actual Start Date</span> ${filter.startDate ? '<span class="filter-active">✓</span>' : ''}
-            </button>
-            <div class="date-filter-dropdown" id="dropdown-fStartDate">
-              <div class="date-filter-content">
-                <select id="startDate-operator" class="date-operator-select">
-                  <option value="eq" ${filter.startDate?.operator === 'eq' ? 'selected' : ''}>Equal</option>
-                  <option value="gte" ${filter.startDate?.operator === 'gte' ? 'selected' : ''}>≥ Greater or Equal</option>
-                  <option value="lte" ${filter.startDate?.operator === 'lte' ? 'selected' : ''}>≤ Less or Equal</option>
-                </select>
-                <input type="date" id="startDate-value" value="${filter.startDate?.date || ''}" class="date-input">
-              </div>
-            </div>
-          </div>
-          <div class="date-filter-wrapper">
-            <button class="multi-select-btn" data-filter="fEndDate">
-              <span class="filter-label">Actual End Date</span> ${filter.endDate ? '<span class="filter-active">✓</span>' : ''}
-            </button>
-            <div class="date-filter-dropdown" id="dropdown-fEndDate">
-              <div class="date-filter-content">
-                <select id="endDate-operator" class="date-operator-select">
-                  <option value="eq" ${filter.endDate?.operator === 'eq' ? 'selected' : ''}>Equal</option>
-                  <option value="gte" ${filter.endDate?.operator === 'gte' ? 'selected' : ''}>≥ Greater or Equal</option>
-                  <option value="lte" ${filter.endDate?.operator === 'lte' ? 'selected' : ''}>≤ Less or Equal</option>
-                </select>
-                <input type="date" id="endDate-value" value="${filter.endDate?.date || ''}" class="date-input">
-              </div>
-            </div>
-          </div>
+          <button type="button" class="filters-toggle-btn" id="filters-toggle-btn" aria-expanded="${advancedOpen ? 'true' : 'false'}">${advancedOpen ? 'Hide filters' : 'More filters'}</button>
         </div>
         <div class="action-group">
           <button id="btn-columns" onclick="showColumnSettings('list')" title="Column Settings" class="icon-btn">⚙️</button>
           <button id="apply-filters-btn" class="primary" onclick="applyFilters()">Apply Filters</button>
-          ${access.canCreateProject || access.isAdmin ? '<a href="#new/Project"><button class="primary">+ New Initiative</button></a>' : ''}
+          ${access.canCreateProject || access.isAdmin ? '<a href="#new/Project" class="btn primary">+ New Initiative</a>' : ''}
         </div>
       </div>
+      <div class="toolbar-advanced ${advancedOpen ? 'open' : ''}" id="toolbar-advanced">
+        <div class="toolbar-advanced-row">
+          <div class="filter-group">
+            <div class="multi-select-wrapper">
+              <button class="multi-select-btn" data-filter="fDepartment">
+                Department ${filter.departmentId.length > 0 ? `(${filter.departmentId.length})` : ''}
+              </button>
+              <div class="multi-select-dropdown" id="dropdown-fDepartment">
+                ${LOOKUPS.departments.map(d => `
+                  <label class="multi-select-option">
+                    <input type="checkbox" value="${d.id}" ${filter.departmentId.includes(d.id) ? 'checked' : ''}>
+                    ${d.name}
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+            <div class="multi-select-wrapper">
+              <button class="multi-select-btn" data-filter="fItPic">
+                IT PIC ${filter.itPicId.length > 0 ? `(${filter.itPicId.length})` : ''}
+              </button>
+              <div class="multi-select-dropdown" id="dropdown-fItPic">
+                ${itPicFilterUsers.map(u => `
+                  <label class="multi-select-option">
+                    <input type="checkbox" value="${u.id}" ${filter.itPicId.includes(u.id) ? 'checked' : ''}>
+                    ${u.name}
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+            <div class="multi-select-wrapper">
+              <button class="multi-select-btn" data-filter="fItPm">
+                IT PM ${filter.itPmId.length > 0 ? `(${filter.itPmId.length})` : ''}
+              </button>
+              <div class="multi-select-dropdown" id="dropdown-fItPm">
+                ${itPmFilterUsers.map(u => `
+                  <label class="multi-select-option">
+                    <input type="checkbox" value="${u.id}" ${filter.itPmId.includes(u.id) ? 'checked' : ''}>
+                    ${u.name}
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+            <div class="multi-select-wrapper">
+              <button class="multi-select-btn" data-filter="fItManager">
+                IT Manager ${filter.itManagerId.length > 0 ? `(${filter.itManagerId.length})` : ''}
+              </button>
+              <div class="multi-select-dropdown" id="dropdown-fItManager">
+                ${itManagerFilterUsers.map(u => `
+                  <label class="multi-select-option">
+                    <input type="checkbox" value="${u.id}" ${filter.itManagerId.includes(u.id) ? 'checked' : ''}>
+                    ${u.name}
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+            <div class="multi-select-wrapper">
+              <button class="multi-select-btn" data-filter="fSystemImpacted">
+                System Impacted ${filter.systemImpactedId.length > 0 ? `(${filter.systemImpactedId.length})` : ''}
+              </button>
+              <div class="multi-select-dropdown" id="dropdown-fSystemImpacted">
+                ${(LOOKUPS.dwsApplications || []).map(a => `
+                  <label class="multi-select-option">
+                    <input type="checkbox" value="${a.id}" ${filter.systemImpactedId.includes(a.id) ? 'checked' : ''}>
+                    ${a.systemName}
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+          </div>
+          <div class="date-filters-group" id="date-filters">
+            <div class="date-filter-wrapper">
+              <button class="multi-select-btn" data-filter="fCreateDate">
+                <span class="filter-label">Create Date</span> ${filter.createdAt ? '<span class="filter-active">✓</span>' : ''}
+              </button>
+              <div class="date-filter-dropdown" id="dropdown-fCreateDate">
+                <div class="date-filter-content">
+                  <select id="createDate-operator" class="date-operator-select">
+                    <option value="eq" ${filter.createdAt?.operator === 'eq' ? 'selected' : ''}>Equal</option>
+                    <option value="gte" ${filter.createdAt?.operator === 'gte' ? 'selected' : ''}>≥ Greater or Equal</option>
+                    <option value="lte" ${filter.createdAt?.operator === 'lte' ? 'selected' : ''}>≤ Less or Equal</option>
+                  </select>
+                  <input type="date" id="createDate-value" value="${filter.createdAt?.date || ''}" class="date-input">
+                </div>
+              </div>
+            </div>
+            <div class="date-filter-wrapper">
+              <button class="multi-select-btn" data-filter="fStartDate">
+                <span class="filter-label">Actual Start Date</span> ${filter.startDate ? '<span class="filter-active">✓</span>' : ''}
+              </button>
+              <div class="date-filter-dropdown" id="dropdown-fStartDate">
+                <div class="date-filter-content">
+                  <select id="startDate-operator" class="date-operator-select">
+                    <option value="eq" ${filter.startDate?.operator === 'eq' ? 'selected' : ''}>Equal</option>
+                    <option value="gte" ${filter.startDate?.operator === 'gte' ? 'selected' : ''}>≥ Greater or Equal</option>
+                    <option value="lte" ${filter.startDate?.operator === 'lte' ? 'selected' : ''}>≤ Less or Equal</option>
+                  </select>
+                  <input type="date" id="startDate-value" value="${filter.startDate?.date || ''}" class="date-input">
+                </div>
+              </div>
+            </div>
+            <div class="date-filter-wrapper">
+              <button class="multi-select-btn" data-filter="fEndDate">
+                <span class="filter-label">Actual End Date</span> ${filter.endDate ? '<span class="filter-active">✓</span>' : ''}
+              </button>
+              <div class="date-filter-dropdown" id="dropdown-fEndDate">
+                <div class="date-filter-content">
+                  <select id="endDate-operator" class="date-operator-select">
+                    <option value="eq" ${filter.endDate?.operator === 'eq' ? 'selected' : ''}>Equal</option>
+                    <option value="gte" ${filter.endDate?.operator === 'gte' ? 'selected' : ''}>≥ Greater or Equal</option>
+                    <option value="lte" ${filter.endDate?.operator === 'lte' ? 'selected' : ''}>≤ Less or Equal</option>
+                  </select>
+                  <input type="date" id="endDate-value" value="${filter.endDate?.date || ''}" class="date-input">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="list-filter-chips-host">${buildListFilterChips(filter, q, { paramPrefix: 'project' })}</div>
     </div>
+    <div id="list-results-meta" class="list-results-meta" aria-live="polite">${listResultsMetaHtml(data.length, q, 'project')}</div>
     <div class="table-scroll-pair">
       <div class="table-scroll-top" aria-hidden="true"><div class="table-scroll-top-inner"></div></div>
       <div class="table-wrapper">
@@ -2243,7 +2991,11 @@ async function renderList() {
               }).join('')}
             </tr>
           </thead>
-          <tbody>${data.map(i => initiativeRow(i, null, colVisibility)).join('')}</tbody>
+          <tbody>${
+            data.length
+              ? data.map(i => initiativeRow(i, null, colVisibility)).join('')
+              : listEmptyStateRow(columns.filter(c => colVisibility[c.class] !== false).length, q, 'projects')
+          }</tbody>
         </table>
       </div>
     </div>
@@ -2276,6 +3028,12 @@ async function renderList() {
   initScrollableTables();
   initTableScrollPairs();
   wireRecentActivityFab();
+  wireFiltersToggle();
+  wireMilestoneGraphToggle();
+  wireListFilterChips('project', () => renderList());
+  wireMultiSelectBulkActions();
+  wireListSearchControls('list');
+  wireListTableRowActions('list');
 
   // Multi-select dropdown handlers (for checkbox filters)
   document.querySelectorAll('.multi-select-btn').forEach(btn => {
@@ -2394,31 +3152,11 @@ async function renderList() {
     }
     
     history.pushState({}, '', url);
-    renderList();
+    softRefreshListTable('list');
   };
   
-  // Search auto-apply while typing (debounced)
-  let searchDebounceTimer = null;
-  const searchEl = document.getElementById('search');
-  if (searchEl) {
-    searchEl.addEventListener('input', () => {
-      if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
-      searchDebounceTimer = setTimeout(() => {
-        // Auto-apply search changes; other filters still require Apply Filters button.
-        window.applyFilters();
-      }, 350);
-    });
-
-    // Enter key forces immediate apply
-    searchEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        if (searchDebounceTimer) clearTimeout(searchDebounceTimer);
-        window.applyFilters();
-      }
-    });
-  }
   // Add resize handles to ALL columns (not just sortable) - Project List
-  document.querySelectorAll('thead th').forEach(th => {
+  document.querySelectorAll('#initiatives-table thead th').forEach(th => {
     // Skip actions column
     if (th.classList.contains('col-actions')) return;
     const resizer = document.createElement('span');
@@ -2474,22 +3212,17 @@ async function renderList() {
       const table = th.closest('table');
       if (!table || !colClass) return;
       const viewType = 'list';
-
-      // Debug: verify the handler is firing
-      console.log('[column-resize] start', viewType, colClass, startWidth);
-
+      const minW = getColumnMinWidth(colClass);
       const onMove = (mv) => {
         mv.preventDefault();
         const dx = mv.clientX - startX;
-        const newW = Math.max(80, startWidth + dx);
-        console.log('[column-resize] move', colClass, 'dx:', dx, 'newW:', newW);
+        const newW = Math.max(minW, Math.min(560, startWidth + dx));
         // Set width on header with min/max to force it
         th.style.width = newW + 'px';
         th.style.minWidth = newW + 'px';
         th.style.maxWidth = newW + 'px';
         // Set width on all matching cells
         const cells = table.querySelectorAll(`tbody td.${colClass}`);
-        console.log('[column-resize] found', cells.length, 'cells for', colClass);
         cells.forEach(td => {
           td.style.width = newW + 'px';
           td.style.minWidth = newW + 'px';
@@ -2500,10 +3233,9 @@ async function renderList() {
       const onUp = () => {
         window.removeEventListener('pointermove', onMove, true);
         window.removeEventListener('pointerup', onUp, true);
-        console.log('[column-resize] end', colClass, 'final width:', th.offsetWidth);
         // Persist width
         const widths = getColumnWidths(viewType) || {};
-        const w = Math.max(80, th.offsetWidth || 0);
+        const w = Math.max(minW, Math.min(560, th.offsetWidth || 0));
         widths[colClass] = w;
         saveColumnWidths(viewType, widths);
       };
@@ -2511,33 +3243,6 @@ async function renderList() {
       window.addEventListener('pointermove', onMove, true);
       window.addEventListener('pointerup', onUp, true);
     };
-  });
-  document.querySelectorAll('button.delete').forEach(btn => {
-    btn.onclick = async () => {
-      if (!confirm('Delete this initiative?')) return;
-      try {
-        const result = await fetchJSON(`/api/initiatives/${btn.dataset.id}`, { method: 'DELETE' });
-        if (result?.trashId) {
-          const undo = confirm('Initiative deleted. Undo?');
-          if (undo) {
-            await fetchJSON(`/api/initiatives/restore/${result.trashId}`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({}),
-            });
-          }
-        }
-        renderList();
-      } catch (e) {
-        alert('Failed to delete initiative: ' + (e.message || String(e)));
-      }
-    };
-  });
-  document.querySelectorAll('button.view').forEach(btn => {
-    btn.onclick = () => location.hash = `#view/${btn.dataset.id}`;
-  });
-  document.querySelectorAll('button.edit').forEach(btn => {
-    btn.onclick = () => location.hash = `#edit/${btn.dataset.id}`;
   });
 
   // Apply persisted column widths for Project List table
@@ -2623,6 +3328,8 @@ function createMultiSelect(name, options, selectedValues = []) {
 
 // Initialize multi-select dropdowns in forms
 function initializeMultiSelects() {
+  wireMultiSelectBulkActions();
+
   // Multi-select button click
   document.querySelectorAll('.multi-select-btn[data-field]').forEach(btn => {
     btn.onclick = (e) => {
@@ -3085,7 +3792,7 @@ async function renderNew(defaultType = 'Project') {
       obj.milestone === 'Fully Live' &&
       !obj.endDate
     ) {
-      alert('Actual End Date is required when Status is "Live" and Milestone is "Fully Live".');
+      notify('Actual End Date is required when Status is "Live" and Milestone is "Fully Live".');
       return;
     }
     
@@ -3157,7 +3864,7 @@ async function renderNew(defaultType = 'Project') {
           await Promise.all(uploadPromises);
         } catch (uploadError) {
           console.error('Error uploading documents:', uploadError);
-          alert(`Initiative created successfully, but some documents failed to upload: ${uploadError.message}`);
+          notify(`Initiative created successfully, but some documents failed to upload: ${uploadError.message}`);
         }
       }
       
@@ -3170,7 +3877,7 @@ async function renderNew(defaultType = 'Project') {
         renderList();
       }
     } catch (e) {
-      alert(e.message);
+      notify(e.message);
     }
   };
 }
@@ -3422,55 +4129,81 @@ async function renderView(id) {
     return String(raw);
   };
 
+  const backHref = i.type === 'CR' ? '#crlist' : '#list';
+  const backLabel = i.type === 'CR' ? 'Back to Change Requests' : 'Back to Projects';
   app.innerHTML = `
-    <div class="card">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
-        <h2 style="margin: 0;">${i.name}</h2>
-        <button id="toggle-edit-btn" class="primary">✏️ Edit</button>
-      </div>
-      <div class="grid" id="view-content">
-        <div><div class="muted">Ticket</div><div>${i.ticket || i.id}</div></div>
-        <div><div class="muted">Type</div><div>${i.type}</div></div>
-        <div><div class="muted">Create Date</div><div>${i.createdAt?.slice(0,10) || ''}</div></div>
-        <div><div class="muted">Priority</div><div><span class="priority-badge priority-${i.priority}">${i.priority}</span></div></div>
-        <div><div class="muted">Status</div><div><span class="status-badge status-${i.status?.replace(/\s+/g, '-')}">${i.status}</span></div></div>
-        <div><div class="muted">% Completion</div><div><strong>${completionPercent}%</strong></div></div>
-        <div><div class="muted">Milestone</div><div>${escapeHtml(normalizeCrMilestoneForDisplay(i))}</div></div>
-        <div><div class="muted">Department</div><div>${depName}</div></div>
-        ${i.type === 'CR' ? `<div><div class="muted">System Impacted</div><div>${escapeHtml(dwsSystemNamesFromInitiative(i) || '')}</div></div>` : ''}
-        <div><div class="muted">Actual Start Date</div><div>${i.startDate?.slice(0,10) || ''}</div></div>
-        <div><div class="muted">Actual End Date</div><div>${i.endDate?.slice(0,10) || ''}</div></div>
-        <div><div class="muted">Plan Start Date</div><div>${i.planStartDate?.slice(0,10) || ''}</div></div>
-        <div><div class="muted">Plan End Date</div><div>${i.planEndDate?.slice(0,10) || ''}</div></div>
-        <div><div class="muted">Age Created to Start</div><div><strong>${ageCreatedToStart !== null ? ageCreatedToStart + ' days' : 'N/A'}</strong></div></div>
-        <div><div class="muted">Cycle Time (Age Start to End)</div><div><strong>${cycleTime !== null ? cycleTime + ' days' : 'N/A'}</strong></div></div>
-        <div><div class="muted">Total Age</div><div><strong>${totalAge !== null ? totalAge + ' days' : 'N/A'}</strong></div></div>
-        <div style="grid-column: 1 / -1"><div class="muted">Description</div><div style="white-space: pre-wrap; line-height: 1.6;">${i.description || ''}</div></div>
-        <div style="grid-column: 1 / -1"><div class="muted">Business Impact</div><div style="white-space: pre-wrap; line-height: 1.6;">${i.businessImpact || ''}</div></div>
-        <div style="grid-column: 1 / -1"><div class="muted">Remark</div><div style="white-space: pre-wrap; line-height: 1.6;">${i.remark || ''}</div></div>
-        <div style="grid-column: 1 / -1"><div class="muted">Project Doc Link</div><div>${i.documentationLink ? `<a href="${i.documentationLink}" target="_blank">${i.documentationLink}</a>` : ''}</div></div>
-      </div>
-      
-      <!-- Project Team Section -->
-      <div style="grid-column: 1 / -1; margin-top: 24px; padding: 20px; background: var(--gray-50); border-radius: 8px;">
-        <h3 style="margin: 0 0 16px 0; color: var(--text);">👥 Project Team</h3>
-        <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 16px;">
-          <div><div class="muted">IT PM</div><div style="font-weight: 500;">${itPmName}</div></div>
-          <div><div class="muted">IT PIC</div><div style="font-weight: 500;">${itPicNames}</div></div>
-          <div><div class="muted">IT Manager</div><div style="font-weight: 500;">${itManagerNames}</div></div>
-          <div><div class="muted">Business Owner / Requestor</div><div style="font-weight: 500;">${boName}</div></div>
-          <div><div class="muted">Business Users</div><div style="font-weight: 500;">${businessUserNames}</div></div>
+    <div class="detail-page">
+      <header class="detail-summary">
+        <div class="detail-summary-top">
+          <div class="detail-summary-main">
+            <a class="detail-back" href="${backHref}">← ${backLabel}</a>
+            <h2 class="detail-title">${escapeHtml(i.name)}</h2>
+            <div class="detail-badges">
+              <span class="priority-badge priority-${i.priority}">${i.priority}</span>
+              <span class="status-badge status-${i.status?.replace(/\s+/g, '-')}">${i.status}</span>
+              <span class="muted">${escapeHtml(normalizeCrMilestoneForDisplay(i) || 'No milestone')}</span>
+              <span class="muted">${completionPercent}% complete</span>
+            </div>
+          </div>
+          <div class="detail-summary-actions">
+            <button id="toggle-edit-btn" class="primary">Edit</button>
+          </div>
         </div>
-      </div>
-      
-      <!-- Documents Section -->
-      <div style="grid-column: 1 / -1; margin-top: 24px;">
+        <div class="detail-meta">
+          <div class="detail-meta-item"><div class="muted">Ticket</div><div>${escapeHtml(i.ticket || i.id)}</div></div>
+          <div class="detail-meta-item"><div class="muted">Type</div><div>${escapeHtml(i.type)}</div></div>
+          <div class="detail-meta-item"><div class="muted">Department</div><div>${escapeHtml(depName || '—')}</div></div>
+          <div class="detail-meta-item"><div class="muted">IT PM</div><div>${escapeHtml(itPmName || '—')}</div></div>
+          <div class="detail-meta-item"><div class="muted">IT PIC</div><div>${escapeHtml(itPicNames || '—')}</div></div>
+          <div class="detail-meta-item"><div class="muted">Owner</div><div>${escapeHtml(boName || '—')}</div></div>
+        </div>
+      </header>
+
+      <nav class="detail-section-nav" aria-label="Detail sections">
+        <a href="#detail-overview" data-section="detail-overview" class="active">Overview</a>
+        <a href="#detail-team" data-section="detail-team">Team</a>
+        <a href="#detail-docs" data-section="detail-docs">Documents</a>
+        <a href="#detail-collab" data-section="detail-collab">Collaboration</a>
+        <a href="#detail-tasks" data-section="detail-tasks">Tasks</a>
+      </nav>
+
+      <section class="card detail-section" id="detail-overview">
+        <h3>Overview</h3>
+        <div class="grid" id="view-content">
+          <div><div class="muted">Create Date</div><div>${i.createdAt?.slice(0,10) || ''}</div></div>
+          <div><div class="muted">Actual Start Date</div><div>${i.startDate?.slice(0,10) || ''}</div></div>
+          <div><div class="muted">Actual End Date</div><div>${i.endDate?.slice(0,10) || ''}</div></div>
+          <div><div class="muted">Plan Start Date</div><div>${i.planStartDate?.slice(0,10) || ''}</div></div>
+          <div><div class="muted">Plan End Date</div><div>${i.planEndDate?.slice(0,10) || ''}</div></div>
+          <div><div class="muted">Age Created to Start</div><div><strong>${ageCreatedToStart !== null ? ageCreatedToStart + ' days' : 'N/A'}</strong></div></div>
+          <div><div class="muted">Cycle Time (Age Start to End)</div><div><strong>${cycleTime !== null ? cycleTime + ' days' : 'N/A'}</strong></div></div>
+          <div><div class="muted">Total Age</div><div><strong>${totalAge !== null ? totalAge + ' days' : 'N/A'}</strong></div></div>
+          ${i.type === 'CR' ? `<div><div class="muted">System Impacted</div><div>${escapeHtml(dwsSystemNamesFromInitiative(i) || '')}</div></div>` : ''}
+          <div style="grid-column: 1 / -1"><div class="muted">Description</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.description || '')}</div></div>
+          <div style="grid-column: 1 / -1"><div class="muted">Business Impact</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.businessImpact || '')}</div></div>
+          <div style="grid-column: 1 / -1"><div class="muted">Remark</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.remark || '')}</div></div>
+          <div style="grid-column: 1 / -1"><div class="muted">Project Doc Link</div><div>${i.documentationLink ? `<a href="${escapeHtml(i.documentationLink)}" target="_blank" rel="noopener noreferrer">${escapeHtml(i.documentationLink)}</a>` : ''}</div></div>
+        </div>
+      </section>
+
+      <section class="card detail-section" id="detail-team">
+        <h3>Project Team</h3>
+        <div class="detail-team-grid">
+          <div><div class="muted">IT PM</div><div style="font-weight: 500;">${escapeHtml(itPmName)}</div></div>
+          <div><div class="muted">IT PIC</div><div style="font-weight: 500;">${escapeHtml(itPicNames)}</div></div>
+          <div><div class="muted">IT Manager</div><div style="font-weight: 500;">${escapeHtml(itManagerNames)}</div></div>
+          <div><div class="muted">Business Owner / Requestor</div><div style="font-weight: 500;">${escapeHtml(boName)}</div></div>
+          <div><div class="muted">Business Users</div><div style="font-weight: 500;">${escapeHtml(businessUserNames)}</div></div>
+        </div>
+      </section>
+
+      <section class="card detail-section" id="detail-docs">
         <h3>Documents</h3>
         <div id="documents-list" style="margin-bottom: 16px;">
           ${i.documents && i.documents.length > 0 ? i.documents.map(doc => `
-            <div style="display: flex; align-items: center; justify-content: space-between; padding: 12px; background: var(--gray-50); border-radius: 8px; margin-bottom: 8px;">
+            <div class="detail-doc-item">
               <div style="flex: 1;">
-                <div style="font-weight: 600; margin-bottom: 4px;">${doc.fileName}</div>
+                <div style="font-weight: 600; margin-bottom: 4px;">${escapeHtml(doc.fileName)}</div>
                 <div style="font-size: 12px; color: var(--muted);">
                   ${(doc.sizeBytes / 1024).toFixed(2)} KB • Uploaded ${new Date(doc.uploadedAt).toLocaleDateString()}
                 </div>
@@ -3494,135 +4227,125 @@ async function renderView(id) {
             </div>
           </div>
         </div>
-      </div>
-      
-      <div style="margin-top:12px"><a href="#list"><button>Back</button></a></div>
-    </div>
-    
-    
-    <!-- Comments & Activity Log Combined Section -->
-    <div class="card" style="margin-top: 24px;">
-      <!-- Tabs Header -->
-      <div style="display: flex; border-bottom: 2px solid var(--border); margin-bottom: 16px;">
-        <button id="tab-comments" class="tab-btn active" style="padding: 12px 24px; border: none; background: none; font-size: 14px; font-weight: 600; cursor: pointer; border-bottom: 2px solid var(--brand); margin-bottom: -2px; color: var(--brand);">
-          💬 Comments <span style="background: var(--gray-200); padding: 2px 8px; border-radius: 12px; font-size: 12px; margin-left: 6px;">${comments.length}</span>
-        </button>
-        <button id="tab-meeting-notes" class="tab-btn" style="padding: 12px 24px; border: none; background: none; font-size: 14px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; color: var(--muted);">
-          🗒️ Meeting Notes <span style="background: var(--gray-200); padding: 2px 8px; border-radius: 12px; font-size: 12px; margin-left: 6px;">${meetingNotes.length}</span>
-        </button>
-        <button id="tab-activity" class="tab-btn" style="padding: 12px 24px; border: none; background: none; font-size: 14px; font-weight: 500; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -2px; color: var(--muted);">
-          📋 Activity Log <span style="background: var(--gray-200); padding: 2px 8px; border-radius: 12px; font-size: 12px; margin-left: 6px;">${i.changeHistory?.length || 0}</span>
-        </button>
-      </div>
-      
-      <!-- Comments Tab Content -->
-      <div id="tab-content-comments" class="tab-content">
-        <div id="comments-list" style="margin-bottom: 16px;">
-          ${comments.length === 0 ? '<p class="muted">No comments yet. Be the first to comment!</p>' : ''}
-          ${comments.map(c => {
-            const author = nameById(LOOKUPS.users, c.authorId) || 'Unknown';
-            const canEdit = currentUser && (c.authorId === currentUser.id || currentUser.isAdmin);
-            return `
-              <div class="comment-item" style="margin-bottom: 16px; padding: 12px; background: var(--gray-50); border-radius: 8px;">
-                <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
-                  <div>
-                    <strong>${author}</strong>
-                    <span class="muted" style="font-size: 12px; margin-left: 8px;">${c.createdAt ? new Date(c.createdAt).toLocaleString() : ''}</span>
-                    ${c.updatedAt ? `<span class="muted" style="font-size: 11px; margin-left: 8px;">(edited)</span>` : ''}
-                  </div>
-                  ${canEdit ? `
-                    <div>
-                      <button class="edit-comment-btn" data-id="${c.id}" style="font-size: 12px; padding: 4px 8px; margin-right: 4px;">Edit</button>
-                      <button class="delete-comment-btn" data-id="${c.id}" style="font-size: 12px; padding: 4px 8px; color: var(--danger);">Delete</button>
-                    </div>
-                  ` : ''}
-                </div>
-                <div class="comment-body">${formatCommentBody(c.body || '')}</div>
-              </div>
-            `;
-          }).join('')}
-        </div>
-        <div>
-          <div style="position: relative;">
-            <textarea id="new-comment" placeholder="Add a comment... (use @username to mention someone)" rows="3" style="width: 100%; margin-bottom: 8px;"></textarea>
-            <div id="mention-autocomplete" class="mention-autocomplete hidden"></div>
-          </div>
-          <div style="font-size: 12px; color: var(--muted); margin-bottom: 8px;">
-            💡 Tip: Type @ followed by a username to mention someone
-          </div>
-          <button id="add-comment-btn" class="primary">Add Comment</button>
-        </div>
-      </div>
+      </section>
 
-      <!-- Meeting Notes Tab Content -->
-      <div id="tab-content-meeting-notes" class="tab-content" style="display: none;">
-        ${renderMeetingNotesTabContent(meetingNotes)}
-      </div>
-      
-      <!-- Activity Log Tab Content -->
-      <div id="tab-content-activity" class="tab-content" style="display: none; max-height: 600px; overflow-y: auto;">
-        ${i.changeHistory && i.changeHistory.length > 0 ? `
-          ${i.changeHistory.map((history, idx) => {
-            const changedByName = nameById(LOOKUPS.users, history.changedBy) || history.changedBy || 'System';
-            const timestamp = new Date(history.timestamp);
-            const formattedDate = timestamp.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
-            const formattedTime = timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
-            return `
-              <div style="margin-bottom: 20px; padding-bottom: 20px; border-bottom: ${idx < i.changeHistory.length - 1 ? '1px solid #e5e7eb' : 'none'};">
-                <div style="display: flex; align-items: center; margin-bottom: 12px;">
-                  <div style="width: 8px; height: 8px; background: var(--brand); border-radius: 50%; margin-right: 12px;"></div>
-                  <div style="flex: 1;">
-                    <div style="font-weight: 600; color: var(--text); margin-bottom: 4px;">${changedByName}</div>
-                    <div class="muted" style="font-size: 12px;">${formattedDate} at ${formattedTime}</div>
+      <section class="card detail-section" id="detail-collab">
+        <h3>Collaboration</h3>
+        <div class="detail-tabs" role="tablist">
+          <button type="button" id="tab-comments" class="detail-tab active" role="tab" aria-selected="true" aria-controls="tab-content-comments">
+            Comments <span class="detail-tab-count">${comments.length}</span>
+          </button>
+          <button type="button" id="tab-meeting-notes" class="detail-tab" role="tab" aria-selected="false" aria-controls="tab-content-meeting-notes">
+            Meeting Notes <span class="detail-tab-count">${meetingNotes.length}</span>
+          </button>
+          <button type="button" id="tab-activity" class="detail-tab" role="tab" aria-selected="false" aria-controls="tab-content-activity">
+            Activity Log <span class="detail-tab-count">${i.changeHistory?.length || 0}</span>
+          </button>
+        </div>
+
+        <div id="tab-content-comments" class="tab-content detail-tab-panel" role="tabpanel">
+          <div id="comments-list" style="margin-bottom: 16px;">
+            ${comments.length === 0 ? '<p class="muted">No comments yet. Be the first to comment!</p>' : ''}
+            ${comments.map(c => {
+              const author = nameById(LOOKUPS.users, c.authorId) || 'Unknown';
+              const canEdit = currentUser && (c.authorId === currentUser.id || currentUser.isAdmin);
+              return `
+                <div class="comment-item" style="margin-bottom: 16px; padding: 12px; background: var(--gray-50); border-radius: 8px;">
+                  <div style="display: flex; justify-content: space-between; align-items: start; margin-bottom: 8px;">
+                    <div>
+                      <strong>${escapeHtml(author)}</strong>
+                      <span class="muted" style="font-size: 12px; margin-left: 8px;">${c.createdAt ? new Date(c.createdAt).toLocaleString() : ''}</span>
+                      ${c.updatedAt ? `<span class="muted" style="font-size: 11px; margin-left: 8px;">(edited)</span>` : ''}
+                    </div>
+                    ${canEdit ? `
+                      <div>
+                        <button class="edit-comment-btn" data-id="${c.id}" style="font-size: 12px; padding: 4px 8px; margin-right: 4px;">Edit</button>
+                        <button class="delete-comment-btn" data-id="${c.id}" style="font-size: 12px; padding: 4px 8px; color: var(--danger);">Delete</button>
+                      </div>
+                    ` : ''}
                   </div>
+                  <div class="comment-body">${formatCommentBody(c.body || '')}</div>
                 </div>
-            ${history.changes && history.changes.length > 0 ? `
-                  <div style="margin-left: 20px; padding-left: 16px; border-left: 2px solid var(--border-light);">
-                    ${history.changes.map(change => {
-                      const fieldLabel = formatActivityFieldLabel(change.field);
-                      const oldFormatted = formatActivityValue(change.field, change.oldValue);
-                      const newFormatted = formatActivityValue(change.field, change.newValue);
-                      return `
-                        <div style="margin: 8px 0; padding: 10px; background: #f8fafc; border-radius: 6px; border-left: 3px solid var(--brand);">
-                          <div style="font-weight: 600; color: var(--text); margin-bottom: 6px;">${fieldLabel}</div>
-                          <div style="font-size: 13px; line-height: 1.6;">
-                            <span style="color: #ef4444; text-decoration: line-through; padding: 2px 6px; background: #fee2e2; border-radius: 3px;">${oldFormatted}</span>
-                            <span style="margin: 0 8px; color: var(--muted);">→</span>
-                            <span style="color: #10b981; padding: 2px 6px; background: #d1fae5; border-radius: 3px;">${newFormatted}</span>
-                          </div>
-                        </div>
-                      `;
-                    }).join('')}
-                  </div>
-                ` : `
-                  <div style="margin-left: 20px; padding: 8px; color: var(--muted); font-size: 13px; font-style: italic;">
-                    No specific field changes recorded
-                  </div>
-                `}
-              </div>
-            `;
-          }).join('')}
-        ` : `
-          <div style="padding: 40px; text-align: center; color: var(--muted);">
-            <div style="font-size: 48px; margin-bottom: 12px;">📝</div>
-            <div style="font-weight: 500; margin-bottom: 4px;">No activity recorded yet</div>
-            <div style="font-size: 13px;">Changes to this initiative will appear here</div>
+              `;
+            }).join('')}
           </div>
-        `}
-      </div>
-    </div>
-    
-    <!-- Tasks Section -->
-    <div class="card" style="margin-top: 24px;">
-      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+          <div>
+            <div style="position: relative;">
+              <textarea id="new-comment" placeholder="Add a comment... (use @username to mention someone)" rows="3" style="width: 100%; margin-bottom: 8px;"></textarea>
+              <div id="mention-autocomplete" class="mention-autocomplete hidden"></div>
+            </div>
+            <div style="font-size: 12px; color: var(--muted); margin-bottom: 8px;">
+              Tip: Type @ followed by a username to mention someone
+            </div>
+            <button id="add-comment-btn" class="primary">Add Comment</button>
+          </div>
+        </div>
+
+        <div id="tab-content-meeting-notes" class="tab-content detail-tab-panel hidden" role="tabpanel">
+          ${renderMeetingNotesTabContent(meetingNotes)}
+        </div>
+
+        <div id="tab-content-activity" class="tab-content detail-tab-panel hidden" role="tabpanel" style="max-height: 600px; overflow-y: auto;">
+          ${i.changeHistory && i.changeHistory.length > 0 ? `
+            ${i.changeHistory.map((history, idx) => {
+              const changedByName = nameById(LOOKUPS.users, history.changedBy) || history.changedBy || 'System';
+              const timestamp = new Date(history.timestamp);
+              const formattedDate = timestamp.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
+              const formattedTime = timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+              return `
+                <div style="margin-bottom: 20px; padding-bottom: 20px; border-bottom: ${idx < i.changeHistory.length - 1 ? '1px solid #e5e7eb' : 'none'};">
+                  <div style="display: flex; align-items: center; margin-bottom: 12px;">
+                    <div style="width: 8px; height: 8px; background: var(--brand); border-radius: 50%; margin-right: 12px;"></div>
+                    <div style="flex: 1;">
+                      <div style="font-weight: 600; color: var(--text); margin-bottom: 4px;">${escapeHtml(changedByName)}</div>
+                      <div class="muted" style="font-size: 12px;">${formattedDate} at ${formattedTime}</div>
+                    </div>
+                  </div>
+              ${history.changes && history.changes.length > 0 ? `
+                    <div style="margin-left: 20px; padding-left: 16px; border-left: 2px solid var(--border-light);">
+                      ${history.changes.map(change => {
+                        const fieldLabel = formatActivityFieldLabel(change.field);
+                        const oldFormatted = formatActivityValue(change.field, change.oldValue);
+                        const newFormatted = formatActivityValue(change.field, change.newValue);
+                        return `
+                          <div style="margin: 8px 0; padding: 10px; background: #f8fafc; border-radius: 6px; border-left: 3px solid var(--brand);">
+                            <div style="font-weight: 600; color: var(--text); margin-bottom: 6px;">${escapeHtml(fieldLabel)}</div>
+                            <div style="font-size: 13px; line-height: 1.6;">
+                              <span style="color: #ef4444; text-decoration: line-through; padding: 2px 6px; background: #fee2e2; border-radius: 3px;">${escapeHtml(oldFormatted)}</span>
+                              <span style="margin: 0 8px; color: var(--muted);">→</span>
+                              <span style="color: #10b981; padding: 2px 6px; background: #d1fae5; border-radius: 3px;">${escapeHtml(newFormatted)}</span>
+                            </div>
+                          </div>
+                        `;
+                      }).join('')}
+                    </div>
+                  ` : `
+                    <div style="margin-left: 20px; padding: 8px; color: var(--muted); font-size: 13px; font-style: italic;">
+                      No specific field changes recorded
+                    </div>
+                  `}
+                </div>
+              `;
+            }).join('')}
+          ` : `
+            <div style="padding: 40px; text-align: center; color: var(--muted);">
+              <div style="font-weight: 500; margin-bottom: 4px;">No activity recorded yet</div>
+              <div style="font-size: 13px;">Changes to this initiative will appear here</div>
+            </div>
+          `}
+        </div>
+      </section>
+
+      <section class="card detail-section" id="detail-tasks">
+      <div class="detail-tasks-toolbar">
         <h3 style="margin: 0;">Tasks</h3>
-        <div>
-          <button id="new-task-btn" class="primary" style="margin-right: 8px;">+ New Task</button>
-          <button id="download-task-template-btn" style="margin-right: 8px;">📥 Download Template</button>
-          <button id="upload-tasks-btn" style="margin-right: 8px;">📤 Upload Tasks</button>
-          <button id="task-view-list" class="task-view-btn active" data-view="list">📋 List</button>
-          <button id="task-view-kanban" class="task-view-btn" data-view="kanban">📊 Kanban</button>
-          <button id="task-view-gantt" class="task-view-btn" data-view="gantt">📅 Gantt</button>
+        <div class="detail-tasks-actions">
+          <button id="new-task-btn" class="primary">+ New Task</button>
+          <button id="download-task-template-btn">Download Template</button>
+          <button id="upload-tasks-btn">Upload Tasks</button>
+          <button id="task-view-list" class="task-view-btn active" data-view="list">List</button>
+          <button id="task-view-kanban" class="task-view-btn" data-view="kanban">Kanban</button>
+          <button id="task-view-gantt" class="task-view-btn" data-view="gantt">Gantt</button>
         </div>
       </div>
       
@@ -3718,6 +4441,7 @@ async function renderView(id) {
           </div>
         </div>
       </div>
+      </section>
     </div>
   `;
   
@@ -3727,7 +4451,7 @@ async function renderView(id) {
     const files = Array.from(fileInput.files);
     
     if (files.length === 0) {
-      alert('Please select at least one file');
+      notify('Please select at least one file');
       return;
     }
     
@@ -3762,7 +4486,7 @@ async function renderView(id) {
       progressBar.style.width = '0%';
       renderView(id);
     } catch (error) {
-      alert('Failed to upload documents: ' + error.message);
+      notify('Failed to upload documents: ' + error.message);
       progressDiv.style.display = 'none';
       progressBar.style.width = '0%';
     }
@@ -3773,7 +4497,7 @@ async function renderView(id) {
       const docId = btn.dataset.id;
       const token = getToken();
       if (!token) {
-        alert('Authentication required');
+        notify('Authentication required');
         return;
       }
       
@@ -3808,31 +4532,31 @@ async function renderView(id) {
         window.URL.revokeObjectURL(downloadUrl);
         document.body.removeChild(link);
       } catch (error) {
-        alert('Failed to download document: ' + error.message);
+        notify('Failed to download document: ' + error.message);
       }
     };
   });
   
   document.querySelectorAll('.delete-document-btn').forEach(btn => {
     btn.onclick = async () => {
-      if (!confirm('Delete this document?')) return;
+      if (!(await confirmDialog('Delete this document?', { title: 'Delete document', confirmText: 'Delete', danger: true }))) return;
       try {
         await fetchJSON(`/api/documents/${btn.dataset.id}`, { method: 'DELETE' });
         renderView(id);
       } catch (e) {
-        alert('Failed to delete document: ' + e.message);
+        notify('Failed to delete document: ' + e.message);
       }
     };
   });
   
   document.querySelectorAll('.delete-document-btn').forEach(btn => {
     btn.onclick = async () => {
-      if (!confirm('Delete this document?')) return;
+      if (!(await confirmDialog('Delete this document?', { title: 'Delete document', confirmText: 'Delete', danger: true }))) return;
       try {
         await fetchJSON(`/api/documents/${btn.dataset.id}`, { method: 'DELETE' });
         renderView(id);
       } catch (e) {
-        alert('Failed to delete document: ' + e.message);
+        notify('Failed to delete document: ' + e.message);
       }
     };
   });
@@ -3849,35 +4573,33 @@ async function renderView(id) {
   const contentActivity = document.getElementById('tab-content-activity');
   
   const switchTab = (activeTab) => {
-    // Update tab buttons
-    [tabComments, tabMeetingNotes, tabActivity].forEach(tab => {
-      tab.style.borderBottomColor = 'transparent';
-      tab.style.color = 'var(--muted)';
-      tab.style.fontWeight = '500';
+    const tabs = [tabComments, tabMeetingNotes, tabActivity];
+    const panels = [contentComments, contentMeetingNotes, contentActivity];
+    tabs.forEach((tab, idx) => {
+      const isActive = tab === activeTab;
+      tab.classList.toggle('active', isActive);
+      tab.setAttribute('aria-selected', isActive ? 'true' : 'false');
+      panels[idx].classList.toggle('hidden', !isActive);
     });
-    activeTab.style.borderBottomColor = 'var(--brand)';
-    activeTab.style.color = 'var(--brand)';
-    activeTab.style.fontWeight = '600';
-    
-    // Show/hide content
-    if (activeTab === tabComments) {
-      contentComments.style.display = 'block';
-      contentMeetingNotes.style.display = 'none';
-      contentActivity.style.display = 'none';
-    } else if (activeTab === tabMeetingNotes) {
-      contentComments.style.display = 'none';
-      contentMeetingNotes.style.display = 'block';
-      contentActivity.style.display = 'none';
-    } else {
-      contentComments.style.display = 'none';
-      contentMeetingNotes.style.display = 'none';
-      contentActivity.style.display = 'block';
-    }
   };
   
   tabComments.onclick = () => switchTab(tabComments);
   tabMeetingNotes.onclick = () => switchTab(tabMeetingNotes);
   tabActivity.onclick = () => switchTab(tabActivity);
+
+  // Detail section nav (smooth scroll + active state)
+  const sectionNav = document.querySelector('.detail-section-nav');
+  if (sectionNav) {
+    const sectionLinks = [...sectionNav.querySelectorAll('a[data-section]')];
+    sectionLinks.forEach(link => {
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        const target = document.getElementById(link.dataset.section);
+        if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        sectionLinks.forEach(l => l.classList.toggle('active', l === link));
+      });
+    });
+  }
   
   // Edit mode toggle button - replace view with edit form
   document.getElementById('toggle-edit-btn').onclick = () => {
@@ -3889,13 +4611,14 @@ async function renderView(id) {
     const itManagerUsers = filterUsersByRole(LOOKUPS.users, 'itManager');
     const itPmUsers = filterUsersByRole(LOOKUPS.users, 'itPm');
     
-    const card = document.querySelector('.card');
+    const page = document.querySelector('.detail-page') || app;
     const crUiSelectedMilestone = i.type === 'CR' ? (i.milestone || '') : (i.milestone || '');
-    card.innerHTML = `
+    page.innerHTML = `
+      <div class="card">
       <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
         <h2 style="margin: 0;">Edit Initiative</h2>
         <div>
-          <button id="save-btn" class="primary">💾 Save</button>
+          <button id="save-btn" class="primary">Save</button>
           <button id="cancel-edit-btn" style="margin-left: 8px;">Cancel</button>
         </div>
       </div>
@@ -3942,10 +4665,11 @@ async function renderView(id) {
         
         <div style="margin-top: 20px; display: flex; gap: 12px;">
           <button type="button" id="cancel-edit-btn-2">Cancel</button>
-          <button type="button" id="save-btn-2" class="primary">💾 Save</button>
+          <button type="button" id="save-btn-2" class="primary">Save</button>
         </div>
       </form>
-      <div style="margin-top:12px"><a href="#list"><button>Back</button></a></div>
+      <div style="margin-top:12px"><a href="${backHref}" class="btn">Back</a></div>
+      </div>
     `;
     
     initializeMultiSelects();
@@ -4006,7 +4730,7 @@ async function renderView(id) {
         });
         renderView(id);
       } catch (e) {
-        alert('Failed to save changes: ' + e.message);
+        notify('Failed to save changes: ' + e.message);
       }
     };
     
@@ -4038,7 +4762,7 @@ async function renderView(id) {
       // Refresh notifications after adding comment
       if (typeof loadNotifications === 'function') loadNotifications();
     } catch (e) {
-      alert('Failed to add comment: ' + e.message);
+      notify('Failed to add comment: ' + e.message);
     }
   };
   
@@ -4059,19 +4783,19 @@ async function renderView(id) {
         });
         renderView(id);
       } catch (e) {
-        alert('Failed to update comment: ' + e.message);
+        notify('Failed to update comment: ' + e.message);
       }
     };
   });
   
   document.querySelectorAll('.delete-comment-btn').forEach(btn => {
     btn.onclick = async () => {
-      if (!confirm('Delete this comment?')) return;
+      if (!(await confirmDialog('Delete this comment?', { title: 'Delete comment', confirmText: 'Delete', danger: true }))) return;
       try {
         await fetchJSON(`/api/comments/${btn.dataset.id}`, { method: 'DELETE' });
         renderView(id);
       } catch (e) {
-        alert('Failed to delete comment: ' + e.message);
+        notify('Failed to delete comment: ' + e.message);
       }
     };
   });
@@ -4106,13 +4830,13 @@ async function renderView(id) {
           body: JSON.stringify({}),
         });
         if (response.ok === false) {
-          alert(response.error || 'Failed to send meeting notes email');
+          notify(response.error || 'Failed to send meeting notes email');
           return;
         }
-        alert('Meeting notes email sent successfully.');
+        notify('Meeting notes email sent successfully.');
         openMeetingTabAndRefresh();
       } catch (e) {
-        alert(`Failed to send email: ${e.message}`);
+        notify(`Failed to send email: ${e.message}`);
       }
     };
   });
@@ -4122,18 +4846,18 @@ async function renderView(id) {
         await fetchJSON(`/api/meeting-notes/${btn.dataset.id}/duplicate`, { method: 'POST' });
         openMeetingTabAndRefresh();
       } catch (e) {
-        alert(`Failed to duplicate meeting note: ${e.message}`);
+        notify(`Failed to duplicate meeting note: ${e.message}`);
       }
     };
   });
   document.querySelectorAll('.meeting-note-delete-btn').forEach((btn) => {
     btn.onclick = async () => {
-      if (!confirm('Remove this draft meeting note from the list?')) return;
+      if (!(await confirmDialog('Remove this draft meeting note from the list?', { title: 'Remove draft', confirmText: 'Remove', danger: true }))) return;
       try {
         await fetchJSON(`/api/meeting-notes/${btn.dataset.id}`, { method: 'DELETE' });
         openMeetingTabAndRefresh();
       } catch (e) {
-        alert(`Failed to delete meeting note: ${e.message}`);
+        notify(`Failed to delete meeting note: ${e.message}`);
       }
     };
   });
@@ -4149,12 +4873,12 @@ async function renderView(id) {
   
   document.querySelectorAll('.delete-task-btn').forEach(btn => {
     btn.onclick = async () => {
-      if (!confirm('Delete this task?')) return;
+      if (!(await confirmDialog('Delete this task?', { title: 'Delete task', confirmText: 'Delete', danger: true }))) return;
       try {
         await fetchJSON(`/api/tasks/${btn.dataset.id}`, { method: 'DELETE' });
         renderView(id);
       } catch (e) {
-        alert('Failed to delete task: ' + e.message);
+        notify('Failed to delete task: ' + e.message);
       }
     };
   });
@@ -4288,7 +5012,7 @@ async function renderView(id) {
         // Reset dragged task reference
         draggedTask = null;
       } catch (error) {
-        alert('Failed to update task status: ' + error.message);
+        notify('Failed to update task status: ' + error.message);
         draggedTask = null;
       }
     });
@@ -4411,7 +5135,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
     try {
       note = await fetchJSON(`/api/meeting-notes/${noteId}`);
     } catch (e) {
-      alert(`Unable to load meeting note: ${e.message}`);
+      notify(`Unable to load meeting note: ${e.message}`);
       return;
     }
   }
@@ -4715,7 +5439,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
       body: JSON.stringify({}),
     });
     if (sendRes.ok === false) {
-      alert(sendRes.error || 'Failed to send meeting notes email');
+      notify(sendRes.error || 'Failed to send meeting notes email');
       return false;
     }
     return true;
@@ -4726,7 +5450,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
       const payloadDraft = buildPayload('Draft');
       const payloadPublished = buildPayload('Published');
       if (!payloadDraft.title || !payloadDraft.meetingDate) {
-        alert('Meeting title and meeting date are required.');
+        notify('Meeting title and meeting date are required.');
         return;
       }
 
@@ -4742,7 +5466,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
             body: JSON.stringify(payload),
           });
           if (response.ok === false) {
-            alert(response.error || 'Failed to update meeting note');
+            notify(response.error || 'Failed to update meeting note');
             return;
           }
           saved = response.note;
@@ -4753,7 +5477,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
             body: JSON.stringify(payload),
           });
           if (!response.id) {
-            alert(response.error || 'Failed to create meeting note');
+            notify(response.error || 'Failed to create meeting note');
             return;
           }
           saved = response;
@@ -4767,7 +5491,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
             body: JSON.stringify(payloadDraft),
           });
           if (!created.id) {
-            alert(created.error || 'Failed to create meeting note');
+            notify(created.error || 'Failed to create meeting note');
             return;
           }
           effectiveId = created.id;
@@ -4777,7 +5501,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
             body: JSON.stringify({ ...payloadPublished, initiativeId }),
           });
           if (updated.ok === false) {
-            alert(updated.error || 'Failed to publish meeting note');
+            notify(updated.error || 'Failed to publish meeting note');
             return;
           }
           saved = updated.note;
@@ -4788,7 +5512,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
             body: JSON.stringify(payloadPublished),
           });
           if (updated.ok === false) {
-            alert(updated.error || 'Failed to update meeting note');
+            notify(updated.error || 'Failed to update meeting note');
             return;
           }
           saved = updated.note;
@@ -4797,7 +5521,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
 
         const publishRes = await fetchJSON(`/api/meeting-notes/${effectiveId}/publish`, { method: 'POST' });
         if (publishRes.ok === false) {
-          alert(publishRes.error);
+          notify(publishRes.error);
           return;
         }
 
@@ -4810,7 +5534,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
           body: JSON.stringify(payloadPublished),
         });
         if (updated.ok === false) {
-          alert(updated.error || 'Failed to update meeting note');
+          notify(updated.error || 'Failed to update meeting note');
           return;
         }
         saved = updated.note;
@@ -4822,7 +5546,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
       removeModal();
       if (typeof onSaved === 'function') onSaved();
     } catch (e) {
-      alert(`Meeting note action failed: ${e.message}`);
+      notify(`Meeting note action failed: ${e.message}`);
     }
   };
 
@@ -5057,7 +5781,7 @@ async function showTaskModal(initiativeId, taskId = null) {
     try {
       task = await fetchJSON(`/api/tasks/${taskId}`);
     } catch (e) {
-      alert('Failed to load task: ' + e.message);
+      notify('Failed to load task: ' + e.message);
       return;
     }
   }
@@ -5177,7 +5901,7 @@ async function showTaskModal(initiativeId, taskId = null) {
         if (viewId) renderView(viewId);
       }
     } catch (e) {
-      alert('Failed to save task: ' + e.message);
+      notify('Failed to save task: ' + e.message);
     }
   };
 }
@@ -5210,14 +5934,14 @@ function showTaskUploadModal(initiativeId) {
     const fileInput = document.getElementById('task-file-input');
     const file = fileInput.files[0];
     if (!file) {
-      alert('Please select a file');
+      notify('Please select a file');
       return;
     }
     
     const text = await file.text();
     const lines = text.split('\n').filter(l => l.trim());
     if (lines.length < 2) {
-      alert('CSV file must have at least a header and one data row');
+      notify('CSV file must have at least a header and one data row');
       return;
     }
     
@@ -5234,7 +5958,7 @@ function showTaskUploadModal(initiativeId) {
     }
     
     if (tasks.length === 0) {
-      alert('No valid tasks found in CSV');
+      notify('No valid tasks found in CSV');
       return;
     }
     
@@ -5251,7 +5975,7 @@ function showTaskUploadModal(initiativeId) {
         if (viewId) renderView(viewId);
       }
     } catch (e) {
-      alert('Failed to upload tasks: ' + e.message);
+      notify('Failed to upload tasks: ' + e.message);
     }
   };
 }
@@ -5414,7 +6138,7 @@ async function renderEdit(id) {
       obj.milestone === 'Fully Live' &&
       !obj.endDate
     ) {
-      alert('Actual End Date is required when Status is "Live" and Milestone is "Fully Live".');
+      notify('Actual End Date is required when Status is "Live" and Milestone is "Fully Live".');
       return;
     }
     
@@ -5471,14 +6195,14 @@ async function renderEdit(id) {
           }
         } catch (uploadError) {
           console.error('Error uploading documents:', uploadError);
-          alert(`Initiative updated successfully, but some documents failed to upload: ${uploadError.message}`);
+          notify(`Initiative updated successfully, but some documents failed to upload: ${uploadError.message}`);
         }
       }
       
       location.hash = `#view/${id}`;
       renderView(id);
     } catch (e) {
-      alert(e.message);
+      notify(e.message);
     }
   };
 }
@@ -5681,47 +6405,38 @@ async function renderCRList() {
   const canCreateCR = !access || access.canCreateCR !== false || access.isAdmin;
 
   window.__crListExport = { rows: dataWithCR, colVisibility };
+  const advancedOpenCR = hasAdvancedListFilters(filter);
 
   app.innerHTML = `
-    <div class="milestone-graph">
-      <h3>Milestone Distribution</h3>
-      <div class="milestone-flow">
-        ${uiMilestones.map((m, index) => {
-          const count = milestoneCounts[m] || 0;
-          const isLast = index === uiMilestones.length - 1;
-          const displayName = milestoneDisplayNames[m] || m;
-          const color = milestoneColors[m] || 'var(--brand)';
-          return `
-            <div class="milestone-step">
-              <div class="milestone-circle ${count > 0 ? 'active' : ''}" style="${count > 0 ? `border-color: ${color}; background: linear-gradient(135deg, ${color}15 0%, ${color}25 100%);` : ''}">
-                <div class="milestone-name">${displayName}</div>
-                <div class="milestone-count-badge" style="background: ${count > 0 ? color : 'var(--muted)'}">${count}</div>
+    <div class="milestone-graph collapsed-by-default">
+      <button type="button" class="milestone-graph-toggle" id="milestone-graph-toggle" aria-expanded="false">
+        <span class="milestone-graph-toggle-label">Show milestone distribution</span>
+      </button>
+      <div class="milestone-graph-body hidden" id="milestone-graph-body">
+        <h3>Milestone Distribution</h3>
+        <div class="milestone-flow">
+          ${uiMilestones.map((m, index) => {
+            const count = milestoneCounts[m] || 0;
+            const isLast = index === uiMilestones.length - 1;
+            const displayName = milestoneDisplayNames[m] || m;
+            const color = milestoneColors[m] || 'var(--brand)';
+            return `
+              <div class="milestone-step">
+                <div class="milestone-circle ${count > 0 ? 'active' : ''}" style="${count > 0 ? `border-color: ${color}; background: linear-gradient(135deg, ${color}15 0%, ${color}25 100%);` : ''}">
+                  <div class="milestone-name">${displayName}</div>
+                  <div class="milestone-count-badge" style="background: ${count > 0 ? color : 'var(--muted)'}">${count}</div>
+                </div>
+                ${!isLast ? '<div class="milestone-arrow">→</div>' : ''}
               </div>
-              ${!isLast ? '<div class="milestone-arrow">→</div>' : ''}
-            </div>
-          `;
-        }).join('')}
+            `;
+          }).join('')}
+        </div>
       </div>
     </div>
     <div class="toolbar">
-      <div class="toolbar-row">
-        <div class="search-group">
-          <input id="search" placeholder="Search by name, ticket..." value="${q}">
-        </div>
+      <div class="toolbar-primary">
+        ${listSearchFieldHtml(q)}
         <div class="filter-group" id="basic-filters">
-          <div class="multi-select-wrapper">
-            <button class="multi-select-btn" data-filter="fDepartment">
-              Department ${filter.departmentId.length > 0 ? `(${filter.departmentId.length})` : ''}
-            </button>
-            <div class="multi-select-dropdown" id="dropdown-fDepartment">
-              ${LOOKUPS.departments.map(d => `
-                <label class="multi-select-option">
-                  <input type="checkbox" value="${d.id}" ${filter.departmentId.includes(d.id) ? 'checked' : ''}>
-                  ${d.name}
-                </label>
-              `).join('')}
-            </div>
-          </div>
           <div class="multi-select-wrapper">
             <button class="multi-select-btn" data-filter="fPriority">
               Priority ${filter.priority.length > 0 ? `(${filter.priority.length})` : ''}
@@ -5761,114 +6476,136 @@ async function renderCRList() {
               `).join('')}
             </div>
           </div>
-          <div class="multi-select-wrapper">
-            <button class="multi-select-btn" data-filter="fItPic">
-              IT PIC ${filter.itPicId.length > 0 ? `(${filter.itPicId.length})` : ''}
-            </button>
-            <div class="multi-select-dropdown" id="dropdown-fItPic">
-              ${itPicFilterUsers.map(u => `
-                <label class="multi-select-option">
-                  <input type="checkbox" value="${u.id}" ${filter.itPicId.includes(u.id) ? 'checked' : ''}>
-                  ${u.name}
-                </label>
-              `).join('')}
-            </div>
-          </div>
-          <div class="multi-select-wrapper">
-            <button class="multi-select-btn" data-filter="fItPm">
-              IT PM ${filter.itPmId.length > 0 ? `(${filter.itPmId.length})` : ''}
-            </button>
-            <div class="multi-select-dropdown" id="dropdown-fItPm">
-              ${itPmFilterUsers.map(u => `
-                <label class="multi-select-option">
-                  <input type="checkbox" value="${u.id}" ${filter.itPmId.includes(u.id) ? 'checked' : ''}>
-                  ${u.name}
-                </label>
-              `).join('')}
-            </div>
-          </div>
-          <div class="multi-select-wrapper">
-            <button class="multi-select-btn" data-filter="fItManager">
-              IT Manager ${filter.itManagerId.length > 0 ? `(${filter.itManagerId.length})` : ''}
-            </button>
-            <div class="multi-select-dropdown" id="dropdown-fItManager">
-              ${itManagerFilterUsers.map(u => `
-                <label class="multi-select-option">
-                  <input type="checkbox" value="${u.id}" ${filter.itManagerId.includes(u.id) ? 'checked' : ''}>
-                  ${u.name}
-                </label>
-              `).join('')}
-            </div>
-          </div>
-          <div class="multi-select-wrapper">
-            <button class="multi-select-btn" data-filter="fSystemImpacted">
-              System Impacted ${filter.systemImpactedId.length > 0 ? `(${filter.systemImpactedId.length})` : ''}
-            </button>
-            <div class="multi-select-dropdown" id="dropdown-fSystemImpacted">
-              ${(LOOKUPS.dwsApplications || []).map(a => `
-                <label class="multi-select-option">
-                  <input type="checkbox" value="${a.id}" ${filter.systemImpactedId.includes(a.id) ? 'checked' : ''}>
-                  ${escapeHtml(a.systemName)}
-                </label>
-              `).join('')}
-            </div>
-          </div>
-        </div>
-        <div class="date-filters-group" id="date-filters">
-          <div class="date-filter-wrapper">
-            <button class="multi-select-btn" data-filter="fCreateDate">
-              <span class="filter-label">Create Date</span> ${filter.createdAt ? '<span class="filter-active">✓</span>' : ''}
-            </button>
-            <div class="date-filter-dropdown" id="dropdown-fCreateDate">
-              <div class="date-filter-content">
-                <select id="createDate-operator" class="date-operator-select">
-                  <option value="eq" ${filter.createdAt?.operator === 'eq' ? 'selected' : ''}>Equal</option>
-                  <option value="gte" ${filter.createdAt?.operator === 'gte' ? 'selected' : ''}>≥ Greater or Equal</option>
-                  <option value="lte" ${filter.createdAt?.operator === 'lte' ? 'selected' : ''}>≤ Less or Equal</option>
-                </select>
-                <input type="date" id="createDate-value" value="${filter.createdAt?.date || ''}" class="date-input">
-              </div>
-            </div>
-          </div>
-          <div class="date-filter-wrapper">
-            <button class="multi-select-btn" data-filter="fStartDate">
-              <span class="filter-label">Actual Start Date</span> ${filter.startDate ? '<span class="filter-active">✓</span>' : ''}
-            </button>
-            <div class="date-filter-dropdown" id="dropdown-fStartDate">
-              <div class="date-filter-content">
-                <select id="startDate-operator" class="date-operator-select">
-                  <option value="eq" ${filter.startDate?.operator === 'eq' ? 'selected' : ''}>Equal</option>
-                  <option value="gte" ${filter.startDate?.operator === 'gte' ? 'selected' : ''}>≥ Greater or Equal</option>
-                  <option value="lte" ${filter.startDate?.operator === 'lte' ? 'selected' : ''}>≤ Less or Equal</option>
-                </select>
-                <input type="date" id="startDate-value" value="${filter.startDate?.date || ''}" class="date-input">
-              </div>
-            </div>
-          </div>
-          <div class="date-filter-wrapper">
-            <button class="multi-select-btn" data-filter="fEndDate">
-              <span class="filter-label">Actual End Date</span> ${filter.endDate ? '<span class="filter-active">✓</span>' : ''}
-            </button>
-            <div class="date-filter-dropdown" id="dropdown-fEndDate">
-              <div class="date-filter-content">
-                <select id="endDate-operator" class="date-operator-select">
-                  <option value="eq" ${filter.endDate?.operator === 'eq' ? 'selected' : ''}>Equal</option>
-                  <option value="gte" ${filter.endDate?.operator === 'gte' ? 'selected' : ''}>≥ Greater or Equal</option>
-                  <option value="lte" ${filter.endDate?.operator === 'lte' ? 'selected' : ''}>≤ Less or Equal</option>
-                </select>
-                <input type="date" id="endDate-value" value="${filter.endDate?.date || ''}" class="date-input">
-              </div>
-            </div>
-          </div>
+          <button type="button" class="filters-toggle-btn" id="filters-toggle-btn" aria-expanded="${advancedOpenCR ? 'true' : 'false'}">${advancedOpenCR ? 'Hide filters' : 'More filters'}</button>
         </div>
         <div class="action-group">
           <button id="btn-columns" onclick="showColumnSettings('crlist')" title="Column Settings" class="icon-btn">⚙️</button>
           <button type="button" class="btn-secondary" onclick="exportCRListToExcel()" title="Download filtered rows as CSV (opens in Microsoft Excel)">Export Excel</button>
           <button id="apply-filters-btn" class="primary" onclick="applyFiltersCR()">Apply Filters</button>
-          ${canCreateCR ? '<a href="#new/CR"><button class="primary">+ New CR</button></a>' : ''}
+          ${canCreateCR ? '<a href="#new/CR" class="btn primary">+ New CR</a>' : ''}
         </div>
       </div>
+      <div class="toolbar-advanced ${advancedOpenCR ? 'open' : ''}" id="toolbar-advanced">
+        <div class="toolbar-advanced-row">
+          <div class="filter-group">
+            <div class="multi-select-wrapper">
+              <button class="multi-select-btn" data-filter="fDepartment">
+                Department ${filter.departmentId.length > 0 ? `(${filter.departmentId.length})` : ''}
+              </button>
+              <div class="multi-select-dropdown" id="dropdown-fDepartment">
+                ${LOOKUPS.departments.map(d => `
+                  <label class="multi-select-option">
+                    <input type="checkbox" value="${d.id}" ${filter.departmentId.includes(d.id) ? 'checked' : ''}>
+                    ${d.name}
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+            <div class="multi-select-wrapper">
+              <button class="multi-select-btn" data-filter="fItPic">
+                IT PIC ${filter.itPicId.length > 0 ? `(${filter.itPicId.length})` : ''}
+              </button>
+              <div class="multi-select-dropdown" id="dropdown-fItPic">
+                ${itPicFilterUsers.map(u => `
+                  <label class="multi-select-option">
+                    <input type="checkbox" value="${u.id}" ${filter.itPicId.includes(u.id) ? 'checked' : ''}>
+                    ${u.name}
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+            <div class="multi-select-wrapper">
+              <button class="multi-select-btn" data-filter="fItPm">
+                IT PM ${filter.itPmId.length > 0 ? `(${filter.itPmId.length})` : ''}
+              </button>
+              <div class="multi-select-dropdown" id="dropdown-fItPm">
+                ${itPmFilterUsers.map(u => `
+                  <label class="multi-select-option">
+                    <input type="checkbox" value="${u.id}" ${filter.itPmId.includes(u.id) ? 'checked' : ''}>
+                    ${u.name}
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+            <div class="multi-select-wrapper">
+              <button class="multi-select-btn" data-filter="fItManager">
+                IT Manager ${filter.itManagerId.length > 0 ? `(${filter.itManagerId.length})` : ''}
+              </button>
+              <div class="multi-select-dropdown" id="dropdown-fItManager">
+                ${itManagerFilterUsers.map(u => `
+                  <label class="multi-select-option">
+                    <input type="checkbox" value="${u.id}" ${filter.itManagerId.includes(u.id) ? 'checked' : ''}>
+                    ${u.name}
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+            <div class="multi-select-wrapper">
+              <button class="multi-select-btn" data-filter="fSystemImpacted">
+                System Impacted ${filter.systemImpactedId.length > 0 ? `(${filter.systemImpactedId.length})` : ''}
+              </button>
+              <div class="multi-select-dropdown" id="dropdown-fSystemImpacted">
+                ${(LOOKUPS.dwsApplications || []).map(a => `
+                  <label class="multi-select-option">
+                    <input type="checkbox" value="${a.id}" ${filter.systemImpactedId.includes(a.id) ? 'checked' : ''}>
+                    ${escapeHtml(a.systemName)}
+                  </label>
+                `).join('')}
+              </div>
+            </div>
+          </div>
+          <div class="date-filters-group" id="date-filters">
+            <div class="date-filter-wrapper">
+              <button class="multi-select-btn" data-filter="fCreateDate">
+                <span class="filter-label">Create Date</span> ${filter.createdAt ? '<span class="filter-active">✓</span>' : ''}
+              </button>
+              <div class="date-filter-dropdown" id="dropdown-fCreateDate">
+                <div class="date-filter-content">
+                  <select id="createDate-operator" class="date-operator-select">
+                    <option value="eq" ${filter.createdAt?.operator === 'eq' ? 'selected' : ''}>Equal</option>
+                    <option value="gte" ${filter.createdAt?.operator === 'gte' ? 'selected' : ''}>≥ Greater or Equal</option>
+                    <option value="lte" ${filter.createdAt?.operator === 'lte' ? 'selected' : ''}>≤ Less or Equal</option>
+                  </select>
+                  <input type="date" id="createDate-value" value="${filter.createdAt?.date || ''}" class="date-input">
+                </div>
+              </div>
+            </div>
+            <div class="date-filter-wrapper">
+              <button class="multi-select-btn" data-filter="fStartDate">
+                <span class="filter-label">Actual Start Date</span> ${filter.startDate ? '<span class="filter-active">✓</span>' : ''}
+              </button>
+              <div class="date-filter-dropdown" id="dropdown-fStartDate">
+                <div class="date-filter-content">
+                  <select id="startDate-operator" class="date-operator-select">
+                    <option value="eq" ${filter.startDate?.operator === 'eq' ? 'selected' : ''}>Equal</option>
+                    <option value="gte" ${filter.startDate?.operator === 'gte' ? 'selected' : ''}>≥ Greater or Equal</option>
+                    <option value="lte" ${filter.startDate?.operator === 'lte' ? 'selected' : ''}>≤ Less or Equal</option>
+                  </select>
+                  <input type="date" id="startDate-value" value="${filter.startDate?.date || ''}" class="date-input">
+                </div>
+              </div>
+            </div>
+            <div class="date-filter-wrapper">
+              <button class="multi-select-btn" data-filter="fEndDate">
+                <span class="filter-label">Actual End Date</span> ${filter.endDate ? '<span class="filter-active">✓</span>' : ''}
+              </button>
+              <div class="date-filter-dropdown" id="dropdown-fEndDate">
+                <div class="date-filter-content">
+                  <select id="endDate-operator" class="date-operator-select">
+                    <option value="eq" ${filter.endDate?.operator === 'eq' ? 'selected' : ''}>Equal</option>
+                    <option value="gte" ${filter.endDate?.operator === 'gte' ? 'selected' : ''}>≥ Greater or Equal</option>
+                    <option value="lte" ${filter.endDate?.operator === 'lte' ? 'selected' : ''}>≤ Less or Equal</option>
+                  </select>
+                  <input type="date" id="endDate-value" value="${filter.endDate?.date || ''}" class="date-input">
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+      <div id="list-filter-chips-host">${buildListFilterChips(filter, q, { paramPrefix: 'cr' })}</div>
     </div>
+    <div id="list-results-meta" class="list-results-meta" aria-live="polite">${listResultsMetaHtml(dataWithCR.length, q, 'CR')}</div>
     <div class="table-scroll-pair">
       <div class="table-scroll-top" aria-hidden="true"><div class="table-scroll-top-inner"></div></div>
       <div class="table-wrapper">
@@ -5883,7 +6620,11 @@ async function renderCRList() {
               }).join('')}
             </tr>
           </thead>
-          <tbody>${dataWithCR.map(item => initiativeRow(item.initiative, item.crData, colVisibility)).join('')}</tbody>
+          <tbody>${
+            dataWithCR.length
+              ? dataWithCR.map(item => initiativeRow(item.initiative, item.crData, colVisibility)).join('')
+              : listEmptyStateRow(columns.filter(c => colVisibility[c.class] !== false).length, q, 'CRs')
+          }</tbody>
         </table>
       </div>
     </div>
@@ -5915,6 +6656,12 @@ async function renderCRList() {
   initScrollableTables();
   initTableScrollPairs();
   wireRecentActivityFab();
+  wireFiltersToggle();
+  wireMilestoneGraphToggle();
+  wireListFilterChips('cr', () => renderCRList());
+  wireMultiSelectBulkActions();
+  wireListSearchControls('crlist');
+  wireListTableRowActions('crlist');
 
   // Multi-select dropdown handlers (checkbox filters)
   document.querySelectorAll('.multi-select-btn').forEach(btn => {
@@ -6018,28 +6765,11 @@ async function renderCRList() {
     else url.searchParams.delete('cr_endDate');
 
     history.pushState({}, '', url);
-    renderCRList();
+    softRefreshListTable('crlist');
   };
 
-  // Search auto-apply while typing (debounced) for CR list
-  let crSearchDebounceTimer = null;
-  const crSearchEl = document.getElementById('search');
-  if (crSearchEl) {
-    crSearchEl.addEventListener('input', () => {
-      if (crSearchDebounceTimer) clearTimeout(crSearchDebounceTimer);
-      crSearchDebounceTimer = setTimeout(() => {
-        window.applyFiltersCR();
-      }, 350);
-    });
-    crSearchEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') {
-        if (crSearchDebounceTimer) clearTimeout(crSearchDebounceTimer);
-        window.applyFiltersCR();
-      }
-    });
-  }
   // Add resize handles to ALL columns (not just sortable) - CR List
-  document.querySelectorAll('thead th').forEach(th => {
+  document.querySelectorAll('#cr-table thead th').forEach(th => {
     // Skip actions column
     if (th.classList.contains('col-actions')) return;
     const resizer = document.createElement('span');
@@ -6095,22 +6825,18 @@ async function renderCRList() {
       const table = th.closest('table');
       if (!table || !colClass) return;
       const viewType = 'crlist';
-
-      // Debug: verify the handler is firing
-      console.log('[column-resize] start', viewType, colClass, startWidth);
+      const minW = getColumnMinWidth(colClass);
 
       const onMove = (mv) => {
         mv.preventDefault();
         const dx = mv.clientX - startX;
-        const newW = Math.max(80, startWidth + dx);
-        console.log('[column-resize] move', colClass, 'dx:', dx, 'newW:', newW);
+        const newW = Math.max(minW, Math.min(560, startWidth + dx));
         // Set width on header with min/max to force it
         th.style.width = newW + 'px';
         th.style.minWidth = newW + 'px';
         th.style.maxWidth = newW + 'px';
         // Set width on all matching cells
         const cells = table.querySelectorAll(`tbody td.${colClass}`);
-        console.log('[column-resize] found', cells.length, 'cells for', colClass);
         cells.forEach(td => {
           td.style.width = newW + 'px';
           td.style.minWidth = newW + 'px';
@@ -6121,10 +6847,9 @@ async function renderCRList() {
       const onUp = () => {
         window.removeEventListener('pointermove', onMove, true);
         window.removeEventListener('pointerup', onUp, true);
-        console.log('[column-resize] end', colClass, 'final width:', th.offsetWidth);
         // Persist width
         const widths = getColumnWidths(viewType) || {};
-        const w = Math.max(80, th.offsetWidth || 0);
+        const w = Math.max(minW, Math.min(560, th.offsetWidth || 0));
         widths[colClass] = w;
         saveColumnWidths(viewType, widths);
       };
@@ -6132,33 +6857,6 @@ async function renderCRList() {
       window.addEventListener('pointermove', onMove, true);
       window.addEventListener('pointerup', onUp, true);
     };
-  });
-  document.querySelectorAll('button.delete').forEach(btn => {
-    btn.onclick = async () => {
-      if (!confirm('Delete this CR?')) return;
-      try {
-        const result = await fetchJSON(`/api/initiatives/${btn.dataset.id}`, { method: 'DELETE' });
-        if (result?.trashId) {
-          const undo = confirm('CR deleted. Undo?');
-          if (undo) {
-            await fetchJSON(`/api/initiatives/restore/${result.trashId}`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({}),
-            });
-          }
-        }
-        renderCRList();
-      } catch (e) {
-        alert('Failed to delete CR: ' + (e.message || String(e)));
-      }
-    };
-  });
-  document.querySelectorAll('button.view').forEach(btn => {
-    btn.onclick = () => location.hash = `#view/${btn.dataset.id}`;
-  });
-  document.querySelectorAll('button.edit').forEach(btn => {
-    btn.onclick = () => location.hash = `#edit/${btn.dataset.id}`;
   });
 
   // Apply persisted column widths for CR List table
@@ -6330,7 +7028,7 @@ window.showInitiativesModal = async function(filterType, filterValue, title, ini
     
     document.body.appendChild(modal);
   } catch (error) {
-    alert('Failed to load initiatives: ' + error.message);
+    notify('Failed to load initiatives: ' + error.message);
   }
 }
 
@@ -8146,10 +8844,10 @@ async function renderProfile() {
         currentUser = { ...currentUser, ...updated };
         updateNavAuth();
         
-        alert('Profile updated successfully!');
+        notify('Profile updated successfully!');
         renderProfile(); // Refresh to show updated data
       } catch (error) {
-        alert('Failed to update profile: ' + error.message);
+        notify('Failed to update profile: ' + error.message);
       }
     };
     
@@ -8159,7 +8857,7 @@ async function renderProfile() {
       const teamMemberId = select.value;
       
       if (!teamMemberId) {
-        alert('Please select a user to add');
+        notify('Please select a user to add');
         return;
       }
       
@@ -8170,15 +8868,15 @@ async function renderProfile() {
           body: JSON.stringify({ teamMemberId })
         });
         
-        alert('Team member added successfully!');
+        notify('Team member added successfully!');
         renderProfile(); // Refresh to show updated team
       } catch (error) {
-        alert('Failed to add team member: ' + error.message);
+        notify('Failed to add team member: ' + error.message);
       }
     };
     
     window.removeTeamMember = async (teamMemberId, memberName) => {
-      if (!confirm(`Are you sure you want to remove ${memberName} from your team?`)) {
+      if (!(await confirmDialog(`Are you sure you want to remove ${memberName} from your team?`, { title: 'Remove team member', confirmText: 'Remove', danger: true }))) {
         return;
       }
       
@@ -8187,10 +8885,10 @@ async function renderProfile() {
           method: 'DELETE'
         });
         
-        alert('Team member removed successfully!');
+        notify('Team member removed successfully!');
         renderProfile(); // Refresh to show updated team
       } catch (error) {
-        alert('Failed to remove team member: ' + error.message);
+        notify('Failed to remove team member: ' + error.message);
       }
     };
   } catch (error) {
@@ -8229,7 +8927,7 @@ window.showChangePasswordModal = function() {
     };
     
     if (payload.newPassword !== payload.confirmPassword) {
-      alert('New password and confirm password do not match');
+      notify('New password and confirm password do not match');
       return;
     }
     
@@ -8240,10 +8938,10 @@ window.showChangePasswordModal = function() {
         body: JSON.stringify(payload)
       });
       
-      alert('Password changed successfully!');
+      notify('Password changed successfully!');
       modal.remove();
     } catch (error) {
-      alert('Failed to change password: ' + error.message);
+      notify('Failed to change password: ' + error.message);
     }
   };
 };
@@ -8490,12 +9188,12 @@ async function renderAdminUsers() {
     };
     
     window.deleteUser = async (userId) => {
-      if (!confirm('Are you sure you want to delete this user?')) return;
+      if (!(await confirmDialog('Are you sure you want to delete this user?', { title: 'Delete user', confirmText: 'Delete', danger: true }))) return;
       try {
         await fetchJSON(`/api/admin/users/${userId}`, { method: 'DELETE' });
         renderAdminUsers();
       } catch (e) {
-        alert('Error deleting user: ' + e.message);
+        notify('Error deleting user: ' + e.message);
       }
     };
     
@@ -8508,13 +9206,13 @@ async function renderAdminUsers() {
       if (!newPassword) return;
       
       if (newPassword.length < 6) {
-        alert('Password must be at least 6 characters');
+        notify('Password must be at least 6 characters');
         return;
       }
       
       const confirmPassword = prompt('Confirm new password:');
       if (newPassword !== confirmPassword) {
-        alert('Passwords do not match');
+        notify('Passwords do not match');
         return;
       }
       
@@ -8524,10 +9222,10 @@ async function renderAdminUsers() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ password: newPassword }),
         });
-        alert('Password updated successfully!');
+        notify('Password updated successfully!');
         renderAdminUsers();
       } catch (e) {
-        alert('Error updating password: ' + e.message);
+        notify('Error updating password: ' + e.message);
       }
     };
     
@@ -8563,7 +9261,7 @@ async function renderAdminUsers() {
           closeUserForm();
           renderAdminUsers();
         } catch (e) {
-          alert('Error creating user: ' + e.message);
+          notify('Error creating user: ' + e.message);
         }
       } else {
         // Update
@@ -8591,7 +9289,7 @@ async function renderAdminUsers() {
           closeUserForm();
           renderAdminUsers();
         } catch (e) {
-          alert('Error updating user: ' + e.message);
+          notify('Error updating user: ' + e.message);
         }
       }
     };
@@ -8824,7 +9522,7 @@ async function renderAdminRoles() {
         });
         renderAdminRoles();
       } catch (e) {
-        alert('Error updating role: ' + e.message);
+        notify('Error updating role: ' + e.message);
         renderAdminRoles(); // Reload to revert
       }
     };
@@ -8877,9 +9575,9 @@ async function renderAdminRoles() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ rules: rulesToSave }),
           });
-          alert('Access rules saved. Changes will apply on next login.');
+          notify('Access rules saved. Changes will apply on next login.');
         } catch (e) {
-          alert('Error saving access rules: ' + e.message);
+          notify('Error saving access rules: ' + e.message);
         }
       };
     }
@@ -8932,6 +9630,7 @@ async function renderMasterDwsApplications() {
               <th>Production URL</th>
               <th>Staging URL</th>
               <th>Github URL</th>
+              <th>Deployment Steps</th>
               <th>Actions</th>
             </tr>
           </thead>
@@ -8942,6 +9641,7 @@ async function renderMasterDwsApplications() {
                 <td>${a.productionUrl ? `<a href="${escape(a.productionUrl)}" target="_blank" rel="noopener">Open</a>` : '<span class="muted">-</span>'}</td>
                 <td>${a.stagingUrl ? `<a href="${escape(a.stagingUrl)}" target="_blank" rel="noopener">Open</a>` : '<span class="muted">-</span>'}</td>
                 <td style="max-width:320px;white-space:pre-wrap;word-break:break-word;">${a.githubUrl ? escape(String(a.githubUrl)) : '<span class="muted">-</span>'}</td>
+                <td style="max-width:360px;white-space:pre-wrap;word-break:break-word;">${a.deploymentSteps ? escape(String(a.deploymentSteps)) : '<span class="muted">-</span>'}</td>
                 <td style="white-space:nowrap;">
                   <button data-action="edit" data-id="${escape(a.id)}">Edit</button>
                   <button data-action="delete" data-id="${escape(a.id)}" style="color: var(--danger); margin-left: 8px;">Delete</button>
@@ -8965,6 +9665,7 @@ async function renderMasterDwsApplications() {
           ${formRow('System Production URL', `<input name="productionUrl" type="url" value="${escape(existing?.productionUrl || '')}" placeholder="https://..." />`)}
           ${formRow('System Staging URL', `<input name="stagingUrl" type="url" value="${escape(existing?.stagingUrl || '')}" placeholder="https://..." />`)}
           ${formRow('Github URL', `<textarea name="githubUrl" rows="3" style="width:100%;resize:vertical;" placeholder="Repository link or description...">${escape(existing?.githubUrl || '')}</textarea>`)}
+          ${formRow('Deployment Steps', `<textarea name="deploymentSteps" rows="5" style="width:100%;resize:vertical;" placeholder="Step-by-step deployment instructions for this application...">${escape(existing?.deploymentSteps || '')}</textarea>`)}
           <div style="display:flex; gap: 12px;">
             <button type="submit" class="primary">${mode === 'create' ? 'Create' : 'Save'}</button>
             <button type="button" id="btn-cancel">Cancel</button>
@@ -8987,6 +9688,7 @@ async function renderMasterDwsApplications() {
         productionUrl: fd.get('productionUrl') || null,
         stagingUrl: fd.get('stagingUrl') || null,
         githubUrl: (fd.get('githubUrl') || '').trim() || null,
+        deploymentSteps: (fd.get('deploymentSteps') || '').trim() || null,
       };
       try {
         if (mode === 'create') {
@@ -9008,7 +9710,7 @@ async function renderMasterDwsApplications() {
         modal.remove();
         renderMasterDwsApplications();
       } catch (err) {
-        alert(err.message || String(err));
+        notify(err.message || String(err));
       }
     };
   };
@@ -9129,14 +9831,14 @@ async function renderMasterDwsApplications() {
     btn.onclick = async () => {
       const id = btn.dataset.id;
       const existing = apps.find((a) => a.id === id);
-      if (!confirm(`Delete "${existing?.systemName || 'this application'}"?`)) return;
+      if (!(await confirmDialog(`Delete "${existing?.systemName || 'this application'}"?`, { title: 'Delete application', confirmText: 'Delete', danger: true }))) return;
       try {
         await fetchJSON(`/api/dws-applications/${id}`, { method: 'DELETE' });
         LOOKUPS = { users: [], departments: [], dwsApplications: [] };
         await ensureLookups();
         renderMasterDwsApplications();
       } catch (err) {
-        alert(err.message || String(err));
+        notify(err.message || String(err));
       }
     };
   });
@@ -9529,12 +10231,12 @@ async function renderManagementDashboard() {
       try {
         const root = document.querySelector('.mgmt-dashboard');
         if (!root) {
-          alert('Dashboard not found');
+          notify('Dashboard not found');
           return;
         }
         const h2c = window.html2canvas;
         if (typeof h2c !== 'function') {
-          alert('Image export is not available (html2canvas not loaded).');
+          notify('Image export is not available (html2canvas not loaded).');
           return;
         }
 
@@ -9599,7 +10301,7 @@ async function renderManagementDashboard() {
         a.click();
         a.remove();
       } catch (e) {
-        alert(e?.message || String(e));
+        notify(e?.message || String(e));
       }
     };
   }
@@ -9614,10 +10316,10 @@ async function renderManagementDashboard() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ highlights, criticalAlerts, portfolioStatus }),
       });
-      alert('Saved');
+      notify('Saved');
       renderManagementDashboard();
     } catch (e) {
-      alert(e.message || String(e));
+      notify(e.message || String(e));
     }
   };
 }
@@ -11043,22 +11745,28 @@ function renderAuth() {
 
   document.getElementById('form-login').onsubmit = async e => {
     e.preventDefault();
-    const fd = new FormData(e.target);
-    const body = Object.fromEntries(fd.entries());
-    const res = await fetch('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    const json = await res.json();
-    if (!res.ok) {
-      alert(json.error || 'Login failed');
-      return;
+    const submitBtn = e.target.querySelector('button[type="submit"]');
+    setButtonLoading(submitBtn, true, 'Signing in…');
+    try {
+      const fd = new FormData(e.target);
+      const body = Object.fromEntries(fd.entries());
+      const res = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const json = await res.json();
+      if (!res.ok) {
+        notify(json.error || 'Login failed');
+        return;
+      }
+      setToken(json.token);
+      currentUser = json.user;
+      updateNavAuth();
+      location.hash = '#user-dashboard';
+    } finally {
+      setButtonLoading(submitBtn, false);
     }
-    setToken(json.token);
-    currentUser = json.user;
-    updateNavAuth();
-    location.hash = '#user-dashboard';
   };
 
   document.getElementById('form-register').onsubmit = async e => {
@@ -11068,7 +11776,7 @@ function renderAuth() {
     const confirmPassword = fd.get('confirmPassword');
     
     if (password !== confirmPassword) {
-      alert('Passwords do not match');
+      notify('Passwords do not match');
       return;
     }
     
@@ -11080,17 +11788,17 @@ function renderAuth() {
     });
     const json = await res.json();
     if (!res.ok) {
-      alert(json.error || 'Registration failed');
+      notify(json.error || 'Registration failed');
       return;
     }
     if (json.requiresActivation) {
       if (json.activationMethod === 'email') {
-        alert('Registration successful! Please check your email to activate your account before logging in.');
+        notify('Registration successful! Please check your email to activate your account before logging in.');
       } else {
-        alert('Registration successful! Your account is pending admin approval. You will be notified once your account is activated.');
+        notify('Registration successful! Your account is pending admin approval. You will be notified once your account is activated.');
       }
     } else {
-      alert('Registration successful. You can now log in.');
+      notify('Registration successful. You can now log in.');
     }
     tabs.forEach(t => {
       t.classList.toggle('active', t.dataset.tab === 'login');
@@ -11111,11 +11819,11 @@ function renderAuth() {
     });
     if (!res.ok) {
       const json = await res.json().catch(() => ({}));
-      alert(json.error || 'Request failed');
+      notify(json.error || 'Request failed');
       return;
     }
     const json = await res.json();
-    alert(json.message || 'If an account exists with this email, a password reset link has been sent.');
+    notify(json.message || 'If an account exists with this email, a password reset link has been sent.');
   };
 }
 
@@ -11141,7 +11849,7 @@ async function requireAuth() {
 async function requireAdmin() {
   const user = await getCurrentUser();
   if (!user || !user.isAdmin) {
-    alert('Admin access required');
+    notify('Admin access required');
     location.hash = '#user-dashboard';
     return false;
   }
@@ -11471,12 +12179,12 @@ async function renderResetPassword(token) {
     const confirmPassword = fd.get('confirmPassword');
     
     if (password !== confirmPassword) {
-      alert('Passwords do not match');
+      notify('Passwords do not match');
       return;
     }
     
     if (password.length < 6) {
-      alert('Password must be at least 6 characters');
+      notify('Password must be at least 6 characters');
       return;
     }
     
@@ -11488,7 +12196,7 @@ async function renderResetPassword(token) {
       });
       const json = await res.json();
       if (!res.ok) {
-        alert(json.error || 'Password reset failed');
+        notify(json.error || 'Password reset failed');
         return;
       }
       app.innerHTML = `
@@ -11499,7 +12207,7 @@ async function renderResetPassword(token) {
         </div>
       `;
     } catch (e) {
-      alert('Error resetting password: ' + e.message);
+      notify('Error resetting password: ' + e.message);
     }
   };
 }
