@@ -62,7 +62,7 @@ router.get('/:id/crs', async (req, res) => {
 });
 
 router.post('/', async (req, res) => {
-  const { systemName, productionUrl, stagingUrl, githubUrl } = req.body || {};
+  const { systemName, productionUrl, stagingUrl, githubUrl, deploymentSteps } = req.body || {};
   if (!systemName || String(systemName).trim() === '') {
     return res.status(400).json({ error: 'System Name is required' });
   }
@@ -77,6 +77,7 @@ router.post('/', async (req, res) => {
     productionUrl: productionUrl ? String(productionUrl).trim() : null,
     stagingUrl: stagingUrl ? String(stagingUrl).trim() : null,
     githubUrl: githubUrl ? String(githubUrl).trim() : null,
+    deploymentSteps: deploymentSteps ? String(deploymentSteps).trim() : null,
     createdAt: ts,
     updatedAt: ts,
   });
@@ -86,7 +87,7 @@ router.post('/', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   const { id } = req.params;
-  const { systemName, productionUrl, stagingUrl, githubUrl } = req.body || {};
+  const { systemName, productionUrl, stagingUrl, githubUrl, deploymentSteps } = req.body || {};
   if (!systemName || String(systemName).trim() === '') {
     return res.status(400).json({ error: 'System Name is required' });
   }
@@ -100,6 +101,7 @@ router.put('/:id', async (req, res) => {
     productionUrl: productionUrl ? String(productionUrl).trim() : null,
     stagingUrl: stagingUrl ? String(stagingUrl).trim() : null,
     githubUrl: githubUrl ? String(githubUrl).trim() : null,
+    deploymentSteps: deploymentSteps ? String(deploymentSteps).trim() : null,
     updatedAt: now(),
   };
   await store.write(data);

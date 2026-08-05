@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import cookieParser from 'cookie-parser';
 import morgan from 'morgan';
 import path from 'path';
 import { fileURLToPath } from 'url';
@@ -13,6 +14,7 @@ const __dirname = path.dirname(__filename);
 const app = express();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
+app.use(cookieParser());
 app.use(morgan('dev'));
 
 // Serve docs folder for static assets (logo, etc)
@@ -43,8 +45,11 @@ import { requestTimeout } from './middleware/timeout.js';
 import apiV1CrsRouter from './routes/api-v1-crs.js';
 import dwsApplicationsRouter from './routes/dws-applications.js';
 import managementDashboardRouter from './routes/management-dashboard.js';
+import ssoRouter from './routes/sso.js';
 
 // Public routes
+// SSO consumer (DWS Hub) — mounted before authRouter; additive to local login.
+app.use('/api/auth/sso', ssoRouter);
 app.use('/api/auth', authRouter);
 app.use('/api/lookups', lookupsRouter);
 

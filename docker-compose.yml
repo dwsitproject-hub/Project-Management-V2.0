@@ -38,9 +38,19 @@ services:
       - GID=${GID:-}
       - CR_GID=${CR_GID:-}
       - JWT_SECRET=${JWT_SECRET:-dev-secret-change-me-in-production}
-      # Downstream Hub SSO (must match Hub; override with env SSO_TOKEN_SECRET if needed)
-      - SSO_TOKEN_SECRET=${SSO_TOKEN_SECRET:-your-sso-shared-secret-change-in-production}
+      # --- DWS Hub SSO (all optional; each mechanism activates only when set) ---
+      # OIDC (recommended). Leave OIDC_DISCOVERY_URL/OIDC_CLIENT_ID empty to disable.
+      - OIDC_DISCOVERY_URL=${OIDC_DISCOVERY_URL:-}
+      - OIDC_CLIENT_ID=${OIDC_CLIENT_ID:-}
+      - OIDC_REDIRECT_URI=${OIDC_REDIRECT_URI:-}
+      - OIDC_SCOPES=${OIDC_SCOPES:-openid email profile}
+      # Legacy HS256 POST bridge. Empty = disabled (must match the Hub's secret to enable).
+      - SSO_TOKEN_SECRET=${SSO_TOKEN_SECRET:-}
+      # Where the SPA lives (used to redirect the browser back after SSO). Falls back to APP_PUBLIC_ORIGIN.
+      - FRONTEND_URL=${FRONTEND_URL:-http://localhost:8080}
       - APP_PUBLIC_ORIGIN=${APP_PUBLIC_ORIGIN:-http://localhost:8080}
+      # Set true to auto-create a local user on first SSO login (default: invite-only).
+      - SSO_JIT_ENABLED=${SSO_JIT_ENABLED:-false}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-admin@example.com}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-Admin123!}
       - ADMIN_NAME=${ADMIN_NAME:-Administrator}
