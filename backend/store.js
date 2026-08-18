@@ -318,6 +318,7 @@ async function initializeSchema() {
         "productionUrl" TEXT,
         "stagingUrl" TEXT,
         "githubUrl" TEXT,
+        "deploymentSteps" TEXT,
         "createdAt" TEXT NOT NULL,
         "updatedAt" TEXT NOT NULL
       );
@@ -325,6 +326,7 @@ async function initializeSchema() {
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "productionUrl" TEXT;
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "stagingUrl" TEXT;
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "githubUrl" TEXT;
+      ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "deploymentSteps" TEXT;
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "createdAt" TEXT;
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "updatedAt" TEXT;
 
@@ -575,6 +577,7 @@ async function read() {
           productionUrl: row.productionUrl || row.productionurl || null,
           stagingUrl: row.stagingUrl || row.stagingurl || null,
           githubUrl: row.githubUrl || row.githuburl || null,
+          deploymentSteps: row.deploymentSteps || row.deploymentsteps || null,
           createdAt: row.createdAt || row.createdat,
           updatedAt: row.updatedAt || row.updatedat,
         }));
@@ -981,7 +984,7 @@ async function writeImpl(data) {
     }
 
     const insertDwsApp =
-      'INSERT INTO "dwsApplications"("id","systemName","productionUrl","stagingUrl","githubUrl","createdAt","updatedAt") VALUES ($1,$2,$3,$4,$5,$6,$7)';
+      'INSERT INTO "dwsApplications"("id","systemName","productionUrl","stagingUrl","githubUrl","deploymentSteps","createdAt","updatedAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8)';
     for (const a of data.dwsApplications || []) {
       await client.query(insertDwsApp, [
         a.id,
@@ -989,6 +992,7 @@ async function writeImpl(data) {
         a.productionUrl || null,
         a.stagingUrl || null,
         a.githubUrl || null,
+        a.deploymentSteps || null,
         a.createdAt,
         a.updatedAt,
       ]);
