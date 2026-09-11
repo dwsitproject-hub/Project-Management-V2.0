@@ -113,9 +113,30 @@ function getWeekEnd(weekKey) {
   return friday.toISOString().slice(0, 10);
 }
 
+// A CR counts as "open" at a cutoff date if it was created by then and had not
+// yet closed. Status is authoritative for "open": a CR that is currently in a
+// non-terminal status (not Live/Done/Cancelled) is open from its creation date
+// onward — even if it carries a stale end date. Only currently-terminal CRs use
+// their Actual End Date to place WHEN they closed (open only in periods before
+// that date; a terminal CR with no end date can't be placed, so it's treated as
+// closed). This is a TRUE burndown: a CR that later went live still counts in
+// the weeks it was open and drops out from the week it closed — unlike the old
+// logic, which excluded every currently-Live/Cancelled CR from all weeks.
+const CR_TERMINAL = new Set(['LIVE', 'DONE', 'CANCELLED', 'CANCEL']);
+function isCrOpenAt(cr, cutoffStr) {
+  const createdRaw = cr.createdAt || cr.startDate || cr.planStartDate || '';
+  if (!createdRaw) return false;
+  if (String(createdRaw).slice(0, 10) > cutoffStr) return false; // not created yet
+  const isTerminal = CR_TERMINAL.has(String(cr.status || '').toUpperCase().trim());
+  if (!isTerminal) return true; // currently open -> open since it was created
+  // Terminal now: closed on its Actual End Date (open only before it); undated -> closed.
+  const endRaw = cr.endDate && String(cr.endDate).trim() !== '' ? cr.endDate : null;
+  return endRaw ? String(endRaw).slice(0, 10) > cutoffStr : false;
+}
+
 /**
- * Calculate weekly open CR burndown by priority
- * Open = status not LIVE and not CANCELLED at week end
+ * Calculate weekly open CR burndown by priority.
+ * Open = created by week-end and not yet closed by week-end (see isCrOpenAt).
  * @param {Array} crInitiatives - Filtered CR initiatives
  * @returns {Array} Array of weekly burndown data
  */
@@ -140,39 +161,15 @@ function calculateOpenBurndown(crInitiatives) {
   const weeklyData = weekKeys.map((weekKey) => {
     const weekEndStr = getWeekEnd(weekKey);
 
-    // Open = created on/before week end AND (no endDate or endDate after week end)
-    // AND status is not LIVE and not CANCELLED
-    const openCRs = crInitiatives.filter((cr) => {
-      try {
-        const status = (cr.status || '').toUpperCase();
-        if (status === 'LIVE' || status === 'CANCELLED') return false;
-
-        if (!cr.createdAt) return false;
-        const createdDateStr = cr.createdAt.slice(0, 10);
-        if (createdDateStr > weekEndStr) return false;
-
-        if (cr.endDate && cr.endDate !== '' && cr.endDate !== null) {
-          const endDateStr = cr.endDate.slice(0, 10);
-          if (endDateStr <= weekEndStr) return false;
-        }
-
-        return true;
-      } catch {
-        return false;
-      }
-    });
-
-    const counts = openCRs.reduce(
-      (acc, cr) => {
-        const priority = (cr.priority || 'P2').toUpperCase();
-        if (priority === 'P0') acc.P0 += 1;
-        else if (priority === 'P1') acc.P1 += 1;
-        else if (priority === 'P2') acc.P2 += 1;
-        acc.Total = acc.P0 + acc.P1 + acc.P2;
-        return acc;
-      },
-      { P0: 0, P1: 0, P2: 0, Total: 0 }
-    );
+    const counts = { P0: 0, P1: 0, P2: 0, Total: 0 };
+    for (const cr of crInitiatives) {
+      if (!isCrOpenAt(cr, weekEndStr)) continue;
+      const priority = String(cr.priority || 'P2').toUpperCase().trim();
+      if (priority === 'P0') counts.P0 += 1;
+      else if (priority === 'P1') counts.P1 += 1;
+      else counts.P2 += 1;
+    }
+    counts.Total = counts.P0 + counts.P1 + counts.P2;
 
     const mondayDate = new Date(weekKey);
     const fridayDate = new Date(weekEndStr);
@@ -591,31 +588,8 @@ function calculateMonthlyOpenCRs(crInitiatives) {
     const monthLabel = d.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
     const monthEndStr = monthEnd.toISOString().slice(0, 10);
     
-    // Count open CRs at end of month (status != Live and != Cancelled)
-    // Use the same logic as calculateOpenBurndown
-    const openCRs = crInitiatives.filter((cr) => {
-      try {
-        const status = (cr.status || '').toUpperCase();
-        if (status === 'LIVE' || status === 'CANCELLED') return false;
-
-        if (!cr.createdAt) return false;
-        const createdDateStr = cr.createdAt.slice(0, 10);
-        // CR must be created on or before month end
-        if (createdDateStr > monthEndStr) return false;
-
-        // If CR has an endDate, it must be after month end (not closed yet)
-        if (cr.endDate && cr.endDate !== '' && cr.endDate !== null) {
-          const endDateStr = cr.endDate.slice(0, 10);
-          // If endDate is on or before month end, CR is closed
-          if (endDateStr <= monthEndStr) return false;
-        }
-
-        return true;
-      } catch (err) {
-        console.error('Error calculating open CRs for month:', monthEndStr, err);
-        return false;
-      }
-    }).length;
+    // Count open CRs at end of month — same open definition as calculateOpenBurndown.
+    const openCRs = crInitiatives.filter((cr) => isCrOpenAt(cr, monthEndStr)).length;
     
     months.push({
       year,

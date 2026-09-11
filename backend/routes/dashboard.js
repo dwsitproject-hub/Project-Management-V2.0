@@ -195,13 +195,13 @@ function calculateOpenBurndown(projectInitiatives) {
     if (!createdRaw) return false;
     if (String(createdRaw).slice(0, 10) > monthEndStr) return false; // not created yet
 
+    // Status is authoritative for "open": a currently non-terminal project is open
+    // from its creation month onward (even with a stale end date). Only terminal
+    // projects use their Actual End Date to place WHEN they closed.
+    const isTerminal = TERMINAL.has(String(p.status || '').toUpperCase().trim());
+    if (!isTerminal) return true;
     const endRaw = p.endDate && String(p.endDate).trim() !== '' ? p.endDate : null;
-    if (endRaw) {
-      // Completed on its Actual End Date -> open only in months before it closed.
-      return String(endRaw).slice(0, 10) > monthEndStr;
-    }
-    // No end date -> open unless already terminal (completed but undated).
-    return !TERMINAL.has(String(p.status || '').toUpperCase().trim());
+    return endRaw ? String(endRaw).slice(0, 10) > monthEndStr : false;
   };
 
   return months.map((m) => {
