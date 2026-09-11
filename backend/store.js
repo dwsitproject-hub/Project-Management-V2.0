@@ -729,6 +729,7 @@ async function writeImpl(data) {
     await client.query('DELETE FROM "notifications"');
     await client.query('DELETE FROM "apiClients"');
     await client.query('DELETE FROM "dwsApplications"');
+    await client.query('DELETE FROM "accessRules"');
     await client.query('DELETE FROM "managementDashboard"');
     await client.query('DELETE FROM "meetingNoteParticipants"');
     await client.query('DELETE FROM "meetingNoteActionItems"');
@@ -995,6 +996,32 @@ async function writeImpl(data) {
         a.deploymentSteps || null,
         a.createdAt,
         a.updatedAt,
+      ]);
+    }
+
+    const insertAccessRule =
+      'INSERT INTO "accessRules"("id","role","type","emailDomain","canViewProjectDashboard","canViewProjectList","canCreateProject","canEditAnyProject","restrictProjectVisibilityToOwnTeamOnly","restrictProjectEditToOwnTeamOnly","canViewCRDashboard","canViewCRList","canCreateCR","canEditCR","canViewMasterDwsApplication","canViewManagementDashboard") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)';
+    const seenRuleIds = new Set();
+    for (const r of data.accessRules || []) {
+      if (!r?.id || seenRuleIds.has(r.id)) continue;
+      seenRuleIds.add(r.id);
+      await client.query(insertAccessRule, [
+        r.id,
+        r.role || null,
+        r.type || null,
+        r.emailDomain || null,
+        !!r.canViewProjectDashboard,
+        !!r.canViewProjectList,
+        !!r.canCreateProject,
+        !!r.canEditAnyProject,
+        !!r.restrictProjectVisibilityToOwnTeamOnly,
+        !!r.restrictProjectEditToOwnTeamOnly,
+        !!r.canViewCRDashboard,
+        !!r.canViewCRList,
+        !!r.canCreateCR,
+        !!r.canEditCR,
+        !!r.canViewMasterDwsApplication,
+        !!r.canViewManagementDashboard,
       ]);
     }
 

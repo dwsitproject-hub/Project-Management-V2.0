@@ -5,17 +5,49 @@ import { authenticateToken } from '../middleware/auth.js';
 
 const router = express.Router();
 
+// Does an access-rule's emailDomain pattern match a user's email?
+// Supports exact ("@energi-up.com") and negated ("!*@energi-up.com") forms.
+function emailDomainMatches(pattern, email) {
+  if (!pattern) return true; // blank = matches anyone
+  const e = String(email || '').toLowerCase();
+  const p = String(pattern).trim();
+  if (p.startsWith('!')) {
+    const domain = p.replace(/^!\*?/, '').toLowerCase(); // "!*@energi-up.com" -> "@energi-up.com"
+    return domain ? !e.endsWith(domain) : true;
+  }
+  return e.endsWith(p.toLowerCase());
+}
+
+// Pick the most specific saved access rule that applies to this user (or null).
+function matchAccessRule(user, rules) {
+  if (!Array.isArray(rules) || rules.length === 0) return null;
+  const email = String(user.email || '').toLowerCase();
+  const type = user.type || null;
+  const role = user.role || null;
+  let best = null;
+  let bestScore = -1;
+  for (const r of rules) {
+    if (r.role && r.role !== role) continue;
+    if (r.type && r.type !== type) continue;
+    if (!emailDomainMatches(r.emailDomain, email)) continue;
+    // Prefer rules that pin more attributes (type is the strongest signal).
+    const score = (r.type ? 2 : 0) + (r.role ? 1 : 0) + (r.emailDomain ? 1 : 0);
+    if (score > bestScore) { best = r; bestScore = score; }
+  }
+  return best;
+}
+
 // Get current user profile
 router.get('/', async (req, res) => {
   try {
     const userId = req.user.id;
     const data = await store.read();
     const user = data.users.find(u => u.id === userId);
-    
+
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
-    
+
     // Return user data without password hash
     const { passwordHash, activationToken, activationTokenExpiry, ...userData } = user;
     // Convert teamMemberIds string to array
@@ -24,6 +56,9 @@ router.get('/', async (req, res) => {
     } else if (!userData.teamMemberIds) {
       userData.teamMemberIds = [];
     }
+    // Attach the access rule that applies to this user so the SPA can enforce
+    // the admin-configured Access Matrix (e.g. Management Dashboard visibility).
+    userData.matchedAccessRule = matchAccessRule(user, data.accessRules || []);
     res.json(userData);
   } catch (error) {
     console.error('Get profile error:', error);
