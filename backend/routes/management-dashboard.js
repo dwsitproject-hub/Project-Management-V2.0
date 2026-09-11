@@ -2,6 +2,7 @@ import express from 'express';
 import store from '../store.js';
 import crypto from 'crypto';
 import { requireAdmin } from '../middleware/auth.js';
+import { canViewManagementDashboard } from '../accessRules.js';
 import {
   PROJECT_MILESTONE_LIVE_WARRANTY,
   PROJECT_MILESTONE_FULLY_LIVE,
@@ -49,9 +50,21 @@ function departmentNameById(departments, id) {
   return dept?.name || '—';
 }
 
-router.use(requireAdmin);
+// Viewing the Management Dashboard is allowed for admins OR users granted it via
+// the Access Matrix (canViewManagementDashboard). Editing stays admin-only (see PUT /notes).
+async function requireManagementDashboardView(req, res, next) {
+  try {
+    if (req.user?.isAdmin) return next();
+    const data = await store.read();
+    const user = (data.users || []).find((u) => u.id === req.user?.id);
+    if (canViewManagementDashboard(user, data.accessRules || [])) return next();
+    return res.status(403).json({ error: 'Management Dashboard access required' });
+  } catch (e) {
+    return res.status(500).json({ error: 'Internal error' });
+  }
+}
 
-router.get('/', async (req, res) => {
+router.get('/', requireManagementDashboardView, async (req, res) => {
   const departmentGroupFilter = String(req.query.departmentGroup || '').trim();
   if (departmentGroupFilter && !isValidDepartmentGroupKey(departmentGroupFilter)) {
     return res.status(400).json({ error: 'Invalid departmentGroup' });
@@ -324,7 +337,7 @@ router.get('/', async (req, res) => {
   });
 });
 
-router.put('/notes', async (req, res) => {
+router.put('/notes', requireAdmin, async (req, res) => {
   const { highlights, criticalAlerts, portfolioStatus } = req.body || {};
   const data = await store.read();
   if (!data.managementDashboard) data.managementDashboard = [];

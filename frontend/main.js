@@ -11988,9 +11988,11 @@ async function updateNavAuth() {
     const navCrList = document.getElementById('nav-crlist');
     const navUserDashboard = document.getElementById('nav-user-dashboard');
 
-    // User Dashboard is always visible for authenticated users
+    // User Dashboard visible for authenticated users, EXCEPT Management-role users
+    // (they work from the Management Dashboard instead).
     if (navUserDashboard) {
-      navUserDashboard.classList.remove('hidden');
+      const hideForManagement = !user.isAdmin && access?.type === 'Management';
+      navUserDashboard.classList.toggle('hidden', hideForManagement);
     }
 
     // CR Dashboard + CR List per access rules (default true in access)

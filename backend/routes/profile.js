@@ -2,40 +2,9 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import store from '../store.js';
 import { authenticateToken } from '../middleware/auth.js';
+import { matchAccessRule } from '../accessRules.js';
 
 const router = express.Router();
-
-// Does an access-rule's emailDomain pattern match a user's email?
-// Supports exact ("@energi-up.com") and negated ("!*@energi-up.com") forms.
-function emailDomainMatches(pattern, email) {
-  if (!pattern) return true; // blank = matches anyone
-  const e = String(email || '').toLowerCase();
-  const p = String(pattern).trim();
-  if (p.startsWith('!')) {
-    const domain = p.replace(/^!\*?/, '').toLowerCase(); // "!*@energi-up.com" -> "@energi-up.com"
-    return domain ? !e.endsWith(domain) : true;
-  }
-  return e.endsWith(p.toLowerCase());
-}
-
-// Pick the most specific saved access rule that applies to this user (or null).
-function matchAccessRule(user, rules) {
-  if (!Array.isArray(rules) || rules.length === 0) return null;
-  const email = String(user.email || '').toLowerCase();
-  const type = user.type || null;
-  const role = user.role || null;
-  let best = null;
-  let bestScore = -1;
-  for (const r of rules) {
-    if (r.role && r.role !== role) continue;
-    if (r.type && r.type !== type) continue;
-    if (!emailDomainMatches(r.emailDomain, email)) continue;
-    // Prefer rules that pin more attributes (type is the strongest signal).
-    const score = (r.type ? 2 : 0) + (r.role ? 1 : 0) + (r.emailDomain ? 1 : 0);
-    if (score > bestScore) { best = r; bestScore = score; }
-  }
-  return best;
-}
 
 // Get current user profile
 router.get('/', async (req, res) => {
