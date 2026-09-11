@@ -86,6 +86,7 @@ async function finalizeSsoLogin(res, { email, subject, provider }) {
 
   const data = await store.read();
   let user = (data.users || []).find((u) => String(u.email || '').toLowerCase() === cleanEmail);
+  let isNewUser = false;
 
   if (!user) {
     if (!SSO_JIT_ENABLED) {
@@ -106,21 +107,31 @@ async function finalizeSsoLogin(res, { email, subject, provider }) {
       emailActivated: true, // Hub verified the email
     };
     data.users.push(user);
+    isNewUser = true;
   }
 
   if (user.active === false) {
     return frontendRedirect(res, { error: 'Your account is inactive. Please contact an administrator.' });
   }
 
-  // Hub verified the email, which is a stronger signal than the email-link
-  // activation flow — so mark SSO users activated (keeps API middleware happy).
-  let changed = false;
-  if (!user.emailActivated) { user.emailActivated = true; changed = true; }
-  if (user.ssoSubject !== subject) { user.ssoSubject = subject; changed = true; }
-  if (user.ssoProvider !== provider) { user.ssoProvider = provider; changed = true; }
-  user.lastSsoLoginAt = new Date().toISOString();
-  changed = true;
-  if (changed) await store.write(data);
+  // store.write() rewrites the WHOLE store and is serialized, so it must stay off
+  // the login hot path — otherwise every click queues a full-DB write and, under
+  // contention, the callback stalls past nginx's timeout (504). A returning,
+  // already-activated user changes nothing here and writes nothing.
+  let mustPersist = isNewUser;
+  // authenticateToken rejects ANY falsy `active`, but the check above only blocks an
+  // explicit `active === false`. A user whose `active` is null/0/undefined (common
+  // with imported/seeded data) would get an SSO token that then 401s "User not found
+  // or inactive" on every API call. Normalize it so the minted token is usable.
+  if (user.active !== true) { user.active = true; mustPersist = true; }
+  // Hub verified the email — a stronger signal than the email-link flow — so mark
+  // SSO users activated (keeps the API middleware happy). Only flips once.
+  if (!user.emailActivated) { user.emailActivated = true; mustPersist = true; }
+  if (user.ssoSubject !== subject) { user.ssoSubject = subject; mustPersist = true; }
+  if (user.ssoProvider !== provider) { user.ssoProvider = provider; mustPersist = true; }
+  // NB: deliberately do NOT persist a per-login timestamp — it is not worth a
+  // full-store write on every login.
+  if (mustPersist) await store.write(data);
 
   const isAdmin = !!user.isAdmin;
   const appToken = jwt.sign(

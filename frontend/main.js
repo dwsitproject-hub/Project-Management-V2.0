@@ -906,16 +906,18 @@ function computeAccessRules(user, profile) {
     canEditAnyProject: false,
     restrictProjectVisibilityToOwnTeamOnly: false,
     restrictProjectEditToOwnTeamOnly: false,
+    canViewMasterDwsApplication: false,
+    canViewManagementDashboard: false,
   };
 
   if (isAdmin) {
-    // Admin keeps existing full access
+    // Admin always keeps full access, regardless of the Access Matrix.
     access.canViewProjectDashboard = true;
     access.canViewProjectList = true;
     access.canCreateProject = true;
     access.canEditAnyProject = true;
-    access.restrictProjectVisibilityToOwnTeamOnly = false;
-    access.restrictProjectEditToOwnTeamOnly = false;
+    access.canViewMasterDwsApplication = true;
+    access.canViewManagementDashboard = true;
     return access;
   }
 
@@ -923,57 +925,42 @@ function computeAccessRules(user, profile) {
   const isIC = (type || '').toLowerCase().startsWith('ic');
   const isManagerType = type === 'Manager';
 
-  // Users with external email domain and not Management:
-  // Only CR Dashboard + CR List (create/update/view)
+  // ---- Hardcoded baseline (fallback used only when no saved rule matches) ----
   if (!isEnergiDomain && !isManagement) {
-    access.canViewProjectDashboard = false;
-    access.canViewProjectList = false;
-    access.canCreateProject = false;
-    access.canEditAnyProject = false;
-    access.restrictProjectVisibilityToOwnTeamOnly = false;
-    access.restrictProjectEditToOwnTeamOnly = false;
-    return access;
-  }
-
-  // Type = Management: can see both dashboards and both lists, full project edit
-  if (isManagement) {
+    // External, non-Management: CR only (baseline already set above)
+  } else if (isManagement) {
     access.canViewProjectDashboard = true;
     access.canViewProjectList = true;
-    access.canCreateProject = false; // keep project creation limited (unchanged behaviour)
     access.canEditAnyProject = true;
-    access.restrictProjectVisibilityToOwnTeamOnly = false;
-    access.restrictProjectEditToOwnTeamOnly = false;
-    return access;
-  }
-
-  // Internal IC:
-  // - CR Dashboard + CR List (create/update/view)
-  // - Project List & Project edit/visibility restricted to projects where they are part of the project team
-  if (isEnergiDomain && isIC) {
-    access.canViewProjectDashboard = false;
+  } else if (isEnergiDomain && isIC) {
     access.canViewProjectList = true;
-    access.canCreateProject = false;
-    access.canEditAnyProject = false;
     access.restrictProjectVisibilityToOwnTeamOnly = true;
     access.restrictProjectEditToOwnTeamOnly = true;
-    return access;
-  }
-
-  // Internal Manager:
-  // - CR Dashboard + CR List (create/update/view)
-  // - Project Dashboard
-  // - Project List (see all), but can only edit projects where they are part of the project team
-  if (isEnergiDomain && isManagerType) {
+  } else if (isEnergiDomain && isManagerType) {
     access.canViewProjectDashboard = true;
     access.canViewProjectList = true;
-    access.canCreateProject = false;
-    access.canEditAnyProject = false;
-    access.restrictProjectVisibilityToOwnTeamOnly = false;
     access.restrictProjectEditToOwnTeamOnly = true;
-    return access;
   }
 
-  // Fallback for other internal types: no project access changes from default (no Project menus)
+  // ---- Apply the admin-configured Access Matrix rule (from /api/profile) ----
+  // Overrides the matrix-controlled flags so edits in the Roles page take effect
+  // (e.g. granting a Management-type user the Management Dashboard). The
+  // team-visibility restriction is kept from the baseline — the matrix has no
+  // control for it.
+  const rule = profile?.matchedAccessRule;
+  if (rule) {
+    access.canViewProjectDashboard = !!rule.canViewProjectDashboard;
+    access.canViewProjectList = !!rule.canViewProjectList;
+    access.canEditAnyProject = !!rule.canEditAnyProject;
+    access.restrictProjectEditToOwnTeamOnly = !!rule.restrictProjectEditToOwnTeamOnly;
+    access.canViewCRDashboard = !!rule.canViewCRDashboard;
+    access.canViewCRList = !!rule.canViewCRList;
+    access.canCreateCR = !!rule.canCreateCR;
+    access.canEditCR = !!rule.canEditCR;
+    access.canViewMasterDwsApplication = !!rule.canViewMasterDwsApplication;
+    access.canViewManagementDashboard = !!rule.canViewManagementDashboard;
+  }
+
   return access;
 }
 
@@ -992,6 +979,18 @@ async function getUserAccess() {
   const access = computeAccessRules(user, profile);
   CURRENT_ACCESS = access;
   return access;
+}
+
+// Where to send a user right after login. Management-type users who can view the
+// Management Dashboard land there; everyone else lands on their User Dashboard.
+async function postLoginRoute() {
+  try {
+    const access = await getUserAccess();
+    if (access && access.type === 'Management' && (access.isAdmin || access.canViewManagementDashboard)) {
+      return '#management-dashboard';
+    }
+  } catch (_) { /* fall back below */ }
+  return '#user-dashboard';
 }
 
 // Column visibility management
@@ -1709,10 +1708,11 @@ async function fetchJSON(url, options) {
       parsedError = null;
     }
     if (res.status === 401) {
-      // Unauthorized - clear token and redirect to login
+      // Unauthorized - clear token and redirect to login. Surface the backend's
+      // actual reason (e.g. "User not found or inactive") instead of masking it.
       clearUser();
       location.hash = '#auth';
-      throw new Error('Authentication required');
+      throw new Error(parsedError?.error || 'Authentication required');
     }
     if (res.status === 403) {
       const auth403Patterns = [
@@ -7919,7 +7919,7 @@ async function renderDashboard() {
       ` : ''}
       ${d.openBurndownData && d.openBurndownData.length > 0 ? `
       <div class="card" style="grid-column: 1 / -1; margin-top: 24px;">
-        <h3>Project Open Burndown (Weekly)</h3>
+        <h3>Project Open Burndown (Monthly)</h3>
         <div style="margin-top: 16px;">
           ${(() => {
             const data = d.openBurndownData;
@@ -7940,7 +7940,7 @@ async function renderDashboard() {
                 const x = chartPadding.left + (index / (data.length - 1 || 1)) * usableWidth;
                 const value = item[key] || 0;
                 const y = chartPadding.top + usableHeight - (value / maxValue) * usableHeight;
-                return { x, y, value, label: item.weekLabel || item.weekEnd || '' };
+                return { x, y, value, label: item.label || item.weekLabel || item.monthEnd || '' };
               });
             };
 
@@ -7971,7 +7971,7 @@ async function renderDashboard() {
 
             const xAxisLabels = data.map((item, index) => {
               const x = chartPadding.left + (index / (data.length - 1 || 1)) * usableWidth;
-              const label = item.weekLabel || item.weekEnd || '';
+              const label = item.label || item.weekLabel || item.monthEnd || '';
               return `<text x="${x}" y="${chartHeight - chartPadding.bottom + 25}" text-anchor="middle" font-size="11" fill="#475569" transform="rotate(-45 ${x} ${chartHeight - chartPadding.bottom + 25})">${label}</text>`;
             });
 
@@ -7981,7 +7981,7 @@ async function renderDashboard() {
                   ${gridLines.join('')}
 
                   <text x="${chartPadding.left / 2}" y="${chartHeight / 2}" text-anchor="middle" font-size="13" fill="#334155" font-weight="600" transform="rotate(-90 ${chartPadding.left / 2} ${chartHeight / 2})">Open Projects</text>
-                  <text x="${chartWidth / 2}" y="${chartHeight - 15}" text-anchor="middle" font-size="13" fill="#334155" font-weight="600">Week</text>
+                  <text x="${chartWidth / 2}" y="${chartHeight - 15}" text-anchor="middle" font-size="13" fill="#334155" font-weight="600">Month</text>
 
                   <path d="${generatePath(pointsP0)}" stroke="#ef4444" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
                   <path d="${generatePath(pointsP1)}" stroke="#3b82f6" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
@@ -11142,7 +11142,7 @@ async function renderCRDashboard() {
             // Generate x-axis labels for historical weeks only
             const xAxisLabels = data.map((item, index) => {
               const x = chartPadding.left + (index / (data.length - 1 || 1)) * usableWidth;
-              const label = item.weekLabel || item.weekEnd || '';
+              const label = item.label || item.weekLabel || item.monthEnd || '';
               return `<text x="${x}" y="${chartHeight - chartPadding.bottom + 25}" text-anchor="middle" font-size="11" fill="#475569" transform="rotate(-45 ${x} ${chartHeight - chartPadding.bottom + 25})">${label}</text>`;
             });
 
@@ -11639,7 +11639,7 @@ async function renderSso() {
       if (user) {
         currentUser = user;
         updateNavAuth();
-        location.hash = '#user-dashboard';
+        location.hash = await postLoginRoute();
         return;
       }
     } catch (_) { /* fall through to failure */ }
@@ -11763,7 +11763,7 @@ function renderAuth() {
       setToken(json.token);
       currentUser = json.user;
       updateNavAuth();
-      location.hash = '#user-dashboard';
+      location.hash = await postLoginRoute();
     } finally {
       setButtonLoading(submitBtn, false);
     }
@@ -11829,7 +11829,9 @@ function renderAuth() {
 
 // Protected routes that require authentication
 const PROTECTED_ROUTES = ['#list', '#crlist', '#dashboard', '#crdashboard', '#new', '#user-dashboard', '#admin', '#admin-users', '#admin-roles', '#master-dws', '#management-dashboard'];
-const ADMIN_ROUTES = ['#admin', '#admin-users', '#admin-roles', '#master-dws', '#management-dashboard'];
+// #management-dashboard is NOT admin-only: it is governed by the Access Matrix
+// (canViewManagementDashboard), guarded explicitly in router().
+const ADMIN_ROUTES = ['#admin', '#admin-users', '#admin-roles', '#master-dws'];
 
 async function requireAuth() {
   const token = getToken();
@@ -11986,9 +11988,11 @@ async function updateNavAuth() {
     const navCrList = document.getElementById('nav-crlist');
     const navUserDashboard = document.getElementById('nav-user-dashboard');
 
-    // User Dashboard is always visible for authenticated users
+    // User Dashboard visible for authenticated users, EXCEPT Management-role users
+    // (they work from the Management Dashboard instead).
     if (navUserDashboard) {
-      navUserDashboard.classList.remove('hidden');
+      const hideForManagement = !user.isAdmin && access?.type === 'Management';
+      navUserDashboard.classList.toggle('hidden', hideForManagement);
     }
 
     // CR Dashboard + CR List per access rules (default true in access)
@@ -12026,10 +12030,9 @@ async function updateNavAuth() {
       navMasterDws.classList.toggle('hidden', !(user.isAdmin || role === 'admin'));
     }
 
-    // Management Dashboard must be visible ONLY when Role = "Admin"
+    // Management Dashboard: visible to Admin, or anyone granted it via the Access Matrix.
     if (navManagementDashboard) {
-      const role = String(user.role || '').trim().toLowerCase();
-      navManagementDashboard.classList.toggle('hidden', !(user.isAdmin || role === 'admin'));
+      navManagementDashboard.classList.toggle('hidden', !(user.isAdmin || access?.canViewManagementDashboard));
     }
   } else {
     // Hide profile menu and notifications, show login link
@@ -12100,7 +12103,15 @@ async function router() {
     if (h.startsWith('#admin-users')) return renderAdminUsers();
     if (h.startsWith('#admin-roles')) return renderAdminRoles();
     if (h.startsWith('#master-dws')) return renderMasterDwsApplications();
-    if (h.startsWith('#management-dashboard')) return renderManagementDashboard();
+    if (h.startsWith('#management-dashboard')) {
+      // Governed by the Access Matrix, not admin-only.
+      const access = await getUserAccess();
+      if (!(currentUser?.isAdmin || access?.canViewManagementDashboard)) {
+        location.hash = '#user-dashboard';
+        return;
+      }
+      return renderManagementDashboard();
+    }
     if (h.startsWith('#profile')) return renderProfile();
     if (h.startsWith('#new')) {
       const parts = h.split('/');

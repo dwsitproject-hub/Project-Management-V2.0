@@ -2,6 +2,7 @@ import express from 'express';
 import bcrypt from 'bcryptjs';
 import store from '../store.js';
 import { authenticateToken } from '../middleware/auth.js';
+import { matchAccessRule } from '../accessRules.js';
 
 const router = express.Router();
 
@@ -11,11 +12,11 @@ router.get('/', async (req, res) => {
     const userId = req.user.id;
     const data = await store.read();
     const user = data.users.find(u => u.id === userId);
-    
+
     if (!user) {
       return res.status(404).json({ error: 'User not found' });
     }
-    
+
     // Return user data without password hash
     const { passwordHash, activationToken, activationTokenExpiry, ...userData } = user;
     // Convert teamMemberIds string to array
@@ -24,6 +25,9 @@ router.get('/', async (req, res) => {
     } else if (!userData.teamMemberIds) {
       userData.teamMemberIds = [];
     }
+    // Attach the access rule that applies to this user so the SPA can enforce
+    // the admin-configured Access Matrix (e.g. Management Dashboard visibility).
+    userData.matchedAccessRule = matchAccessRule(user, data.accessRules || []);
     res.json(userData);
   } catch (error) {
     console.error('Get profile error:', error);
