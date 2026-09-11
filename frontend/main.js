@@ -1709,10 +1709,11 @@ async function fetchJSON(url, options) {
       parsedError = null;
     }
     if (res.status === 401) {
-      // Unauthorized - clear token and redirect to login
+      // Unauthorized - clear token and redirect to login. Surface the backend's
+      // actual reason (e.g. "User not found or inactive") instead of masking it.
       clearUser();
       location.hash = '#auth';
-      throw new Error('Authentication required');
+      throw new Error(parsedError?.error || 'Authentication required');
     }
     if (res.status === 403) {
       const auth403Patterns = [

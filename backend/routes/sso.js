@@ -119,6 +119,11 @@ async function finalizeSsoLogin(res, { email, subject, provider }) {
   // contention, the callback stalls past nginx's timeout (504). A returning,
   // already-activated user changes nothing here and writes nothing.
   let mustPersist = isNewUser;
+  // authenticateToken rejects ANY falsy `active`, but the check above only blocks an
+  // explicit `active === false`. A user whose `active` is null/0/undefined (common
+  // with imported/seeded data) would get an SSO token that then 401s "User not found
+  // or inactive" on every API call. Normalize it so the minted token is usable.
+  if (user.active !== true) { user.active = true; mustPersist = true; }
   // Hub verified the email — a stronger signal than the email-link flow — so mark
   // SSO users activated (keeps the API middleware happy). Only flips once.
   if (!user.emailActivated) { user.emailActivated = true; mustPersist = true; }
