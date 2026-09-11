@@ -7919,7 +7919,7 @@ async function renderDashboard() {
       ` : ''}
       ${d.openBurndownData && d.openBurndownData.length > 0 ? `
       <div class="card" style="grid-column: 1 / -1; margin-top: 24px;">
-        <h3>Project Open Burndown (Weekly)</h3>
+        <h3>Project Open Burndown (Monthly)</h3>
         <div style="margin-top: 16px;">
           ${(() => {
             const data = d.openBurndownData;
@@ -7940,7 +7940,7 @@ async function renderDashboard() {
                 const x = chartPadding.left + (index / (data.length - 1 || 1)) * usableWidth;
                 const value = item[key] || 0;
                 const y = chartPadding.top + usableHeight - (value / maxValue) * usableHeight;
-                return { x, y, value, label: item.weekLabel || item.weekEnd || '' };
+                return { x, y, value, label: item.label || item.weekLabel || item.monthEnd || '' };
               });
             };
 
@@ -7971,7 +7971,7 @@ async function renderDashboard() {
 
             const xAxisLabels = data.map((item, index) => {
               const x = chartPadding.left + (index / (data.length - 1 || 1)) * usableWidth;
-              const label = item.weekLabel || item.weekEnd || '';
+              const label = item.label || item.weekLabel || item.monthEnd || '';
               return `<text x="${x}" y="${chartHeight - chartPadding.bottom + 25}" text-anchor="middle" font-size="11" fill="#475569" transform="rotate(-45 ${x} ${chartHeight - chartPadding.bottom + 25})">${label}</text>`;
             });
 
@@ -7981,7 +7981,7 @@ async function renderDashboard() {
                   ${gridLines.join('')}
 
                   <text x="${chartPadding.left / 2}" y="${chartHeight / 2}" text-anchor="middle" font-size="13" fill="#334155" font-weight="600" transform="rotate(-90 ${chartPadding.left / 2} ${chartHeight / 2})">Open Projects</text>
-                  <text x="${chartWidth / 2}" y="${chartHeight - 15}" text-anchor="middle" font-size="13" fill="#334155" font-weight="600">Week</text>
+                  <text x="${chartWidth / 2}" y="${chartHeight - 15}" text-anchor="middle" font-size="13" fill="#334155" font-weight="600">Month</text>
 
                   <path d="${generatePath(pointsP0)}" stroke="#ef4444" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
                   <path d="${generatePath(pointsP1)}" stroke="#3b82f6" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
@@ -11142,7 +11142,7 @@ async function renderCRDashboard() {
             // Generate x-axis labels for historical weeks only
             const xAxisLabels = data.map((item, index) => {
               const x = chartPadding.left + (index / (data.length - 1 || 1)) * usableWidth;
-              const label = item.weekLabel || item.weekEnd || '';
+              const label = item.label || item.weekLabel || item.monthEnd || '';
               return `<text x="${x}" y="${chartHeight - chartPadding.bottom + 25}" text-anchor="middle" font-size="11" fill="#475569" transform="rotate(-45 ${x} ${chartHeight - chartPadding.bottom + 25})">${label}</text>`;
             });
 

@@ -147,86 +147,82 @@ function getWeekEnd(weekKey) {
 }
 
 /**
- * Calculate weekly open Project burndown by priority
- * Open = status not LIVE and not CANCELLED at week end
+ * Calculate MONTHLY open Project burndown by priority.
+ *
+ * A project counts as "open" in a month if, at that month's end, it had been
+ * created but was not yet completed:
+ *   - created (createdAt / startDate / planStartDate) on or before month-end, AND
+ *   - not completed by month-end. Completion is driven by the Actual End Date:
+ *       * has an end date -> open only in months BEFORE that date (it closed then);
+ *       * no end date     -> open unless the project is already in a terminal
+ *                            status (Live / Done / Cancelled) with no date to place it.
+ *
+ * So projects still In Progress / Not Started (no end date, non-terminal) stay
+ * open from their creation month through the current month, while completed
+ * projects drop out in the month they closed — a true burndown. The current
+ * month's Total therefore equals the count of projects that are open right now
+ * (Status = In Progress + Not Started, i.e. not Live/Done/Cancelled).
+ *
  * @param {Array} projectInitiatives - Filtered Project initiatives
- * @returns {Array} Array of weekly burndown data
+ * @returns {Array} Array of monthly burndown data
  */
 function calculateOpenBurndown(projectInitiatives) {
   if (!projectInitiatives || projectInitiatives.length === 0) {
     return [];
   }
 
-  // 12-week window (same approach as CR dashboard)
+  // Local YYYY-MM-DD (avoid UTC day-shifts from toISOString()).
+  const ymd = (dt) =>
+    `${dt.getFullYear()}-${String(dt.getMonth() + 1).padStart(2, '0')}-${String(dt.getDate()).padStart(2, '0')}`;
+
+  // 12-month window ending with the current month.
   const today = new Date();
-  const todayStr = today.toISOString().slice(0, 10);
-  const currentWeekKey = getWeekKey(todayStr);
-
-  const weekKeys = [];
-  for (let i = 0; i < 12; i++) {
-    const weekDate = new Date(currentWeekKey);
-    weekDate.setDate(weekDate.getDate() - i * 7);
-    weekKeys.push(getWeekKey(weekDate.toISOString().slice(0, 10)));
-  }
-  weekKeys.reverse();
-
-  const weeklyData = weekKeys.map((weekKey) => {
-    const weekEndStr = getWeekEnd(weekKey);
-
-    const openProjects = projectInitiatives.filter((p) => {
-      try {
-        const status = (p.status || '').toUpperCase().trim();
-        if (status === 'LIVE' || status === 'CANCELLED') return false;
-
-        const createdAt = p.createdAt || p.startDate;
-        if (!createdAt) return false;
-        const createdDateStr = String(createdAt).slice(0, 10);
-        if (createdDateStr > weekEndStr) return false;
-
-        if (p.endDate && p.endDate !== '' && p.endDate !== null) {
-          const endDateStr = String(p.endDate).slice(0, 10);
-          if (endDateStr <= weekEndStr) return false;
-        }
-
-        return true;
-      } catch {
-        return false;
-      }
+  const months = [];
+  for (let i = 11; i >= 0; i--) {
+    const start = new Date(today.getFullYear(), today.getMonth() - i, 1);
+    const end = new Date(start.getFullYear(), start.getMonth() + 1, 0); // last day of month
+    months.push({
+      monthStart: ymd(start),
+      monthEnd: ymd(end),
+      label: start.toLocaleDateString('en-US', { month: 'short', year: 'numeric' }),
     });
+  }
 
-    const counts = openProjects.reduce(
-      (acc, p) => {
-        const priority = (p.priority || 'P2').toUpperCase().trim();
-        if (priority === 'P0') acc.P0 += 1;
-        else if (priority === 'P1') acc.P1 += 1;
-        else acc.P2 += 1;
-        acc.Total = acc.P0 + acc.P1 + acc.P2;
-        return acc;
-      },
-      { P0: 0, P1: 0, P2: 0, Total: 0 }
-    );
+  const TERMINAL = new Set(['LIVE', 'DONE', 'CANCELLED', 'CANCEL']);
 
-    const mondayDate = new Date(weekKey);
-    const fridayDate = new Date(weekEndStr);
-    const weekLabel = `${mondayDate.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    })} - ${fridayDate.toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric',
-    })}`;
+  const isOpenAt = (p, monthEndStr) => {
+    const createdRaw = p.createdAt || p.startDate || p.planStartDate || '';
+    if (!createdRaw) return false;
+    if (String(createdRaw).slice(0, 10) > monthEndStr) return false; // not created yet
+
+    const endRaw = p.endDate && String(p.endDate).trim() !== '' ? p.endDate : null;
+    if (endRaw) {
+      // Completed on its Actual End Date -> open only in months before it closed.
+      return String(endRaw).slice(0, 10) > monthEndStr;
+    }
+    // No end date -> open unless already terminal (completed but undated).
+    return !TERMINAL.has(String(p.status || '').toUpperCase().trim());
+  };
+
+  return months.map((m) => {
+    const counts = { P0: 0, P1: 0, P2: 0, Total: 0 };
+    for (const p of projectInitiatives) {
+      if (!isOpenAt(p, m.monthEnd)) continue;
+      const priority = String(p.priority || 'P2').toUpperCase().trim();
+      if (priority === 'P0') counts.P0 += 1;
+      else if (priority === 'P1') counts.P1 += 1;
+      else counts.P2 += 1;
+    }
+    counts.Total = counts.P0 + counts.P1 + counts.P2;
 
     return {
-      weekStart: weekKey,
-      weekEnd: weekEndStr,
-      weekLabel,
+      monthStart: m.monthStart,
+      monthEnd: m.monthEnd,
+      label: m.label,
+      weekLabel: m.label, // backward-compat: existing chart reads weekLabel for x-axis
       ...counts,
     };
   });
-
-  return weeklyData;
 }
 
 /**
