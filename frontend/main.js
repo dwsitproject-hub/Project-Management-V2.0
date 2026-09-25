@@ -842,6 +842,8 @@ function getToken() {
 function setToken(token) {
   if (token) localStorage.setItem('pm_token', token);
   else localStorage.removeItem('pm_token');
+  // Any identity change (login, SSO landing, logout) invalidates cached access rules.
+  try { resetAccessCache(); } catch (_) { /* module still initializing — nothing cached yet */ }
 }
 
 let currentUser = null;
@@ -964,21 +966,46 @@ function computeAccessRules(user, profile) {
   return access;
 }
 
+// Access rules are needed by the nav AND by most page renders, so each navigation used
+// to fetch /api/profile several times. Share one in-flight/recent result per session.
+// Access changes already apply "on next login", and setToken() (login/logout/SSO)
+// resets this, so a short TTL is safe.
+const ACCESS_CACHE_TTL_MS = 60 * 1000;
+let accessCache = { promise: null, at: 0 };
+
+function resetAccessCache() {
+  accessCache = { promise: null, at: 0 };
+}
+
 async function getUserAccess() {
-  const user = await getCurrentUser();
-  if (!user) {
-    CURRENT_ACCESS = null;
-    return null;
+  if (accessCache.promise && Date.now() - accessCache.at < ACCESS_CACHE_TTL_MS) {
+    return accessCache.promise;
   }
-  let profile = null;
+  const p = (async () => {
+    const user = await getCurrentUser();
+    if (!user) {
+      CURRENT_ACCESS = null;
+      return null;
+    }
+    let profile = null;
+    try {
+      profile = await fetchJSON('/api/profile');
+    } catch (e) {
+      console.error('Failed to load profile for access rules:', e);
+    }
+    const access = computeAccessRules(user, profile);
+    CURRENT_ACCESS = access;
+    return access;
+  })();
+  accessCache = { promise: p, at: Date.now() };
   try {
-    profile = await fetchJSON('/api/profile');
+    const access = await p;
+    if (!access) resetAccessCache(); // don't pin a logged-out result
+    return access;
   } catch (e) {
-    console.error('Failed to load profile for access rules:', e);
+    resetAccessCache();
+    throw e;
   }
-  const access = computeAccessRules(user, profile);
-  CURRENT_ACCESS = access;
-  return access;
 }
 
 // Where to send a user right after login. Management-type users who can view the
@@ -6893,7 +6920,23 @@ window.showInitiativesModal = async function(filterType, filterValue, title, ini
     if (itPmId) apiQs.set('itPmId', itPmId);
     if (teamMemberId) apiQs.set('teamMemberId', teamMemberId);
   }
-  
+
+  // CR Dashboard numbers are computed on its active filters, so the detail list must be
+  // too (previously every CR drill-down ignored them and listed ALL CRs). Scoped to that
+  // page so a filter left in the URL can't leak into another page's drill-down.
+  if (initiativeType === 'CR' && (location.hash || '').startsWith('#crdashboard')) {
+    const depId = urlParams.get('departmentId') || '';
+    const itManagerId = urlParams.get('itManagerId') || '';
+    const systemImpactedId = urlParams.get('systemImpactedId') || '';
+    if (depId) apiQs.set('departmentId', depId);
+    if (itManagerId) apiQs.set('itManagerId', itManagerId);
+    if (systemImpactedId) apiQs.set('systemImpactedId', systemImpactedId);
+  }
+
+  // Every matching row — the API's default 500-row cap would make the list disagree
+  // with the number that was clicked.
+  apiQs.set('limit', '0');
+
   if (filterType === 'status') {
     apiQs.set('status', filterValue);
   } else if (filterType === 'priority') {
@@ -10365,7 +10408,9 @@ async function renderCRDashboard() {
     // Apply the same dashboard filters (department, IT manager, system impacted).
     const crQs = new URLSearchParams();
     crQs.set('type', 'CR');
+    crQs.set('limit', '0'); // all rows: the 500 default cap silently skewed the aging/department tables
     if (selectedDepartmentId) crQs.set('departmentId', selectedDepartmentId);
+    if (selectedItManagerId) crQs.set('itManagerId', selectedItManagerId); // now filtered server-side
     if (selectedSystemImpactedIds.length) crQs.set('systemImpactedId', selectedSystemImpactedIds.join(','));
     const crInitiatives = await fetchJSON('/api/initiatives?' + crQs.toString());
 
@@ -11557,22 +11602,29 @@ async function renderCRDashboard() {
     });
   });
   
-  // Add filter update functions
-  window.updateCRDashboardFilters = () => {
-    const departmentId = document.getElementById('filter-department-cr')?.value || '';
-    const itManagerId = document.getElementById('filter-itmanager-cr')?.value || '';
-    const sysBoxes = document.querySelectorAll('#dropdown-fSystemImpacted-cr input[type="checkbox"]:checked');
-    const systemImpactedIds = Array.from(sysBoxes).map((cb) => cb.value);
-    const params = new URLSearchParams();
-    if (departmentId) params.set('departmentId', departmentId);
-    if (itManagerId) params.set('itManagerId', itManagerId);
-    if (systemImpactedIds.length) params.set('systemImpactedId', systemImpactedIds.join(','));
-    location.search = params.toString();
+  // Filter changes update the URL in place and re-render just this page. Assigning
+  // location.search used to force a FULL page reload (re-download + re-init of the app).
+  const CR_DASH_FILTER_KEYS = ['departmentId', 'itManagerId', 'systemImpactedId'];
+  const applyCrDashboardFilters = (values) => {
+    const params = new URLSearchParams(location.search); // keep unrelated params
+    CR_DASH_FILTER_KEYS.forEach((k) => (values[k] ? params.set(k, values[k]) : params.delete(k)));
+    const qs = params.toString();
+    history.replaceState(null, '', location.pathname + (qs ? `?${qs}` : '') + location.hash);
+    const dash = document.getElementById('cr-dashboard-filters');
+    if (dash) dash.style.opacity = '0.6'; // immediate feedback while the data reloads
+    renderCRDashboard();
   };
 
-  window.clearCRDashboardFilters = () => {
-    location.search = '';
+  window.updateCRDashboardFilters = () => {
+    const sysBoxes = document.querySelectorAll('#dropdown-fSystemImpacted-cr input[type="checkbox"]:checked');
+    applyCrDashboardFilters({
+      departmentId: document.getElementById('filter-department-cr')?.value || '',
+      itManagerId: document.getElementById('filter-itmanager-cr')?.value || '',
+      systemImpactedId: Array.from(sysBoxes).map((cb) => cb.value).join(','),
+    });
   };
+
+  window.clearCRDashboardFilters = () => applyCrDashboardFilters({});
 
   const dashFilterRoot = document.getElementById('cr-dashboard-filters');
   if (dashFilterRoot) {

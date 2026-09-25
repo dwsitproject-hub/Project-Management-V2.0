@@ -109,6 +109,11 @@ app.listen(PORT, HOST, () => {
   console.log(`  - Local:   http://localhost:${PORT}`);
   console.log(`  - Network: http://172.30.18.102:${PORT}`);
 
+  // Read-only DB health signal for deployments (replaces the old boot-time full rewrite).
+  dbStore.read()
+    .then((d) => console.log(`[STORE] Connected - Users: ${(d.users || []).length}, Initiatives: ${(d.initiatives || []).length}`))
+    .catch((e) => console.error('[STORE] Initial read failed:', e.message));
+
   // Initialize daily snapshots on server start
   import('./daily-snapshots.js').then(async m => {
     await m.initializeDailySnapshots();

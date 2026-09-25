@@ -18,10 +18,8 @@ const router = express.Router();
  * @returns {Array} Array of weekly trend data
  */
 async function calculateWeeklyTrend(type = 'CR', filteredCRs = null) {
-  const data = await store.read();
-  
-  // Use filtered CRs if provided, otherwise use all CRs
-  const allCRs = filteredCRs || data.initiatives.filter(i => i.type === type);
+  // Use filtered CRs if provided (only read the store when we actually need it)
+  const allCRs = filteredCRs || (await store.read()).initiatives.filter(i => i.type === type);
   
   // Generate the last 12 consecutive weeks from today going backwards
   const today = new Date();
@@ -67,11 +65,11 @@ async function calculateWeeklyTrend(type = 'CR', filteredCRs = null) {
       return createdDateStr <= weekEndStr;
     }).length;
     
-    // Format week label (Monday - Friday) with year
+    // Format week label (Monday - Sunday) with year
     const mondayDate = new Date(weekKey);
-    const fridayDate = new Date(weekEndStr);
-    
-    const weekLabel = `${mondayDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} - ${fridayDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
+    const sundayDate = new Date(weekEndStr);
+
+    const weekLabel = `${mondayDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })} - ${sundayDate.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`;
     
     return {
       weekStart: weekKey,
@@ -102,15 +100,17 @@ function getWeekKey(date) {
 }
 
 /**
- * Get week end date (Friday) for a given week key
+ * Get week end date (Sunday) for a given week key.
+ * Weeks are Monday–Sunday: with a Friday end, CRs created or going live on a
+ * Saturday/Sunday fell into no week at all and were never counted.
  * @param {string} weekKey - Monday date in YYYY-MM-DD format
- * @returns {string} Friday date of the week
+ * @returns {string} Sunday date of the week
  */
 function getWeekEnd(weekKey) {
   const monday = new Date(weekKey);
-  const friday = new Date(monday);
-  friday.setDate(monday.getDate() + 4); // Friday is 4 days after Monday
-  return friday.toISOString().slice(0, 10);
+  const sunday = new Date(monday);
+  sunday.setDate(monday.getDate() + 6);
+  return sunday.toISOString().slice(0, 10);
 }
 
 // A CR counts as "open" at a cutoff date if it was created by then and had not
@@ -172,12 +172,12 @@ function calculateOpenBurndown(crInitiatives) {
     counts.Total = counts.P0 + counts.P1 + counts.P2;
 
     const mondayDate = new Date(weekKey);
-    const fridayDate = new Date(weekEndStr);
+    const weekEndDate = new Date(weekEndStr);
     const weekLabel = `${mondayDate.toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
       year: 'numeric',
-    })} - ${fridayDate.toLocaleDateString('en-US', {
+    })} - ${weekEndDate.toLocaleDateString('en-US', {
       month: 'short',
       day: 'numeric',
       year: 'numeric',
@@ -347,7 +347,24 @@ function calculateGoLiveRate(crInitiatives) {
   }
 }
 
-router.get('/', async (req, res) => {
+// Multi-value id fields arrive from store.read() as arrays, but older data/callers
+// may still hand us a comma-separated string — accept both.
+function toIdList(raw) {
+  if (Array.isArray(raw)) return raw.map((id) => String(id).trim()).filter(Boolean);
+  return String(raw || '').split(',').map((id) => id.trim()).filter(Boolean);
+}
+
+router.get('/', async (req, res, next) => {
+  try {
+    return await buildCrDashboard(req, res);
+  } catch (e) {
+    // Without this, an exception in an async handler leaves the request hanging (Express 4).
+    console.error('[cr-dashboard] failed:', e);
+    return next(e);
+  }
+});
+
+async function buildCrDashboard(req, res) {
   const { departmentId, itManagerId, systemImpactedId } = req.query;
   const data = await store.read();
   const total = data.initiatives.length;
@@ -370,18 +387,12 @@ router.get('/', async (req, res) => {
     crInitiatives = crInitiatives.filter(i => i.departmentId === departmentId);
   }
   if (itManagerId) {
-    // itManagerIds is a comma-separated string, so check if itManagerId is included
-    crInitiatives = crInitiatives.filter(i => {
-      const managerIds = (i.itManagerIds || '').split(',').map(id => id.trim()).filter(id => id);
-      return managerIds.includes(itManagerId);
-    });
+    // itManagerIds is an array from store.read() (was .split() on it -> TypeError -> hung request)
+    crInitiatives = crInitiatives.filter((i) => toIdList(i.itManagerIds).includes(itManagerId));
   }
   if (systemImpactedValues.length > 0) {
     crInitiatives = crInitiatives.filter((i) => {
-      const raw = i.systemImpactedIds || '';
-      const ids = Array.isArray(raw)
-        ? raw
-        : String(raw).split(',').map((id) => id.trim()).filter(Boolean);
+      const ids = toIdList(i.systemImpactedIds);
       return systemImpactedValues.some((sel) => ids.includes(sel));
     });
   }
@@ -563,7 +574,7 @@ router.get('/', async (req, res) => {
     monthlyOpenCRs,
     insights
   });
-});
+}
 
 /**
  * Calculate monthly open CRs (status != Live and != Cancelled) at end of each month
