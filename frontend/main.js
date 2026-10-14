@@ -842,7 +842,103 @@ function getToken() {
 function setToken(token) {
   if (token) localStorage.setItem('pm_token', token);
   else localStorage.removeItem('pm_token');
+  // Any identity change (login, SSO landing, logout) invalidates cached access rules.
+  try { resetAccessCache(); } catch (_) { /* module still initializing — nothing cached yet */ }
 }
+
+// ---- Downstream Hub SDK --------------------------------------------------------
+// Usage analytics, JS-error capture, bug reports and Sentinel analysis in the Hub
+// (docs/HUB-SDK-IMPLEMENTATION.md). Fully optional: with no SDK config on the backend,
+// or the Hub unreachable, nothing loads and the app is unaffected.
+//
+// PM's routes are hashes WITHOUT a slash (#crlist, #view/<id>). The SDK only keeps
+// hashes that start with "#/", so it would record every page as "/". Its automatic page
+// views are therefore off and the router reports each route itself as a TEMPLATE:
+// record ids and tokens (#view/<id>, #reset-password/<token>, #sso?token=…) never leave PM.
+window.DwsHub = window.DwsHub || []; // calls made before the SDK loads are queued and replayed
+let hubSdkState = 'pending'; // 'pending' | 'on' | 'off'
+const HUB_QUEUE_MAX = 50;
+const HUB_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Call an SDK method if loaded, queue it if still loading, no-op if off. Never throws. */
+function hubCall(method, ...args) {
+  if (hubSdkState === 'off') return;
+  try {
+    const hub = window.DwsHub;
+    if (hub && typeof hub[method] === 'function') return hub[method](...args);
+    if (Array.isArray(hub) && hub.length < HUB_QUEUE_MAX) hub.push([method, ...args]);
+  } catch (_) { /* the SDK must never break the app */ }
+}
+
+/** "#view/9f2c…" -> "/#/view/:id", "#reset-password/<tok>" -> "/#/reset-password/:token". */
+function hubRoutePath(hash) {
+  const raw = String(hash || '').replace(/^#\/?/, '').split('?')[0];
+  const [route, ...rest] = raw.split('/').filter(Boolean);
+  if (!route) return '/#/';
+  const placeholder = { 'reset-password': ':token', activate: ':token' }[route] || ':id';
+  // #new/<type> keeps the type (Project | CR); any other extra segment is an id or token.
+  const tail = route === 'new'
+    ? rest.map((t) => (/^(Project|CR)$/.test(t) ? t : ':type'))
+    : rest.map(() => placeholder);
+  return '/#/' + [route, ...tail].join('/');
+}
+
+let hubIdentifiedKey = null;
+/** Tell the Hub who is signed in: the Hub user UUID when PM knows it, else the email. */
+function hubIdentify({ hubUserId, email } = {}) {
+  const id = HUB_UUID_RE.test(String(hubUserId || '')) ? String(hubUserId) : undefined; // Hub rejects non-UUID ids
+  const mail = email ? String(email) : undefined;
+  if (!id && !mail) return;
+  const key = `${id || ''}|${mail || ''}`;
+  if (key === hubIdentifiedKey) return; // identify() sends a heartbeat — don't repeat it on every page
+  hubIdentifiedKey = key;
+  hubCall('identify', { id, email: mail });
+}
+
+/** On sign-out: forget the user so the next person on this browser starts clean. */
+function hubReset() {
+  hubIdentifiedKey = null;
+  hubCall('reset');
+}
+
+/** Record a business action. Properties: categories and counts only — never personal data. */
+// The SDK stamps custom events with its own path, which is always "/" for PM's
+// non-"#/" hashes — so carry the templated route as a property instead.
+function hubTrack(name, props) {
+  hubCall('track', name, { ...(props || {}), route: hubRoutePath(location.hash) });
+}
+
+async function loadHubSdk() {
+  try {
+    const res = await fetch('/api/hub-sdk/config', { cache: 'no-store' });
+    const cfg = res.ok ? await res.json() : null;
+    if (!cfg || !cfg.enabled || !cfg.src || !cfg.appKey) throw new Error('Hub SDK not configured');
+    const s = document.createElement('script');
+    s.src = cfg.src;
+    s.async = true; // never blocks the app; the SDK replays anything queued meanwhile
+    s.setAttribute('data-app-key', cfg.appKey);
+    if (cfg.release) s.setAttribute('data-release', cfg.release);
+    // Floating "Report a bug" button, bottom-left (bottom-right is PM's own floating button);
+    // the profile-menu item stays as a second way in.
+    s.setAttribute('data-bug-button', 'true');
+    s.setAttribute('data-bug-button-position', 'bottom-left');
+    s.setAttribute('data-auto-page-views', 'false'); // the router reports templated routes
+    if (cfg.debug) s.setAttribute('data-debug', 'true');
+    s.onload = () => {
+      hubSdkState = window.DwsHub && window.DwsHub.__loaded ? 'on' : 'off';
+      if (hubSdkState === 'off') window.DwsHub = [];
+      document.querySelectorAll('.hub-bug-report').forEach((el) => el.classList.toggle('hidden', hubSdkState !== 'on'));
+    };
+    s.onerror = () => { hubSdkState = 'off'; window.DwsHub = []; };
+    document.head.appendChild(s);
+  } catch (_) {
+    hubSdkState = 'off';
+    window.DwsHub = [];
+  }
+}
+
+window.openHubBugReport = () => hubCall('openBugReport');
+loadHubSdk();
 
 let currentUser = null;
 
@@ -964,21 +1060,47 @@ function computeAccessRules(user, profile) {
   return access;
 }
 
+// Access rules are needed by the nav AND by most page renders, so each navigation used
+// to fetch /api/profile several times. Share one in-flight/recent result per session.
+// Access changes already apply "on next login", and setToken() (login/logout/SSO)
+// resets this, so a short TTL is safe.
+const ACCESS_CACHE_TTL_MS = 60 * 1000;
+let accessCache = { promise: null, at: 0 };
+
+function resetAccessCache() {
+  accessCache = { promise: null, at: 0 };
+}
+
 async function getUserAccess() {
-  const user = await getCurrentUser();
-  if (!user) {
-    CURRENT_ACCESS = null;
-    return null;
+  if (accessCache.promise && Date.now() - accessCache.at < ACCESS_CACHE_TTL_MS) {
+    return accessCache.promise;
   }
-  let profile = null;
+  const p = (async () => {
+    const user = await getCurrentUser();
+    if (!user) {
+      CURRENT_ACCESS = null;
+      return null;
+    }
+    let profile = null;
+    try {
+      profile = await fetchJSON('/api/profile');
+    } catch (e) {
+      console.error('Failed to load profile for access rules:', e);
+    }
+    hubIdentify({ hubUserId: profile?.hubUserId, email: profile?.email || user.email });
+    const access = computeAccessRules(user, profile);
+    CURRENT_ACCESS = access;
+    return access;
+  })();
+  accessCache = { promise: p, at: Date.now() };
   try {
-    profile = await fetchJSON('/api/profile');
+    const access = await p;
+    if (!access) resetAccessCache(); // don't pin a logged-out result
+    return access;
   } catch (e) {
-    console.error('Failed to load profile for access rules:', e);
+    resetAccessCache();
+    throw e;
   }
-  const access = computeAccessRules(user, profile);
-  CURRENT_ACCESS = access;
-  return access;
 }
 
 // Where to send a user right after login. Management-type users who can view the
@@ -2419,6 +2541,7 @@ window.exportCRListToExcel = function exportCRListToExcel() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+  hubTrack('list_exported', { list: 'cr', format: 'csv', rows: rows.length });
 };
 
 async function renderList() {
@@ -3837,7 +3960,8 @@ async function renderNew(defaultType = 'Project') {
       });
       
       const initiativeId = result.id;
-      
+      hubTrack('initiative_created', { type: obj.type }); // Project | CR — no names/content
+
       // Upload documents if any files were selected
       if (fileInput && selectedFiles.length > 0) {
         const token = getToken();
@@ -4481,6 +4605,7 @@ async function renderView(id) {
         });
       }
       
+      hubTrack('document_uploaded', { count: files.length });
       fileInput.value = '';
       progressDiv.style.display = 'none';
       progressBar.style.width = '0%';
@@ -5524,6 +5649,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
           notify(publishRes.error);
           return;
         }
+        hubTrack('meeting_note_published');
 
         const sendOk = await sendIfChecked(effectiveId);
         if (sendOk === false) return;
@@ -6893,7 +7019,23 @@ window.showInitiativesModal = async function(filterType, filterValue, title, ini
     if (itPmId) apiQs.set('itPmId', itPmId);
     if (teamMemberId) apiQs.set('teamMemberId', teamMemberId);
   }
-  
+
+  // CR Dashboard numbers are computed on its active filters, so the detail list must be
+  // too (previously every CR drill-down ignored them and listed ALL CRs). Scoped to that
+  // page so a filter left in the URL can't leak into another page's drill-down.
+  if (initiativeType === 'CR' && (location.hash || '').startsWith('#crdashboard')) {
+    const depId = urlParams.get('departmentId') || '';
+    const itManagerId = urlParams.get('itManagerId') || '';
+    const systemImpactedId = urlParams.get('systemImpactedId') || '';
+    if (depId) apiQs.set('departmentId', depId);
+    if (itManagerId) apiQs.set('itManagerId', itManagerId);
+    if (systemImpactedId) apiQs.set('systemImpactedId', systemImpactedId);
+  }
+
+  // Every matching row — the API's default 500-row cap would make the list disagree
+  // with the number that was clicked.
+  apiQs.set('limit', '0');
+
   if (filterType === 'status') {
     apiQs.set('status', filterValue);
   } else if (filterType === 'priority') {
@@ -10365,7 +10507,9 @@ async function renderCRDashboard() {
     // Apply the same dashboard filters (department, IT manager, system impacted).
     const crQs = new URLSearchParams();
     crQs.set('type', 'CR');
+    crQs.set('limit', '0'); // all rows: the 500 default cap silently skewed the aging/department tables
     if (selectedDepartmentId) crQs.set('departmentId', selectedDepartmentId);
+    if (selectedItManagerId) crQs.set('itManagerId', selectedItManagerId); // now filtered server-side
     if (selectedSystemImpactedIds.length) crQs.set('systemImpactedId', selectedSystemImpactedIds.join(','));
     const crInitiatives = await fetchJSON('/api/initiatives?' + crQs.toString());
 
@@ -11557,22 +11701,29 @@ async function renderCRDashboard() {
     });
   });
   
-  // Add filter update functions
-  window.updateCRDashboardFilters = () => {
-    const departmentId = document.getElementById('filter-department-cr')?.value || '';
-    const itManagerId = document.getElementById('filter-itmanager-cr')?.value || '';
-    const sysBoxes = document.querySelectorAll('#dropdown-fSystemImpacted-cr input[type="checkbox"]:checked');
-    const systemImpactedIds = Array.from(sysBoxes).map((cb) => cb.value);
-    const params = new URLSearchParams();
-    if (departmentId) params.set('departmentId', departmentId);
-    if (itManagerId) params.set('itManagerId', itManagerId);
-    if (systemImpactedIds.length) params.set('systemImpactedId', systemImpactedIds.join(','));
-    location.search = params.toString();
+  // Filter changes update the URL in place and re-render just this page. Assigning
+  // location.search used to force a FULL page reload (re-download + re-init of the app).
+  const CR_DASH_FILTER_KEYS = ['departmentId', 'itManagerId', 'systemImpactedId'];
+  const applyCrDashboardFilters = (values) => {
+    const params = new URLSearchParams(location.search); // keep unrelated params
+    CR_DASH_FILTER_KEYS.forEach((k) => (values[k] ? params.set(k, values[k]) : params.delete(k)));
+    const qs = params.toString();
+    history.replaceState(null, '', location.pathname + (qs ? `?${qs}` : '') + location.hash);
+    const dash = document.getElementById('cr-dashboard-filters');
+    if (dash) dash.style.opacity = '0.6'; // immediate feedback while the data reloads
+    renderCRDashboard();
   };
 
-  window.clearCRDashboardFilters = () => {
-    location.search = '';
+  window.updateCRDashboardFilters = () => {
+    const sysBoxes = document.querySelectorAll('#dropdown-fSystemImpacted-cr input[type="checkbox"]:checked');
+    applyCrDashboardFilters({
+      departmentId: document.getElementById('filter-department-cr')?.value || '',
+      itManagerId: document.getElementById('filter-itmanager-cr')?.value || '',
+      systemImpactedId: Array.from(sysBoxes).map((cb) => cb.value).join(','),
+    });
   };
+
+  window.clearCRDashboardFilters = () => applyCrDashboardFilters({});
 
   const dashFilterRoot = document.getElementById('cr-dashboard-filters');
   if (dashFilterRoot) {
@@ -12054,6 +12205,7 @@ async function updateNavAuth() {
 }
 
 window.logout = function() {
+  hubReset(); // before clearing the session, so the next person starts clean
   clearUser();
   updateNavAuth();
   location.hash = '#auth';
@@ -12093,7 +12245,10 @@ async function router() {
   if (isAdminRoute && !(await requireAdmin())) {
     return;
   }
-  
+
+  // Downstream Hub page view, as a template — never the real id/token in the hash.
+  hubCall('page', hubRoutePath(h));
+
   try {
     if (h.startsWith('#sso')) return renderSso();
     if (h.startsWith('#auth')) return renderAuth();

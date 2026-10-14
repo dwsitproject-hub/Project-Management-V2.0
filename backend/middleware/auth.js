@@ -15,7 +15,9 @@ export async function authenticateToken(req, res, next) {
     const decoded = jwt.verify(token, JWT_SECRET);
     
     // API Client token: sub = client:<id>
-    const data = await store.read();
+    // Runs on every request and only looks things up (never mutates), so use the
+    // shared cached store instead of paying for a private deep copy.
+    const data = await store.readShared();
     const sub = String(decoded.sub || '');
     if (sub.startsWith('client:')) {
       const clientInternalId = sub.slice('client:'.length);

@@ -47,6 +47,7 @@ async function initializeSchema() {
       ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "activationTokenExpiry" TEXT;
       ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "resetToken" TEXT;
       ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "resetTokenExpiry" TEXT;
+      ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "hubUserId" TEXT;
       ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "type" TEXT;
       ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "teamMemberIds" TEXT;
       CREATE TABLE IF NOT EXISTS "initiatives" (
@@ -464,7 +465,60 @@ async function initializeSchema() {
   }
 }
 
+// ---- Read cache --------------------------------------------------------------
+// Every request reads the whole store (the auth middleware AND the route each call
+// read()). Against a remote DB (ApsaraDB RDS) one read is ~21 sequential round-trips
+// plus ~1.4 MB over the wire. We cache the last read and drop it on every write(),
+// so reads in this process are never staler than the last write. The short TTL only
+// bounds staleness from writers OUTSIDE this process (e.g. `node backend/seed_admin.js`
+// run via docker exec) — keep it short, because store.write() rewrites everything and
+// would otherwise persist a stale snapshot over such an external change.
+// Set STORE_READ_CACHE_TTL_MS=0 to disable.
+const READ_CACHE_TTL_MS = Number(process.env.STORE_READ_CACHE_TTL_MS ?? 5000);
+let readCache = null; // { data, at }
+let cacheGeneration = 0; // bumped on invalidate so an in-flight read can't cache stale data
+let inflightRead = null; // coalesces concurrent cache misses into a single DB read
+
+function loadShared() {
+  if (READ_CACHE_TTL_MS > 0 && readCache && Date.now() - readCache.at < READ_CACHE_TTL_MS) {
+    return Promise.resolve(readCache.data);
+  }
+  if (!inflightRead) {
+    const gen = cacheGeneration;
+    const p = readFromDb()
+      .then((data) => {
+        if (gen === cacheGeneration && READ_CACHE_TTL_MS > 0) readCache = { data, at: Date.now() };
+        return data;
+      })
+      .finally(() => {
+        if (inflightRead === p) inflightRead = null;
+      });
+    inflightRead = p;
+  }
+  return inflightRead;
+}
+
+function invalidateReadCache() {
+  cacheGeneration += 1;
+  readCache = null;
+  inflightRead = null; // requests arriving after a write must not join a pre-write read
+}
+
+/** Returns a private deep copy — callers may mutate it and pass it to write(). */
 async function read() {
+  return structuredClone(await loadShared());
+}
+
+/**
+ * Returns the SHARED cached object without copying. Read-only contract: the caller
+ * must never mutate it (or anything reachable from it). Use only on hot, pure-read
+ * paths such as the auth middleware.
+ */
+async function readShared() {
+  return loadShared();
+}
+
+async function readFromDb() {
   await initializeSchema();
   const client = await pool.connect();
   try {
@@ -513,7 +567,8 @@ async function read() {
           resetTokenExpiry: row.resetTokenExpiry || row.resettokenexpiry || null,
           type: row.type || null,
           teamMemberIds: row.teamMemberIds || row.teammemberids ? (row.teamMemberIds || row.teammemberids).split(',').filter(Boolean) : [],
-          createdAt: row.createdAt || row.createdat || null
+          createdAt: row.createdAt || row.createdat || null,
+          hubUserId: row.hubUserId || row.hubuserid || null,
         }));
       } else if (table === 'initiatives') {
         // Transform initiatives and parse comma-separated arrays
@@ -702,7 +757,15 @@ async function read() {
 let writeQueue = Promise.resolve();
 
 async function write(data) {
-  const run = writeQueue.then(() => writeImpl(data));
+  const run = writeQueue.then(async () => {
+    try {
+      await writeImpl(data);
+    } finally {
+      // Drop the cache (don't seed it from `data`): the next read reloads exactly what
+      // was persisted, including column coercions and dropped non-column fields.
+      invalidateReadCache();
+    }
+  });
   writeQueue = run.catch(() => {});
   return run;
 }
@@ -746,7 +809,7 @@ async function writeImpl(data) {
     }
 
     const insertUser =
-      'INSERT INTO "users"("id", "name", "email", "role", "type", "departmentId", "active", "passwordHash", "isAdmin", "emailActivated", "activationToken", "activationTokenExpiry", "resetToken", "resetTokenExpiry", "teamMemberIds") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)';
+      'INSERT INTO "users"("id", "name", "email", "role", "type", "departmentId", "active", "passwordHash", "isAdmin", "emailActivated", "activationToken", "activationTokenExpiry", "resetToken", "resetTokenExpiry", "teamMemberIds", "hubUserId") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)';
     for (const u of data.users || []) {
       // Convert teamMemberIds array to comma-separated string
       const teamMemberIds = Array.isArray(u.teamMemberIds) ? u.teamMemberIds.join(',') : (u.teamMemberIds || null);
@@ -766,6 +829,7 @@ async function writeImpl(data) {
         u.resetToken || null,
         u.resetTokenExpiry || null,
         teamMemberIds,
+        u.hubUserId || null, // Downstream Hub user UUID (OIDC sub), set at SSO sign-in
       ]);
     }
 
@@ -1139,5 +1203,5 @@ async function writeImpl(data) {
   }
 }
 
-export default { read, write, pool, databaseUrl };
+export default { read, readShared, write, invalidateReadCache, pool, databaseUrl };
 
