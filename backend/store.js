@@ -47,6 +47,7 @@ async function initializeSchema() {
       ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "activationTokenExpiry" TEXT;
       ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "resetToken" TEXT;
       ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "resetTokenExpiry" TEXT;
+      ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "hubUserId" TEXT;
       ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "type" TEXT;
       ALTER TABLE "users" ADD COLUMN IF NOT EXISTS "teamMemberIds" TEXT;
       CREATE TABLE IF NOT EXISTS "initiatives" (
@@ -566,7 +567,8 @@ async function readFromDb() {
           resetTokenExpiry: row.resetTokenExpiry || row.resettokenexpiry || null,
           type: row.type || null,
           teamMemberIds: row.teamMemberIds || row.teammemberids ? (row.teamMemberIds || row.teammemberids).split(',').filter(Boolean) : [],
-          createdAt: row.createdAt || row.createdat || null
+          createdAt: row.createdAt || row.createdat || null,
+          hubUserId: row.hubUserId || row.hubuserid || null,
         }));
       } else if (table === 'initiatives') {
         // Transform initiatives and parse comma-separated arrays
@@ -807,7 +809,7 @@ async function writeImpl(data) {
     }
 
     const insertUser =
-      'INSERT INTO "users"("id", "name", "email", "role", "type", "departmentId", "active", "passwordHash", "isAdmin", "emailActivated", "activationToken", "activationTokenExpiry", "resetToken", "resetTokenExpiry", "teamMemberIds") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)';
+      'INSERT INTO "users"("id", "name", "email", "role", "type", "departmentId", "active", "passwordHash", "isAdmin", "emailActivated", "activationToken", "activationTokenExpiry", "resetToken", "resetTokenExpiry", "teamMemberIds", "hubUserId") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)';
     for (const u of data.users || []) {
       // Convert teamMemberIds array to comma-separated string
       const teamMemberIds = Array.isArray(u.teamMemberIds) ? u.teamMemberIds.join(',') : (u.teamMemberIds || null);
@@ -827,6 +829,7 @@ async function writeImpl(data) {
         u.resetToken || null,
         u.resetTokenExpiry || null,
         teamMemberIds,
+        u.hubUserId || null, // Downstream Hub user UUID (OIDC sub), set at SSO sign-in
       ]);
     }
 

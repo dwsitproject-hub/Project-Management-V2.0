@@ -846,6 +846,97 @@ function setToken(token) {
   try { resetAccessCache(); } catch (_) { /* module still initializing — nothing cached yet */ }
 }
 
+// ---- Downstream Hub SDK --------------------------------------------------------
+// Usage analytics, JS-error capture, bug reports and Sentinel analysis in the Hub
+// (docs/HUB-SDK-IMPLEMENTATION.md). Fully optional: with no SDK config on the backend,
+// or the Hub unreachable, nothing loads and the app is unaffected.
+//
+// PM's routes are hashes WITHOUT a slash (#crlist, #view/<id>). The SDK only keeps
+// hashes that start with "#/", so it would record every page as "/". Its automatic page
+// views are therefore off and the router reports each route itself as a TEMPLATE:
+// record ids and tokens (#view/<id>, #reset-password/<token>, #sso?token=…) never leave PM.
+window.DwsHub = window.DwsHub || []; // calls made before the SDK loads are queued and replayed
+let hubSdkState = 'pending'; // 'pending' | 'on' | 'off'
+const HUB_QUEUE_MAX = 50;
+const HUB_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Call an SDK method if loaded, queue it if still loading, no-op if off. Never throws. */
+function hubCall(method, ...args) {
+  if (hubSdkState === 'off') return;
+  try {
+    const hub = window.DwsHub;
+    if (hub && typeof hub[method] === 'function') return hub[method](...args);
+    if (Array.isArray(hub) && hub.length < HUB_QUEUE_MAX) hub.push([method, ...args]);
+  } catch (_) { /* the SDK must never break the app */ }
+}
+
+/** "#view/9f2c…" -> "/#/view/:id", "#reset-password/<tok>" -> "/#/reset-password/:token". */
+function hubRoutePath(hash) {
+  const raw = String(hash || '').replace(/^#\/?/, '').split('?')[0];
+  const [route, ...rest] = raw.split('/').filter(Boolean);
+  if (!route) return '/#/';
+  const placeholder = { 'reset-password': ':token', activate: ':token' }[route] || ':id';
+  // #new/<type> keeps the type (Project | CR); any other extra segment is an id or token.
+  const tail = route === 'new'
+    ? rest.map((t) => (/^(Project|CR)$/.test(t) ? t : ':type'))
+    : rest.map(() => placeholder);
+  return '/#/' + [route, ...tail].join('/');
+}
+
+let hubIdentifiedKey = null;
+/** Tell the Hub who is signed in: the Hub user UUID when PM knows it, else the email. */
+function hubIdentify({ hubUserId, email } = {}) {
+  const id = HUB_UUID_RE.test(String(hubUserId || '')) ? String(hubUserId) : undefined; // Hub rejects non-UUID ids
+  const mail = email ? String(email) : undefined;
+  if (!id && !mail) return;
+  const key = `${id || ''}|${mail || ''}`;
+  if (key === hubIdentifiedKey) return; // identify() sends a heartbeat — don't repeat it on every page
+  hubIdentifiedKey = key;
+  hubCall('identify', { id, email: mail });
+}
+
+/** On sign-out: forget the user so the next person on this browser starts clean. */
+function hubReset() {
+  hubIdentifiedKey = null;
+  hubCall('reset');
+}
+
+/** Record a business action. Properties: categories and counts only — never personal data. */
+// The SDK stamps custom events with its own path, which is always "/" for PM's
+// non-"#/" hashes — so carry the templated route as a property instead.
+function hubTrack(name, props) {
+  hubCall('track', name, { ...(props || {}), route: hubRoutePath(location.hash) });
+}
+
+async function loadHubSdk() {
+  try {
+    const res = await fetch('/api/hub-sdk/config', { cache: 'no-store' });
+    const cfg = res.ok ? await res.json() : null;
+    if (!cfg || !cfg.enabled || !cfg.src || !cfg.appKey) throw new Error('Hub SDK not configured');
+    const s = document.createElement('script');
+    s.src = cfg.src;
+    s.async = true; // never blocks the app; the SDK replays anything queued meanwhile
+    s.setAttribute('data-app-key', cfg.appKey);
+    if (cfg.release) s.setAttribute('data-release', cfg.release);
+    s.setAttribute('data-bug-button', 'false'); // "Report a bug" lives in the user menu
+    s.setAttribute('data-auto-page-views', 'false'); // the router reports templated routes
+    if (cfg.debug) s.setAttribute('data-debug', 'true');
+    s.onload = () => {
+      hubSdkState = window.DwsHub && window.DwsHub.__loaded ? 'on' : 'off';
+      if (hubSdkState === 'off') window.DwsHub = [];
+      document.querySelectorAll('.hub-bug-report').forEach((el) => el.classList.toggle('hidden', hubSdkState !== 'on'));
+    };
+    s.onerror = () => { hubSdkState = 'off'; window.DwsHub = []; };
+    document.head.appendChild(s);
+  } catch (_) {
+    hubSdkState = 'off';
+    window.DwsHub = [];
+  }
+}
+
+window.openHubBugReport = () => hubCall('openBugReport');
+loadHubSdk();
+
 let currentUser = null;
 
 async function getCurrentUser() {
@@ -993,6 +1084,7 @@ async function getUserAccess() {
     } catch (e) {
       console.error('Failed to load profile for access rules:', e);
     }
+    hubIdentify({ hubUserId: profile?.hubUserId, email: profile?.email || user.email });
     const access = computeAccessRules(user, profile);
     CURRENT_ACCESS = access;
     return access;
@@ -2446,6 +2538,7 @@ window.exportCRListToExcel = function exportCRListToExcel() {
   a.click();
   a.remove();
   URL.revokeObjectURL(url);
+  hubTrack('list_exported', { list: 'cr', format: 'csv', rows: rows.length });
 };
 
 async function renderList() {
@@ -3864,7 +3957,8 @@ async function renderNew(defaultType = 'Project') {
       });
       
       const initiativeId = result.id;
-      
+      hubTrack('initiative_created', { type: obj.type }); // Project | CR — no names/content
+
       // Upload documents if any files were selected
       if (fileInput && selectedFiles.length > 0) {
         const token = getToken();
@@ -4508,6 +4602,7 @@ async function renderView(id) {
         });
       }
       
+      hubTrack('document_uploaded', { count: files.length });
       fileInput.value = '';
       progressDiv.style.display = 'none';
       progressBar.style.width = '0%';
@@ -5551,6 +5646,7 @@ async function showMeetingNoteModal(initiativeId, noteId = null, onSaved = null,
           notify(publishRes.error);
           return;
         }
+        hubTrack('meeting_note_published');
 
         const sendOk = await sendIfChecked(effectiveId);
         if (sendOk === false) return;
@@ -12106,6 +12202,7 @@ async function updateNavAuth() {
 }
 
 window.logout = function() {
+  hubReset(); // before clearing the session, so the next person starts clean
   clearUser();
   updateNavAuth();
   location.hash = '#auth';
@@ -12145,7 +12242,10 @@ async function router() {
   if (isAdminRoute && !(await requireAdmin())) {
     return;
   }
-  
+
+  // Downstream Hub page view, as a template — never the real id/token in the hash.
+  hubCall('page', hubRoutePath(h));
+
   try {
     if (h.startsWith('#sso')) return renderSso();
     if (h.startsWith('#auth')) return renderAuth();

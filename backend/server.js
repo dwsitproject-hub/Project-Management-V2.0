@@ -46,8 +46,11 @@ import apiV1CrsRouter from './routes/api-v1-crs.js';
 import dwsApplicationsRouter from './routes/dws-applications.js';
 import managementDashboardRouter from './routes/management-dashboard.js';
 import ssoRouter from './routes/sso.js';
+import hubSdkRouter from './routes/hub-sdk.js';
 
 // Public routes
+// Downstream Hub SDK settings for the SPA (public: the SDK key is publishable)
+app.use('/api/hub-sdk', hubSdkRouter);
 // SSO consumer (DWS Hub) — mounted before authRouter; additive to local login.
 app.use('/api/auth/sso', ssoRouter);
 app.use('/api/auth', authRouter);
