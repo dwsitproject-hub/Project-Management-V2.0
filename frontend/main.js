@@ -918,7 +918,10 @@ async function loadHubSdk() {
     s.async = true; // never blocks the app; the SDK replays anything queued meanwhile
     s.setAttribute('data-app-key', cfg.appKey);
     if (cfg.release) s.setAttribute('data-release', cfg.release);
-    s.setAttribute('data-bug-button', 'false'); // "Report a bug" lives in the user menu
+    // Floating "Report a bug" button, bottom-left (bottom-right is PM's own floating button);
+    // the profile-menu item stays as a second way in.
+    s.setAttribute('data-bug-button', 'true');
+    s.setAttribute('data-bug-button-position', 'bottom-left');
     s.setAttribute('data-auto-page-views', 'false'); // the router reports templated routes
     if (cfg.debug) s.setAttribute('data-debug', 'true');
     s.onload = () => {

@@ -7,11 +7,11 @@ PM Tools reports usage, browser errors and bug reports to the Downstream Hub thr
 | Piece | Where | Notes |
 |---|---|---|
 | SDK config endpoint | `backend/routes/hub-sdk.js` → `GET /api/hub-sdk/config` | PM's frontend has no build step, so the script URL, key, release and debug flag come from backend env vars. If `HUB_SDK_URL` or `HUB_SDK_KEY` is empty it returns `{enabled:false}` and **nothing loads**. |
-| Script loader | `frontend/main.js` → `loadHubSdk()` | Injects `hub-sdk.js` with `data-app-key`, `data-release`, `data-bug-button="false"` and `data-auto-page-views="false"`, plus `data-debug` when enabled. Calls are queued until the script loads. If the script fails to load, PM keeps working and the calls are dropped. |
+| Script loader | `frontend/main.js` → `loadHubSdk()` | Injects `hub-sdk.js` with `data-app-key`, `data-release`, `data-bug-button="true"` + `data-bug-button-position="bottom-left"` and `data-auto-page-views="false"`, plus `data-debug` when enabled. Calls are queued until the script loads. If the script fails to load, PM keeps working and the calls are dropped. |
 | Page views | router → `hubCall('page', hubRoutePath(hash))` | Must be manual: the SDK only understands `#/…` hashes, so on its own it would record every PM page as `/`. Ids and tokens are templated: `#view/<uuid>` → `/#/view/:id`, `#reset-password/<token>` → `/#/reset-password/:token`, `#sso?token=…` → `/#/sso`. |
 | Signed-in user | `getUserAccess()` → `hubIdentify()` | Sends `{ id: <Hub user UUID>, email }`. The Hub UUID is the OIDC `sub` or bridge `user_id`, stored in the new `users.hubUserId` column at SSO login. For users who sign in with a local password, only the email is sent. |
 | Sign-out | `logout()` → `DwsHub.reset()` | The next user starts a fresh session. |
-| Report a bug | Profile menu → **🐞 Report a bug** | The SDK's floating button is hidden. The menu item only appears once the SDK has loaded. |
+| Report a bug | Floating **🐞 Report a bug** button (bottom-left) + Profile menu → **🐞 Report a bug** | Both appear only once the SDK has loaded. Bottom-right is already used by PM's own floating button. |
 | Business events | `hubTrack(...)` | `initiative_created {type}`, `list_exported {list, format, rows}`, `document_uploaded {count}`, `meeting_note_published`. Each event also carries `route` (templated), because the SDK stamps custom events with path `/` for PM's hashes. No names or content are sent. |
 
 **CSP:** PM sends no Content-Security-Policy (neither nginx nor `index.html`), so nothing needs changing. If a CSP is added later, include the Hub origin in `script-src` and `connect-src`.
