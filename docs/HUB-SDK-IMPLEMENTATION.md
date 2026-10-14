@@ -49,13 +49,14 @@ The key is publishable, so it can appear in page source. The Hub accepts it only
 ### Staging
 **Backend** (172.28.92.57):
 1. Run `git pull origin SIT`.
-2. In `.env.staging`, set:
+2. In `.env.staging`, set the four lines below. Each value goes on the line by itself, with no quotes and no `# comment` after it, because docker keeps the comment as part of the value. Use the staging key from the Hub snippet.
    ```
    HUB_SDK_URL=http://test-dwshub.kpndomain.com/api/sdk/v1/hub-sdk.js
-   HUB_SDK_KEY=dwsk_...            # staging key
+   HUB_SDK_KEY=dwsk_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
    HUB_SDK_DEBUG=true
-   HUB_SDK_RELEASE=<short sha>     # git rev-parse --short HEAD
+   HUB_SDK_RELEASE=
    ```
+   Fill in `HUB_SDK_RELEASE` with the command under **Release tag** below; don't type it by hand. After recreating the backend, `docker logs <backend container> | grep HUB-SDK` should show `[HUB-SDK] enabled (release <sha>)`, with no warning line.
 3. Recreate the backend, e.g. `docker compose -f docker-compose.staging.backend.yml up -d --force-recreate`. The DB gets the `hubUserId` column automatically at startup.
 
 **Frontend** (172.28.92.56):
@@ -103,6 +104,7 @@ Verified locally against the real SDK v1.1.0 (mock Hub):
 
 | Symptom | Cause / fix |
 |---|---|
+| Hub says **SDK not installed**, and `collect` returns `403 invalid_key` | The key is wrong, or (on older builds) a `# comment` follows it in the env file. Open `/api/hub-sdk/config`: `appKey` must be exactly the `dwsk_…` value from the Hub snippet. |
 | No `hub-sdk.js` request at all | `GET /api/hub-sdk/config` returns `{enabled:false}`: `HUB_SDK_URL` or `HUB_SDK_KEY` is missing in that backend's env file, or the container wasn't recreated. |
 | `blocked by CORS` / `403 origin_not_allowed` | PM's exact address (scheme + host) isn't in the Hub's Allowed origins. |
 | `403 invalid_key` | Wrong environment's key, or the key was rotated. |

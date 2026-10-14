@@ -17,22 +17,43 @@ import express from 'express';
 
 const router = express.Router();
 
+// Same rules the Hub applies (DWS Hub lib/sdkPolicy.js): a bad key gets 403 invalid_key
+// on every request, and a bad release is silently dropped.
+const SDK_KEY_RE = /^dwsk_[A-Za-z0-9_-]{20,60}$/;
+const RELEASE_RE = /^[A-Za-z0-9][A-Za-z0-9._+\-]{0,63}$/;
+
 const isTrue = (v) => ['1', 'true', 'yes', 'on'].includes(String(v || '').trim().toLowerCase());
+// docker env_file keeps trailing "# comments" as part of the value; none of these
+// values can legitimately contain '#', so cut there.
+const envValue = (name) => String(process.env[name] || '').split('#')[0].trim();
 
-router.get('/config', (_req, res) => {
-  const src = String(process.env.HUB_SDK_URL || '').trim();
-  const appKey = String(process.env.HUB_SDK_KEY || '').trim();
-  if (!src || !appKey) return res.json({ enabled: false });
+function readConfig() {
+  const src = envValue('HUB_SDK_URL');
+  const appKey = envValue('HUB_SDK_KEY');
+  if (!src || !appKey) return { enabled: false };
+  if (!/^https?:\/\//i.test(src)) return { enabled: false, problem: 'HUB_SDK_URL must start with http:// or https://' };
+  if (!SDK_KEY_RE.test(appKey)) return { enabled: false, problem: 'HUB_SDK_KEY is not a valid dwsk_… key (copy it from the Hub snippet)' };
 
-  const release = String(process.env.HUB_SDK_RELEASE || process.env.GIT_SHA || '').trim().slice(0, 64);
-  res.set('Cache-Control', 'no-store');
-  return res.json({
+  const rawRelease = envValue('HUB_SDK_RELEASE') || envValue('GIT_SHA');
+  const release = RELEASE_RE.test(rawRelease) ? rawRelease : null;
+  return {
     enabled: true,
     src,
     appKey,
-    release: release || null,
+    release,
     debug: isTrue(process.env.HUB_SDK_DEBUG),
-  });
+    problem: rawRelease && !release ? 'HUB_SDK_RELEASE is not a commit SHA/tag — sent without a release' : null,
+  };
+}
+
+const boot = readConfig();
+if (boot.problem) console.warn(`[HUB-SDK] ${boot.problem}`);
+console.log(`[HUB-SDK] ${boot.enabled ? `enabled (release ${boot.release || 'none'})` : 'disabled'}`);
+
+router.get('/config', (_req, res) => {
+  const { problem: _problem, ...cfg } = readConfig();
+  res.set('Cache-Control', 'no-store');
+  return res.json(cfg.enabled ? { ...cfg, release: cfg.release || null } : { enabled: false });
 });
 
 export default router;
