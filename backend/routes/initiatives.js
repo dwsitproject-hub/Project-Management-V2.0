@@ -11,6 +11,7 @@ import {
 import {
   normalizeCrMilestonePhase,
   isValidCrMilestonePhase,
+  crMilestoneMatchesFilter,
   requiresCrFullyLiveEndDate as crRequiresFullyLiveEndDate,
 } from '../crTaskTemplates.js';
 import {
@@ -123,9 +124,17 @@ function validateCommon(body) {
   return null;
 }
 
+// Multi-value id fields come from store.read() as arrays; older data may be CSV strings.
+function toIdList(raw) {
+  if (Array.isArray(raw)) return raw.map((id) => String(id).trim()).filter(Boolean);
+  return String(raw || '').split(',').map((id) => id.trim()).filter(Boolean);
+}
+
+// Drill-down modals on the dashboards call this endpoint with the clicked value, so its
+// matching must use the SAME normalization the dashboards count with (trim/upper-case,
+// CR milestone aliases), otherwise a number and its detail list disagree.
 router.get('/', async (req, res) => {
-  const { q, type, status, milestone, crMilestonePhase, priority, departmentId, itPicId, itPmId, businessOwnerId, active, systemImpactedId } = req.query;
-  console.log('API filter params:', { q, type, status, milestone, crMilestonePhase, priority, departmentId, itPicId, itPmId, businessOwnerId, active, systemImpactedId });
+  const { q, type, status, milestone, crMilestonePhase, priority, departmentId, itPicId, itPmId, businessOwnerId, active, systemImpactedId, itManagerId, limit } = req.query;
   const data = await store.read();
   let rows = data.initiatives;
   
@@ -155,24 +164,22 @@ router.get('/', async (req, res) => {
   if (type) rows = rows.filter(r => r.type === type);
   if (active === 'true') rows = rows.filter(r => r.status && r.status.toUpperCase() !== 'NOT STARTED');
   
-  // Multi-value filters - case insensitive for status
+  // Status: case-insensitive and whitespace-trimmed (as the dashboards count)
   const statusValues = parseMultiValue(status);
   if (statusValues && statusValues.length > 0) {
-    console.log('Filtering by status:', statusValues);
-    const statusValuesUpper = statusValues.map(s => s.toUpperCase());
-    console.log('Status values (upper):', statusValuesUpper);
-    const beforeCount = rows.length;
-    rows = rows.filter(r => {
-      const matches = r.status && statusValuesUpper.includes(r.status.toUpperCase());
-      if (matches) console.log(`Match: ${r.name} - status: "${r.status}"`);
-      return matches;
-    });
-    console.log(`Status filter: ${beforeCount} -> ${rows.length} rows`);
+    const wanted = new Set(statusValues.map((s) => s.toUpperCase()));
+    rows = rows.filter((r) => wanted.has(String(r.status || '').trim().toUpperCase()));
   }
-  
+
+  // Milestone: CR phases and Project milestones have different vocabularies and legacy
+  // aliases (e.g. CR 'Live' / 'Live (Waranty Period)'), so match each with its own rules.
   const milestoneValues = parseMultiValue(milestone);
   if (milestoneValues && milestoneValues.length > 0) {
-    rows = rows.filter((r) => projectMilestoneMatchesFilter(r.milestone, milestoneValues));
+    rows = rows.filter((r) =>
+      r.type === 'CR'
+        ? crMilestoneMatchesFilter(r.milestone, milestoneValues)
+        : projectMilestoneMatchesFilter(r.milestone, milestoneValues)
+    );
   }
 
   // Backward compatibility: older clients may send `crMilestonePhase`.
@@ -182,14 +189,29 @@ router.get('/', async (req, res) => {
     rows = rows.filter(r => r.type === 'CR' && crPhaseValues.includes(r.milestone));
   }
   
+  // Priority: case-insensitive and trimmed (dashboards count 'p1' / 'P1 ' as P1)
   const priorityValues = parseMultiValue(priority);
   if (priorityValues && priorityValues.length > 0) {
-    rows = rows.filter(r => priorityValues.includes(r.priority));
+    const wanted = new Set(priorityValues.map((p) => p.toUpperCase()));
+    rows = rows.filter((r) => wanted.has(String(r.priority || '').trim().toUpperCase()));
   }
-  
+
+  // Department: '__none__' (or the dashboards' 'N/A' label) selects initiatives with no department
   const departmentIdValues = parseMultiValue(departmentId);
   if (departmentIdValues && departmentIdValues.length > 0) {
-    rows = rows.filter(r => departmentIdValues.includes(r.departmentId));
+    const isNone = (v) => v === '__none__' || v === 'N/A';
+    const wantNone = departmentIdValues.some(isNone);
+    const ids = departmentIdValues.filter((v) => !isNone(v));
+    rows = rows.filter((r) => (wantNone && !r.departmentId) || ids.includes(r.departmentId));
+  }
+
+  // IT Manager (multi-value, OR logic; initiative.itManagerIds is an array/CSV)
+  const itManagerIdValues = parseMultiValue(itManagerId);
+  if (itManagerIdValues && itManagerIdValues.length > 0) {
+    rows = rows.filter((r) => {
+      const ids = toIdList(r.itManagerIds);
+      return itManagerIdValues.some((sel) => ids.includes(sel));
+    });
   }
   
   // Multi-value filters for IT PIC and Business Owner (OR logic)
@@ -221,18 +243,19 @@ router.get('/', async (req, res) => {
     });
   }
   
-  console.log(`API returned ${rows.length} rows after filtering (total initiatives: ${data.initiatives.length})`);
   rows = rows.sort((a,b) => (b.updatedAt||'').localeCompare(a.updatedAt||''));
-  
-  // Include CR data for CR initiatives
+
+  // Include CR data for CR initiatives (index once instead of a linear find per row)
   if (type === 'CR') {
-    rows = rows.map(initiative => {
-      const crData = data.changeRequests.find(cr => cr.initiativeId === initiative.id);
-      return { ...initiative, cr: crData };
-    });
+    const crByInitiative = new Map((data.changeRequests || []).map((cr) => [cr.initiativeId, cr]));
+    rows = rows.map((initiative) => ({ ...initiative, cr: crByInitiative.get(initiative.id) }));
   }
-  
-  res.json(rows.slice(0,500));
+
+  // List pages keep the historical 500-row cap by default. Dashboards and drill-down
+  // modals pass limit=0 (or limit=all) to get EVERY matching row — the silent cap
+  // otherwise makes their counts and detail lists disagree once there are >500 rows.
+  const cap = limit === undefined ? 500 : Number(limit);
+  res.json(cap > 0 ? rows.slice(0, cap) : rows);
 });
 
 /** Last N change-history entries for initiatives of a given type (Project | CR). */

@@ -44,12 +44,62 @@ export async function createDailySnapshot() {
     }))
   };
   
-  // Store the snapshot
+  // NOTE: dailySnapshots has no table in store.js, so store.write() cannot persist it.
+  // Writing here used to DELETE + re-INSERT the entire database (every boot, every
+  // 24h, and after every sheet sync) while storing nothing — pure cost, and it
+  // contended with real writes. Keep the snapshot in the returned value only.
   data.dailySnapshots[today] = snapshotData;
-  await store.write(data);
-  
-  console.log(`Daily snapshot created for ${today} with ${snapshotData.initiatives.length} initiatives`);
+
+  console.log(`Daily snapshot computed for ${today} with ${snapshotData.initiatives.length} initiatives (not persisted)`);
   return snapshotData;
+}
+
+// Sort snapshots once and index each day's initiatives by id, so per-initiative
+// lookups are O(1) instead of a linear find() per day.
+function indexSnapshots(dailySnapshots) {
+  if (!dailySnapshots) return [];
+  return Object.entries(dailySnapshots)
+    .sort(([dateA], [dateB]) => dateA.localeCompare(dateB))
+    .map(([date, snapshot]) => [date, new Map((snapshot?.initiatives || []).map((i) => [i.id, i]))]);
+}
+
+function buildMilestoneBreakdown(initiativeId, indexedSnapshots) {
+  const milestonePeriods = [];
+  let currentMilestone = null;
+  let milestoneStartDate = null;
+
+  for (const [date, byId] of indexedSnapshots) {
+    const initiative = byId.get(initiativeId);
+    if (!initiative) continue;
+
+    const milestone = initiative.milestone;
+    if (milestone !== currentMilestone) {
+      if (currentMilestone && milestoneStartDate) {
+        milestonePeriods.push({
+          milestone: currentMilestone,
+          startDate: milestoneStartDate,
+          endDate: date,
+          duration: calculateDaysBetween(milestoneStartDate, date),
+          status: 'Completed',
+        });
+      }
+      currentMilestone = milestone;
+      milestoneStartDate = date;
+    }
+  }
+
+  if (currentMilestone && milestoneStartDate) {
+    const today = new Date().toISOString().slice(0, 10);
+    milestonePeriods.push({
+      milestone: currentMilestone,
+      startDate: milestoneStartDate,
+      endDate: null,
+      duration: calculateDaysBetween(milestoneStartDate, today),
+      status: 'Current',
+    });
+  }
+
+  return milestonePeriods;
 }
 
 /**
@@ -112,60 +162,7 @@ export async function calculateMilestoneDuration(initiativeId, targetMilestone) 
  */
 export async function getMilestoneDurationBreakdown(initiativeId) {
   const data = await store.read();
-  
-  if (!data.dailySnapshots) {
-    return [];
-  }
-  
-  // Get all snapshots sorted by date
-  const snapshots = Object.entries(data.dailySnapshots)
-    .sort(([dateA], [dateB]) => dateA.localeCompare(dateB));
-  
-  const milestonePeriods = [];
-  let currentMilestone = null;
-  let milestoneStartDate = null;
-  
-  for (const [date, snapshot] of snapshots) {
-    const initiative = snapshot.initiatives.find(i => i.id === initiativeId);
-    
-    if (!initiative) {
-      continue;
-    }
-    
-    const milestone = initiative.milestone;
-    
-    if (milestone !== currentMilestone) {
-      // Milestone changed
-      if (currentMilestone && milestoneStartDate) {
-        // Save previous milestone period
-        milestonePeriods.push({
-          milestone: currentMilestone,
-          startDate: milestoneStartDate,
-          endDate: date,
-          duration: calculateDaysBetween(milestoneStartDate, date),
-          status: 'Completed'
-        });
-      }
-      
-      // Start new milestone period
-      currentMilestone = milestone;
-      milestoneStartDate = date;
-    }
-  }
-  
-  // Add current milestone if still active
-  if (currentMilestone && milestoneStartDate) {
-    const today = new Date().toISOString().slice(0, 10);
-    milestonePeriods.push({
-      milestone: currentMilestone,
-      startDate: milestoneStartDate,
-      endDate: null,
-      duration: calculateDaysBetween(milestoneStartDate, today),
-      status: 'Current'
-    });
-  }
-  
-  return milestonePeriods;
+  return buildMilestoneBreakdown(initiativeId, indexSnapshots(data.dailySnapshots));
 }
 
 /**
@@ -200,26 +197,21 @@ export async function initializeDailySnapshots() {
  * @returns {Array} Array of initiative milestone durations
  */
 export async function getAllMilestoneDurations(type = null) {
+  // ONE store read + ONE snapshot index for all initiatives. This previously called
+  // getMilestoneDurationBreakdown() per initiative, i.e. a full-database read for
+  // every CR/Project on each dashboard load (hundreds of reads, seconds on RDS).
   const data = await store.read();
-  let initiatives = data.initiatives;
-  
-  if (type) {
-    initiatives = initiatives.filter(i => i.type === type);
-  }
-  
-  const results = [];
-  for (const initiative of initiatives) {
-    const breakdown = await getMilestoneDurationBreakdown(initiative.id);
-    results.push({
-      id: initiative.id,
-      name: initiative.name,
-      type: initiative.type,
-      currentMilestone: initiative.milestone,
-      milestoneDetails: breakdown
-    });
-  }
-  
-  return results;
+  let initiatives = data.initiatives || [];
+  if (type) initiatives = initiatives.filter((i) => i.type === type);
+
+  const indexed = indexSnapshots(data.dailySnapshots);
+  return initiatives.map((initiative) => ({
+    id: initiative.id,
+    name: initiative.name,
+    type: initiative.type,
+    currentMilestone: initiative.milestone,
+    milestoneDetails: indexed.length ? buildMilestoneBreakdown(initiative.id, indexed) : [],
+  }));
 }
 
 export default {
