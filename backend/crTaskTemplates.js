@@ -103,7 +103,8 @@ export function isValidCrMilestonePhase(value) {
  */
 export function crMilestoneMatchesFilter(rowMilestone, filterValues) {
   if (!filterValues?.length) return true;
-  const row = normalizeCrMilestonePhase(String(rowMilestone || ''));
+  // Trim the row value too — the CR dashboard counts milestones trimmed.
+  const row = normalizeCrMilestonePhase(String(rowMilestone || '').trim());
   return filterValues.some((f) => row === normalizeCrMilestonePhase(String(f || '').trim()));
 }
 

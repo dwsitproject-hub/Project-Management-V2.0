@@ -80,7 +80,7 @@ function frontendRedirect(res, params) {
  * Map a Hub-verified identity to a local user, then mint the app JWT and hand
  * it to the SPA. Local login and password hashes are never touched here.
  */
-async function finalizeSsoLogin(res, { email, subject, provider }) {
+async function finalizeSsoLogin(res, { email, hubUserId, provider }) {
   const cleanEmail = String(email || '').trim().toLowerCase();
   if (!cleanEmail) return frontendRedirect(res, { error: 'SSO token had no email' });
 
@@ -127,8 +127,10 @@ async function finalizeSsoLogin(res, { email, subject, provider }) {
   // Hub verified the email — a stronger signal than the email-link flow — so mark
   // SSO users activated (keeps the API middleware happy). Only flips once.
   if (!user.emailActivated) { user.emailActivated = true; mustPersist = true; }
-  if (user.ssoSubject !== subject) { user.ssoSubject = subject; mustPersist = true; }
-  if (user.ssoProvider !== provider) { user.ssoProvider = provider; mustPersist = true; }
+  // Remember the user's Downstream Hub id (OIDC `sub` / bridge `user_id`, a UUID) so the
+  // Hub SDK can identify them. It is a real column; the old ssoSubject/ssoProvider fields
+  // were not, so they looked "changed" on every login and forced a full-store write each time.
+  if (hubUserId && user.hubUserId !== hubUserId) { user.hubUserId = hubUserId; mustPersist = true; }
   // NB: deliberately do NOT persist a per-login timestamp — it is not worth a
   // full-store write on every login.
   if (mustPersist) await store.write(data);
@@ -250,7 +252,7 @@ router.get('/oidc/callback', async (req, res) => {
     res.clearCookie(TX_COOKIE, { path: '/api/auth/sso' });
     return finalizeSsoLogin(res, {
       email: claims.email,
-      subject: `oidc:${claims.sub}`,
+      hubUserId: String(claims.sub),
       provider: 'oidc',
     });
   } catch (e) {
@@ -278,7 +280,7 @@ router.post('/hub', express.urlencoded({ extended: false }), async (req, res) =>
 
   return finalizeSsoLogin(res, {
     email,
-    subject: `hub:${payload.user_id}`,
+    hubUserId: String(payload.user_id),
     provider: 'hub',
   });
 });

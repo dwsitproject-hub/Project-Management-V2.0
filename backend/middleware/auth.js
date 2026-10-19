@@ -11,11 +11,19 @@ export async function authenticateToken(req, res, next) {
     return res.status(401).json({ error: 'Authentication required' });
   }
 
+  let decoded;
   try {
-    const decoded = jwt.verify(token, JWT_SECRET);
-    
+    decoded = jwt.verify(token, JWT_SECRET);
+  } catch (_) {
+    // Expired/forged/garbled token: "sign in again" (401), not "forbidden" (403).
+    return res.status(401).json({ error: 'Invalid or expired token' });
+  }
+
+  try {
     // API Client token: sub = client:<id>
-    const data = await store.read();
+    // Runs on every request and only looks things up (never mutates), so use the
+    // shared cached store instead of paying for a private deep copy.
+    const data = await store.readShared();
     const sub = String(decoded.sub || '');
     if (sub.startsWith('client:')) {
       const clientInternalId = sub.slice('client:'.length);
@@ -59,7 +67,10 @@ export async function authenticateToken(req, res, next) {
 
     next();
   } catch (error) {
-    return res.status(403).json({ error: 'Invalid or expired token' });
+    // The token was fine; loading users failed (e.g. DB unreachable). That's a server
+    // error — answering "invalid token" here would log everyone out during an outage.
+    console.error('[AUTH] user lookup failed:', error?.message || error);
+    return res.status(503).json({ error: 'Service temporarily unavailable. Please try again.' });
   }
 }
 
