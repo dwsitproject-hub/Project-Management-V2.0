@@ -40,7 +40,8 @@ The key is publishable, so it can appear in page source. The Hub accepts it only
    - Repository: `dwsitproject-hub/Project-Management-V2.0`; Branch: `SIT` (staging) or `main` (production).
    - Application folder: leave empty.
    - Notes for Sentinel:
-     > Vanilla-JS SPA (`frontend/main.js`, hash routes) behind nginx. Express API in `backend/` (`server.js`, `routes/*`). Postgres on ApsaraDB RDS via `backend/store.js`, which reads/writes whole tables with a 5 s read cache. Google Sheets sync. Login is local password + DWS Hub SSO (`backend/routes/sso.js`).
+     > Vanilla-JS SPA (`frontend/main.js`, hash routes) behind nginx. Express API in `backend/` (`server.js`, `routes/*`). Postgres on ApsaraDB RDS via `backend/store.js`, which reads/writes whole tables with a 5 s read cache. Google Sheets sync. Login is local password + DWS Hub SSO (`backend/routes/sso.js`). The page's `/main.js` is `frontend/main.js`; `src/public/*` is legacy and not deployed. Expected session expiry: an expired app token gets 401 and the user is sent to login (not a bug).
+   - Known limit: Sentinel skips files over 400 KB (Hub `lib/sentinel/tar.js`, `maxFileBytes`). `frontend/main.js` is about 580 KB, so Sentinel can't read PM's frontend code until that limit is raised on the Hub, or main.js is split.
    - Click **Test repository access**, then **Save settings**.
 3. Security note, as for KLIP: Sentinel sends relevant source files plus error details and breadcrumbs to the Claude API. Emails are pseudonymised and tokens removed. API breadcrumbs include record ids (e.g. `GET /api/initiatives/<uuid>`) but never reset, activation or SSO tokens. If the source must not leave the company, leave the repository empty.
 

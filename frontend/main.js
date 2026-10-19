@@ -938,6 +938,48 @@ async function loadHubSdk() {
 }
 
 window.openHubBugReport = () => hubCall('openBugReport');
+
+// An expired/invalid session is expected, not a bug: fetchJSON sends the user to the
+// login page and throws AuthRedirectError so the caller stops. Swallow it when nobody
+// catches it, so it isn't reported as a JS error. Registered before the SDK script is
+// injected, so stopImmediatePropagation() keeps it away from the SDK's own listener.
+class AuthRedirectError extends Error {
+  constructor(message) {
+    super(message || 'Authentication required');
+    this.name = 'AuthRedirectError';
+  }
+}
+window.addEventListener('unhandledrejection', (e) => {
+  if (e.reason instanceof AuthRedirectError) {
+    e.preventDefault();
+    e.stopImmediatePropagation();
+  }
+});
+
+// Remember the page a signed-out user was trying to open (e.g. a #view/<id> link),
+// so login/SSO can bring them back there instead of the dashboard. Same tab only.
+const RETURN_TO_KEY = 'pm_return_to';
+const NO_RETURN_RE = /^#(auth|sso|reset-password|activate|profile)?(\/|\?|$)/;
+function rememberReturnTo(hash) {
+  try {
+    if (hash && !NO_RETURN_RE.test(hash)) sessionStorage.setItem(RETURN_TO_KEY, hash);
+  } catch (_) { /* storage unavailable — fall back to the normal landing page */ }
+}
+function takeReturnTo() {
+  try {
+    const h = sessionStorage.getItem(RETURN_TO_KEY);
+    sessionStorage.removeItem(RETURN_TO_KEY);
+    return h && h.startsWith('#') && !NO_RETURN_RE.test(h) ? h : null;
+  } catch (_) {
+    return null;
+  }
+}
+function redirectToLogin() {
+  rememberReturnTo(location.hash);
+  clearUser();
+  location.hash = '#auth';
+}
+
 loadHubSdk();
 
 let currentUser = null;
@@ -1106,6 +1148,8 @@ async function getUserAccess() {
 // Where to send a user right after login. Management-type users who can view the
 // Management Dashboard land there; everyone else lands on their User Dashboard.
 async function postLoginRoute() {
+  const returnTo = takeReturnTo();
+  if (returnTo) return returnTo; // the page they opened before being asked to sign in
   try {
     const access = await getUserAccess();
     if (access && access.type === 'Management' && (access.isAdmin || access.canViewManagementDashboard)) {
@@ -1832,9 +1876,8 @@ async function fetchJSON(url, options) {
     if (res.status === 401) {
       // Unauthorized - clear token and redirect to login. Surface the backend's
       // actual reason (e.g. "User not found or inactive") instead of masking it.
-      clearUser();
-      location.hash = '#auth';
-      throw new Error(parsedError?.error || 'Authentication required');
+      redirectToLogin();
+      throw new AuthRedirectError(parsedError?.error || 'Authentication required');
     }
     if (res.status === 403) {
       const auth403Patterns = [
@@ -1845,9 +1888,8 @@ async function fetchJSON(url, options) {
       ];
       const isAuth403 = auth403Patterns.some((pattern) => body.includes(pattern));
       if (isAuth403) {
-        clearUser();
-        location.hash = '#auth';
-        throw new Error('Authentication required');
+        redirectToLogin();
+        throw new AuthRedirectError('Authentication required');
       }
       throw new Error(parsedError?.error || `Request forbidden 403: ${body || res.statusText}`);
     }
@@ -11987,13 +12029,12 @@ const ADMIN_ROUTES = ['#admin', '#admin-users', '#admin-roles', '#master-dws'];
 async function requireAuth() {
   const token = getToken();
   if (!token) {
-    location.hash = '#auth';
+    redirectToLogin();
     return false;
   }
   const user = await getCurrentUser();
   if (!user) {
-    clearUser();
-    location.hash = '#auth';
+    redirectToLogin();
     return false;
   }
   return true;
