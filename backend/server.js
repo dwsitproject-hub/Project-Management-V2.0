@@ -42,7 +42,7 @@ import notificationsRouter from './routes/notifications.js';
 import meetingNotesRouter from './routes/meeting-notes.js';
 import { authenticateToken } from './middleware/auth.js';
 import { requestTimeout } from './middleware/timeout.js';
-import apiV1CrsRouter from './routes/api-v1-crs.js';
+import { crsRouter as apiV1CrsRouter, initiativesRouter as apiV1InitiativesRouter } from './routes/api-v1-initiatives.js';
 import dwsApplicationsRouter from './routes/dws-applications.js';
 import managementDashboardRouter from './routes/management-dashboard.js';
 import ssoRouter from './routes/sso.js';
@@ -70,6 +70,7 @@ app.use('/api/profile', authenticateToken, profileRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/meeting-notes', meetingNotesRouter);
 app.use('/api/v1/crs', authenticateToken, requestTimeout(5000), apiV1CrsRouter);
+app.use('/api/v1/initiatives', authenticateToken, requestTimeout(5000), apiV1InitiativesRouter);
 app.use('/api/dws-applications', authenticateToken, dwsApplicationsRouter);
 app.use('/api/management-dashboard', authenticateToken, managementDashboardRouter);
 

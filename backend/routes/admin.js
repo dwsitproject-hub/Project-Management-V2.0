@@ -353,5 +353,39 @@ router.post('/api-clients', async (req, res) => {
   }
 });
 
+// Change an existing client: scopes (e.g. add project:read project:write), active
+// (false = its tokens stop working on the next request), name, or rotate the secret.
+const API_CLIENT_SCOPES = ['cr:read', 'cr:write', 'project:read', 'project:write'];
+
+router.patch('/api-clients/:id', async (req, res) => {
+  try {
+    const { name, scopes, active, clientSecret } = req.body || {};
+    const data = await store.read();
+    const client = (data.apiClients || []).find((c) => c.id === req.params.id);
+    if (!client) return res.status(404).json({ error: 'Not found' });
+
+    if (scopes !== undefined) {
+      const list = String(scopes).split(/\s+/).filter(Boolean);
+      const unknown = list.filter((s) => !API_CLIENT_SCOPES.includes(s));
+      if (!list.length || unknown.length) {
+        return res.status(400).json({ error: `scopes must be space-separated values from: ${API_CLIENT_SCOPES.join(' ')}` });
+      }
+      client.scopes = [...new Set(list)].join(' ');
+    }
+    if (name !== undefined) client.name = String(name);
+    if (active !== undefined) client.active = !!active;
+    if (clientSecret !== undefined) {
+      if (!clientSecret) return res.status(400).json({ error: 'clientSecret cannot be empty' });
+      client.clientSecretHash = await bcrypt.hash(String(clientSecret), 10);
+    }
+
+    await store.write(data);
+    return res.json({ ok: true, id: client.id, scopes: client.scopes, active: client.active !== false });
+  } catch (e) {
+    console.error('Update api client error', e);
+    return res.status(500).json({ error: 'Internal error' });
+  }
+});
+
 export default router;
 
