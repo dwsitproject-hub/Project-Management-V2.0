@@ -8727,6 +8727,498 @@ async function renderDashboard() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Manager Dashboard → Portfolio Calendar
+// ---------------------------------------------------------------------------
+// Months run across the top. Rows are either team members (cards = initiatives where
+// they are the IT PM) or initiatives (card = who works on it). Dragging a card sideways
+// moves its plan dates by whole months; its edges change Plan Start / Plan End only. In
+// Team Member view, dragging a card to another member's row changes the IT PM.
+// Weighted Score per member per month: 1 for each initiative where they are both IT PM
+// and IT Dev (IT PIC), 0.5 where they are only one of the two.
+
+const PC_STATE_KEY = 'pm_portfolio_calendar';
+const PC_COL_W = 120; // px per month column
+const PC_LANE_H = 30; // px per stacked card lane
+
+function pcLoadState() {
+  try { return JSON.parse(localStorage.getItem(PC_STATE_KEY)) || {}; } catch (_) { return {}; }
+}
+function pcSaveState(state) {
+  try { localStorage.setItem(PC_STATE_KEY, JSON.stringify(state)); } catch (_) { /* optional */ }
+}
+
+// Dates are handled as plain calendar dates {y, m (0-based), d} to avoid timezone drift.
+function pcParseDate(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ''));
+  return m ? { y: +m[1], m: +m[2] - 1, d: +m[3] } : null;
+}
+const pcDaysIn = (y, m) => new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+const pcMonthIndex = (p) => p.y * 12 + p.m;
+const pcFormat = (p) => `${p.y}-${String(p.m + 1).padStart(2, '0')}-${String(p.d).padStart(2, '0')}`;
+const pcMonthLabel = (idx) =>
+  new Date(Date.UTC(Math.floor(idx / 12), idx % 12, 1)).toLocaleString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+// Whole months, keeping the day of month (clamped: 31 Jan + 1 month → 28/29 Feb).
+function pcAddMonths(p, n) {
+  const idx = pcMonthIndex(p) + n;
+  const y = Math.floor(idx / 12);
+  const m = ((idx % 12) + 12) % 12;
+  return { y, m, d: Math.min(p.d, pcDaysIn(y, m)) };
+}
+// Position on the month axis: month index + elapsed fraction of that month.
+const pcPos = (p, isEnd) => pcMonthIndex(p) + (isEnd ? p.d : p.d - 1) / pcDaysIn(p.y, p.m);
+
+function pcDevIds(i) {
+  const raw = Array.isArray(i.itPicIds) ? i.itPicIds : String(i.itPicIds || '').split(',');
+  const ids = raw.map((s) => String(s).trim()).filter(Boolean);
+  if (i.itPicId && !ids.includes(i.itPicId)) ids.push(i.itPicId);
+  return ids;
+}
+
+/** One initiative's Weighted Score for one member: PM and Dev = 1, PM or Dev only = 0.5. */
+function pcWeight(i, memberId) {
+  const isPm = i.itPmId === memberId;
+  const isDev = pcDevIds(i).includes(memberId);
+  if (isPm && isDev) return 1;
+  return isPm || isDev ? 0.5 : 0;
+}
+
+function pcLoadClass(score) {
+  if (score <= 0) return 'pc-load-none';
+  if (score <= 1) return 'pc-load-ok';
+  if (score <= 2) return 'pc-load-busy';
+  return 'pc-load-over';
+}
+
+async function renderPortfolioCalendar(container, { team, currentUserId }) {
+  if (!team.length) {
+    container.innerHTML = `<div class="card pc-empty">
+      <h3>🗓️ Portfolio Calendar</h3>
+      <p class="muted">Add your team members in <a href="#profile">My Profile</a> to see their projects and workload here.</p>
+    </div>`;
+    return;
+  }
+
+  container.innerHTML = '<div class="card"><p class="muted">Loading portfolio calendar…</p></div>';
+  let all;
+  try {
+    all = await fetchJSON('/api/initiatives?limit=0');
+  } catch (e) {
+    if (e instanceof AuthRedirectError) return;
+    container.innerHTML = `<div class="error">Failed to load initiatives: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  const saved = pcLoadState();
+  const now = new Date();
+  const thisMonth = now.getFullYear() * 12 + now.getMonth();
+  const todayPos = thisMonth + (now.getDate() - 1) / pcDaysIn(now.getFullYear(), now.getMonth());
+  const st = {
+    type: ['All', 'Project', 'CR'].includes(saved.type) ? saved.type : 'All',
+    yAxis: saved.yAxis === 'initiative' ? 'initiative' : 'member',
+    months: [6, 12, 18, 24].includes(saved.months) ? saved.months : 12,
+    start: thisMonth - 1,
+  };
+  const teamSorted = team.slice().sort((a, b) => String(a.name || a.email).localeCompare(String(b.name || b.email)));
+  const teamIds = new Set(teamSorted.map((u) => u.id));
+  const userName = (id) => {
+    const u = LOOKUPS.users.find((x) => x.id === id);
+    return u ? (u.name || u.email) : '';
+  };
+  const initials = (name) => String(name || '?').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
+
+  // Initiatives this team works on (as IT PM or IT Dev), for the chosen type; Cancelled excluded.
+  function related() {
+    return all.filter((i) => {
+      if (String(i.status || '').trim().toLowerCase() === 'cancelled') return false;
+      if (st.type !== 'All' && i.type !== st.type) return false;
+      return teamIds.has(i.itPmId) || pcDevIds(i).some((id) => teamIds.has(id));
+    });
+  }
+  function span(i) {
+    const s = pcParseDate(i.planStartDate);
+    const e = pcParseDate(i.planEndDate);
+    if (!s || !e || pcPos(e, true) <= pcPos(s, false)) return null;
+    return { s, e };
+  }
+
+  function scoreTable(items) {
+    // memberId → [score per visible month], plus the contributing initiatives per cell
+    const scores = new Map(teamSorted.map((u) => [u.id, Array.from({ length: st.months }, () => ({ total: 0, items: [] }))]));
+    for (const i of items) {
+      const sp = span(i);
+      if (!sp) continue;
+      const from = Math.max(pcMonthIndex(sp.s), st.start);
+      const to = Math.min(pcMonthIndex(sp.e), st.start + st.months - 1);
+      for (const u of teamSorted) {
+        const w = pcWeight(i, u.id);
+        if (!w) continue;
+        for (let mi = from; mi <= to; mi++) {
+          const cell = scores.get(u.id)[mi - st.start];
+          cell.total += w;
+          cell.items.push(`${w === 1 ? '1.0' : '0.5'}  ${i.name}`);
+        }
+      }
+    }
+    return scores;
+  }
+
+  function barHtml(i, left, width, lane, clipStart, clipEnd) {
+    const pm = userName(i.itPmId);
+    const devs = pcDevIds(i).map(userName).filter(Boolean);
+    const text = st.yAxis === 'member'
+      ? escapeHtml(i.name)
+      : escapeHtml([pm ? `PM: ${pm}` : 'No IT PM', devs.length ? `Dev: ${devs.join(', ')}` : ''].filter(Boolean).join(' · '));
+    const tip = [
+      `${i.type}: ${i.name}`,
+      `Plan: ${i.planStartDate?.slice(0, 10)} → ${i.planEndDate?.slice(0, 10)}`,
+      `IT PM: ${pm || '—'}`,
+      `IT Dev: ${devs.join(', ') || '—'}`,
+      `Status: ${i.status || '—'} · ${i.priority || ''}`,
+      'Drag to move · drag an edge to change start/end · click to open',
+    ].join('\n');
+    return `<div class="pc-bar pc-type-${i.type === 'CR' ? 'cr' : 'project'} pc-pri-${escapeHtml(String(i.priority || '').toLowerCase())}${clipStart ? ' pc-clip-start' : ''}${clipEnd ? ' pc-clip-end' : ''}"
+        data-id="${escapeHtml(i.id)}" style="left:${left}px;width:${width}px;top:${lane * PC_LANE_H + 6}px" title="${escapeHtml(tip)}">
+        ${clipStart ? '' : '<span class="pc-handle pc-handle-start"></span>'}
+        <span class="pc-bar-text"><b>${i.type === 'CR' ? 'CR' : 'PRJ'}</b> ${text}</span>
+        ${clipEnd ? '' : '<span class="pc-handle pc-handle-end"></span>'}
+      </div>`;
+  }
+
+  // Lay out items in a track: stack overlapping cards into lanes.
+  function trackHtml(items) {
+    const width = st.months * PC_COL_W;
+    const placed = [];
+    for (const i of items) {
+      const sp = span(i);
+      if (!sp) continue;
+      const l = (pcPos(sp.s, false) - st.start) * PC_COL_W;
+      const r = (pcPos(sp.e, true) - st.start) * PC_COL_W;
+      if (r <= 0 || l >= width) continue;
+      placed.push({ i, l: Math.max(0, l), r: Math.min(width, r), clipStart: l < 0, clipEnd: r > width });
+    }
+    placed.sort((a, b) => a.l - b.l);
+    const laneEnds = [];
+    for (const p of placed) {
+      let lane = laneEnds.findIndex((end) => end <= p.l + 1);
+      if (lane === -1) { lane = laneEnds.length; laneEnds.push(0); }
+      laneEnds[lane] = p.r;
+      p.lane = lane;
+    }
+    const lanes = Math.max(1, laneEnds.length);
+    const todayLeft = (todayPos - st.start) * PC_COL_W;
+    return {
+      count: placed.length,
+      html: `<div class="pc-track" style="width:${width}px;height:${lanes * PC_LANE_H + 12}px">
+        ${todayLeft >= 0 && todayLeft <= width ? `<div class="pc-today" style="left:${todayLeft}px"></div>` : ''}
+        ${placed.map((p) => barHtml(p.i, p.l, Math.max(18, p.r - p.l), p.lane, p.clipStart, p.clipEnd)).join('')}
+      </div>`,
+    };
+  }
+
+  function draw() {
+    const items = related();
+    const scheduled = items.filter(span);
+    const unscheduled = items.filter((i) => !span(i));
+    const scores = scoreTable(items);
+    const monthIdx = Array.from({ length: st.months }, (_, k) => st.start + k);
+
+    const scoreCards = teamSorted.map((u) => {
+      const cells = scores.get(u.id);
+      const cur = thisMonth - st.start;
+      const current = cur >= 0 && cur < st.months ? cells[cur].total : null;
+      let peak = 0;
+      let peakAt = null;
+      cells.forEach((c, k) => { if (c.total > peak) { peak = c.total; peakAt = monthIdx[k]; } });
+      return `<div class="pc-score-card">
+        <div class="pc-score-head">
+          <span class="pc-avatar">${escapeHtml(initials(u.name || u.email))}</span>
+          <div class="pc-score-who">
+            <div class="pc-score-name">${escapeHtml(u.name || u.email)}</div>
+            <div class="muted">This month: <b>${current === null ? '—' : current}</b>${peak ? ` · Peak <b>${peak}</b> (${pcMonthLabel(peakAt)})` : ''}</div>
+          </div>
+        </div>
+        <div class="pc-score-strip" style="grid-template-columns:repeat(${st.months}, minmax(30px, 1fr))">
+          ${cells.map((c, k) => `<div class="pc-score-cell ${pcLoadClass(c.total)}${monthIdx[k] === thisMonth ? ' pc-current' : ''}"
+              title="${escapeHtml(`${pcMonthLabel(monthIdx[k])} — Weighted Score ${c.total}${c.items.length ? '\n' + c.items.join('\n') : ''}`)}">
+              <span>${pcMonthLabel(monthIdx[k]).slice(0, 3)}</span><b>${c.total || '·'}</b></div>`).join('')}
+        </div>
+      </div>`;
+    }).join('');
+
+    let rowsHtml = '';
+    let shown = 0;
+    if (st.yAxis === 'member') {
+      const rows = teamSorted.map((u) => ({ id: u.id, label: u.name || u.email, items: scheduled.filter((i) => i.itPmId === u.id) }));
+      rows.push({ id: '', label: 'No IT PM in team', note: 'IT PM empty or outside your team', items: scheduled.filter((i) => !teamIds.has(i.itPmId)) });
+      rowsHtml = rows.map((row) => {
+        const t = trackHtml(row.items);
+        shown += t.count;
+        return `<div class="pc-row${row.id ? '' : ' pc-row-other'}" data-member="${escapeHtml(row.id)}">
+          <div class="pc-label"><span class="pc-avatar pc-avatar-sm">${row.id ? escapeHtml(initials(row.label)) : '–'}</span>
+            <div><div class="pc-label-name">${escapeHtml(row.label)}</div><div class="muted">${t.count} shown${row.note ? ` · ${row.note}` : ''}</div></div></div>
+          ${t.html}
+        </div>`;
+      }).join('');
+    } else {
+      const ordered = scheduled.slice().sort((a, b) => pcPos(span(a).s) - pcPos(span(b).s));
+      rowsHtml = ordered.map((i) => {
+        const t = trackHtml([i]);
+        if (!t.count) return '';
+        shown += 1;
+        return `<div class="pc-row" data-initiative="${escapeHtml(i.id)}">
+          <div class="pc-label"><span class="pc-type-tag pc-type-${i.type === 'CR' ? 'cr' : 'project'}">${i.type === 'CR' ? 'CR' : 'PRJ'}</span>
+            <div><a class="pc-label-name" href="#view/${escapeHtml(i.id)}">${escapeHtml(i.name)}</a><div class="muted">${escapeHtml(i.status || '')} · ${escapeHtml(i.priority || '')}</div></div></div>
+          ${t.html}
+        </div>`;
+      }).join('') || `<div class="pc-row"><div class="pc-label muted">Nothing scheduled in this range</div><div class="pc-track" style="width:${st.months * PC_COL_W}px;height:40px"></div></div>`;
+    }
+    const hiddenCount = scheduled.length - shown;
+
+    container.innerHTML = `
+      <div class="pc">
+        <div class="card pc-toolbar">
+          <div class="pc-field"><label>Initiative Type</label>
+            <div class="pc-seg">${['All', 'Project', 'CR'].map((t) => `<button type="button" data-pc-type="${t}" class="${st.type === t ? 'active' : ''}">${t}</button>`).join('')}</div></div>
+          <div class="pc-field"><label>Rows (Y axis)</label>
+            <select id="pc-yaxis"><option value="member" ${st.yAxis === 'member' ? 'selected' : ''}>Team Member (IT PM)</option>
+              <option value="initiative" ${st.yAxis === 'initiative' ? 'selected' : ''}>Project / CR</option></select></div>
+          <div class="pc-field"><label>Months</label>
+            <div class="pc-range">
+              <button type="button" data-pc-shift="-3" title="Back 3 months">‹</button>
+              <button type="button" data-pc-shift="0">Today</button>
+              <button type="button" data-pc-shift="3" title="Forward 3 months">›</button>
+              <select id="pc-months">${[6, 12, 18, 24].map((n) => `<option value="${n}" ${st.months === n ? 'selected' : ''}>${n} months</option>`).join('')}</select>
+            </div></div>
+          <div class="pc-legend muted">
+            <span><i class="pc-key pc-type-project"></i>Project</span><span><i class="pc-key pc-type-cr"></i>CR</span>
+            <span>Weighted Score: PM + Dev = 1, PM or Dev = 0.5</span>
+            <span><i class="pc-key pc-load-ok"></i>≤1</span><span><i class="pc-key pc-load-busy"></i>≤2</span><span><i class="pc-key pc-load-over"></i>&gt;2</span>
+          </div>
+        </div>
+
+        <h3 class="pc-section-title">Team Weighted Score — ${pcMonthLabel(st.start)} to ${pcMonthLabel(st.start + st.months - 1)} (${st.type === 'All' ? 'Projects + CRs' : st.type + 's'})</h3>
+        <div class="pc-scores">${scoreCards}</div>
+
+        <div class="card pc-calendar">
+          <div class="pc-cal-head">
+            <h3>🗓️ Portfolio Calendar</h3>
+            <span class="muted">${st.yAxis === 'member'
+              ? 'Drag a card sideways to move its plan dates, drag its edges to change start or end, or drop it on another member to change the IT PM.'
+              : 'Drag a card sideways to move its plan dates, or drag its edges to change start or end.'}
+              ${hiddenCount > 0 ? ` ${hiddenCount} scheduled item(s) fall outside this range.` : ''}</span>
+          </div>
+          <div class="pc-scroll">
+            <div class="pc-table">
+              <div class="pc-row pc-head">
+                <div class="pc-label">${st.yAxis === 'member' ? 'Team Member (IT PM)' : 'Project / CR'}</div>
+                <div class="pc-months" style="width:${st.months * PC_COL_W}px">
+                  ${monthIdx.map((m) => `<div class="pc-month${m === thisMonth ? ' pc-current' : ''}" style="width:${PC_COL_W}px">${pcMonthLabel(m)}</div>`).join('')}
+                </div>
+              </div>
+              ${rowsHtml}
+            </div>
+          </div>
+        </div>
+
+        ${unscheduled.length ? `<div class="card pc-unscheduled">
+          <h3>No plan dates (${unscheduled.length})</h3>
+          <p class="muted">Not counted in the Weighted Score. Drag one onto a month in the calendar to give it plan dates for that month.</p>
+          <div class="pc-chips">${unscheduled.map((i) => `<span class="pc-chip pc-type-${i.type === 'CR' ? 'cr' : 'project'}" data-id="${escapeHtml(i.id)}"
+              title="${escapeHtml(`${i.type}: ${i.name}\nIT PM: ${userName(i.itPmId) || '—'}`)}"><b>${i.type === 'CR' ? 'CR' : 'PRJ'}</b> ${escapeHtml(i.name)}</span>`).join('')}</div>
+        </div>` : ''}
+      </div>`;
+
+    wire();
+  }
+
+  function setState(patch) {
+    Object.assign(st, patch);
+    pcSaveState({ type: st.type, yAxis: st.yAxis, months: st.months });
+    draw();
+  }
+
+  async function save(item, changes, summary) {
+    const ok = await confirmDialog(summary, { title: 'Update plan', confirmText: 'Save' });
+    if (!ok) return draw();
+    try {
+      await fetchJSON(`/api/initiatives/${item.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...changes, changedBy: currentUserId || 'Unknown' }),
+      });
+      Object.assign(item, changes);
+      notify(`Updated: ${item.name}`, 'success');
+      hubTrack('portfolio_calendar_update', { fields: Object.keys(changes).join(',') });
+    } catch (e) {
+      if (!(e instanceof AuthRedirectError)) notify(`Update failed: ${e.message}`, 'error');
+    }
+    draw();
+  }
+
+  function describe(item, changes) {
+    const lines = [`${item.type}: ${item.name}`, ''];
+    if ('planStartDate' in changes) lines.push(`Plan Start: ${item.planStartDate?.slice(0, 10) || '—'} → ${changes.planStartDate}`);
+    if ('planEndDate' in changes) lines.push(`Plan End: ${item.planEndDate?.slice(0, 10) || '—'} → ${changes.planEndDate}`);
+    if ('itPmId' in changes) lines.push(`IT PM: ${userName(item.itPmId) || '—'} → ${userName(changes.itPmId)}`);
+    return lines.join('\n');
+  }
+
+  function wire() {
+    container.querySelectorAll('[data-pc-type]').forEach((b) => { b.onclick = () => setState({ type: b.dataset.pcType }); });
+    container.querySelector('#pc-yaxis').onchange = (e) => setState({ yAxis: e.target.value });
+    container.querySelector('#pc-months').onchange = (e) => setState({ months: Number(e.target.value) });
+    container.querySelectorAll('[data-pc-shift]').forEach((b) => {
+      b.onclick = () => setState({ start: Number(b.dataset.pcShift) === 0 ? thisMonth - 1 : st.start + Number(b.dataset.pcShift) });
+    });
+    container.querySelector('.pc-table').addEventListener('pointerdown', (e) => startDrag(e, e.target.closest('.pc-bar')));
+    container.querySelectorAll('.pc-chip').forEach((chip) => chip.addEventListener('pointerdown', (e) => startDrag(e, chip)));
+  }
+
+  // Pointer-based drag: cards move/resize in whole months; chips are placed on a month.
+  function startDrag(e, el) {
+    if (!el || e.button !== 0) return;
+    const item = all.find((i) => i.id === el.dataset.id);
+    if (!item) return;
+    e.preventDefault();
+    const isChip = el.classList.contains('pc-chip');
+    const mode = isChip ? 'place'
+      : e.target.classList.contains('pc-handle-start') ? 'start'
+        : e.target.classList.contains('pc-handle-end') ? 'end' : 'move';
+    const left0 = parseFloat(el.style.left) || 0;
+    const width0 = parseFloat(el.style.width) || 0;
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    let delta = 0;
+    let moved = false;
+    let targetRow = null;
+    let ghost = null;
+    const tip = document.createElement('div');
+    tip.className = 'pc-drag-tip';
+    document.body.appendChild(tip);
+    el.classList.add('pc-dragging');
+
+    const rowAt = (x, y) => {
+      el.style.pointerEvents = 'none';
+      if (ghost) ghost.style.display = 'none';
+      const under = document.elementFromPoint(x, y);
+      el.style.pointerEvents = '';
+      if (ghost) ghost.style.display = '';
+      return under ? under.closest('.pc-row:not(.pc-head)') : null;
+    };
+    const monthAt = (row, x) => {
+      const track = row && row.querySelector('.pc-track');
+      if (!track) return null;
+      const k = Math.floor((x - track.getBoundingClientRect().left) / PC_COL_W);
+      return k >= 0 && k < st.months ? st.start + k : null;
+    };
+    const proposed = () => {
+      const sp = span(item);
+      if (mode === 'place' || !sp) return null;
+      if (mode === 'move') return { s: pcAddMonths(sp.s, delta), e: pcAddMonths(sp.e, delta) };
+      if (mode === 'start') {
+        const s = pcAddMonths(sp.s, delta);
+        return pcPos(s, false) < pcPos(sp.e, true) ? { s, e: sp.e } : null;
+      }
+      const end = pcAddMonths(sp.e, delta);
+      return pcPos(end, true) > pcPos(sp.s, false) ? { s: sp.s, e: end } : null;
+    };
+
+    const onMove = (ev) => {
+      const dx = ev.clientX - x0;
+      const dy = ev.clientY - y0;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
+      if (!moved) return;
+      delta = Math.round(dx / PC_COL_W);
+      container.querySelectorAll('.pc-drop-target').forEach((r) => r.classList.remove('pc-drop-target'));
+      targetRow = null;
+      let label = '';
+
+      if (mode === 'place') {
+        if (!ghost) {
+          ghost = el.cloneNode(true);
+          ghost.className += ' pc-ghost';
+          document.body.appendChild(ghost);
+        }
+        ghost.style.left = `${ev.clientX + 8}px`;
+        ghost.style.top = `${ev.clientY + 8}px`;
+        const row = rowAt(ev.clientX, ev.clientY);
+        const m = monthAt(row, ev.clientX);
+        if (m !== null) {
+          targetRow = row;
+          row.classList.add('pc-drop-target');
+          label = `Plan: ${pcMonthLabel(m)}`;
+        }
+      } else {
+        if (mode === 'move') {
+          el.style.left = `${left0 + delta * PC_COL_W}px`;
+          if (st.yAxis === 'member') {
+            el.style.transform = `translateY(${dy}px)`;
+            const row = rowAt(ev.clientX, ev.clientY);
+            if (row && row.dataset.member && row.dataset.member !== item.itPmId) {
+              targetRow = row;
+              row.classList.add('pc-drop-target');
+            }
+          }
+        } else if (mode === 'start') {
+          el.style.left = `${left0 + delta * PC_COL_W}px`;
+          el.style.width = `${Math.max(18, width0 - delta * PC_COL_W)}px`;
+        } else {
+          el.style.width = `${Math.max(18, width0 + delta * PC_COL_W)}px`;
+        }
+        const p = proposed();
+        label = p ? `${pcFormat(p.s)} → ${pcFormat(p.e)}` : 'Start must be before end';
+        if (targetRow) label += `\nIT PM → ${userName(targetRow.dataset.member)}`;
+      }
+      tip.textContent = label;
+      tip.style.display = label ? 'block' : 'none';
+      tip.style.left = `${ev.clientX + 14}px`;
+      tip.style.top = `${ev.clientY - 36}px`;
+    };
+
+    const onUp = (ev) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      tip.remove();
+      if (ghost) ghost.remove();
+      el.classList.remove('pc-dragging');
+      if (!moved) {
+        if (!isChip) location.hash = `#view/${item.id}`;
+        return;
+      }
+      const changes = {};
+      if (mode === 'place') {
+        const m = monthAt(targetRow, ev.clientX);
+        if (m === null) return draw();
+        const y = Math.floor(m / 12);
+        const mo = m % 12;
+        const start = { y, m: mo, d: 1 };
+        const oldEnd = pcParseDate(item.planEndDate);
+        const end = oldEnd && pcPos(oldEnd, true) > pcPos(start, false) ? oldEnd : { y, m: mo, d: pcDaysIn(y, mo) };
+        changes.planStartDate = pcFormat(start);
+        changes.planEndDate = pcFormat(end);
+        if (st.yAxis === 'member' && targetRow.dataset.member && targetRow.dataset.member !== item.itPmId) {
+          changes.itPmId = targetRow.dataset.member;
+        }
+      } else {
+        const p = proposed();
+        if (p && delta !== 0) {
+          if (mode !== 'end') changes.planStartDate = pcFormat(p.s);
+          if (mode !== 'start') changes.planEndDate = pcFormat(p.e);
+        }
+        if (mode === 'move' && targetRow) changes.itPmId = targetRow.dataset.member;
+      }
+      if (!Object.keys(changes).length) return draw();
+      save(item, changes, describe(item, changes));
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  draw();
+}
+
 async function renderUserDashboard() {
   setActive('#user-dashboard');
   await ensureLookups();
@@ -8777,7 +9269,7 @@ async function renderUserDashboard() {
       ? teamMembers.map(m => ({ value: m.id, label: m.name || m.email }))
       : [];
     
-    app.innerHTML = `
+    const overviewHtml = `
       ${isManager && teamMemberOptions.length > 0 ? `
       <div class="card" style="margin-bottom: 24px; padding: 20px;">
         <div style="display: flex; gap: 24px; align-items: flex-end; flex-wrap: wrap;">
@@ -8906,7 +9398,42 @@ async function renderUserDashboard() {
         </div>
       </div>
     `;
-    
+
+    if (!isManager) {
+      app.innerHTML = overviewHtml;
+    } else {
+      // Managers get a second tab: the team's Portfolio Calendar (remembered per browser).
+      let tab = 'overview';
+      try { if (localStorage.getItem('pm_dashboard_tab') === 'calendar') tab = 'calendar'; } catch (_) { /* optional */ }
+      app.innerHTML = `
+        <div class="tabs dash-tabs" role="tablist">
+          <button type="button" class="tab" role="tab" data-dash-tab="overview">🏠 Overview</button>
+          <button type="button" class="tab" role="tab" data-dash-tab="calendar">🗓️ Portfolio Calendar</button>
+        </div>
+        <div id="dash-overview">${overviewHtml}</div>
+        <div id="dash-calendar"></div>`;
+      let calendarLoaded = false;
+      const showTab = (name) => {
+        app.querySelectorAll('[data-dash-tab]').forEach((b) => {
+          b.classList.toggle('active', b.dataset.dashTab === name);
+          b.setAttribute('aria-selected', String(b.dataset.dashTab === name));
+        });
+        document.getElementById('dash-overview').hidden = name !== 'overview';
+        document.getElementById('dash-calendar').hidden = name !== 'calendar';
+        try { localStorage.setItem('pm_dashboard_tab', name); } catch (_) { /* optional */ }
+        if (name === 'calendar' && !calendarLoaded) {
+          calendarLoaded = true;
+          hubCall('page', '/#/user-dashboard/portfolio-calendar');
+          renderPortfolioCalendar(document.getElementById('dash-calendar'), {
+            team: teamMembers,
+            currentUserId: currentUserProfile?.id,
+          });
+        }
+      };
+      app.querySelectorAll('[data-dash-tab]').forEach((b) => { b.onclick = () => showTab(b.dataset.dashTab); });
+      showTab(tab);
+    }
+
     // Add filter update functions
     window.updateUserDashboardFilters = () => {
       const teamMemberId = document.getElementById('filter-team-member')?.value || '';
