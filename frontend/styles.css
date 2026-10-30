@@ -5853,8 +5853,9 @@ body.pc-panel-open { overflow: hidden; }
 #initiatives-table tbody tr:hover .col-actions,
 #cr-table tbody tr:hover .col-actions { background: var(--gray-50); }
 #initiatives-table .col-actions,
-#cr-table .col-actions { width: 236px; min-width: 236px; padding-left: 8px; padding-right: 8px; }
-#initiatives-table td.col-actions button,
-#cr-table td.col-actions button { padding: 6px 12px; }
-#initiatives-table td.col-actions button + button,
-#cr-table td.col-actions button + button { margin-left: 4px; }
+#cr-table .col-actions { width: 84px; min-width: 84px; padding-left: 6px; padding-right: 6px; }
+/* Admin-only column: hidden for everyone else */
+body:not(.pm-is-admin) #initiatives-table .col-actions,
+body:not(.pm-is-admin) #cr-table .col-actions { display: none !important; }
+.pm-delete-sm { padding: 3px 10px; font-size: 12px; line-height: 1.4; border-radius: 6px; border: 1px solid #f1c3bf; background: #fff; color: var(--danger); cursor: pointer; }
+.pm-delete-sm:hover { background: #fdecea; border-color: var(--danger); }
