@@ -9021,8 +9021,8 @@ async function renderDashboard() {
 // they are the IT PM) or initiatives (card = who works on it). Dragging a card sideways
 // moves its plan dates by whole months; its edges change Plan Start / Plan End only. In
 // Team Member view, dragging a card to another member's row changes the IT PM.
-// Weighted Score per member per month: 1 for each initiative where they are both IT PM
-// and IT Dev (IT PIC), 0.5 where they are only one of the two.
+// Weighted Score per member per month: for a Project, 1 where they are both IT PM and
+// IT Dev (IT PIC), 0.5 where they are only one of the two; a CR counts 0.25 either way.
 
 const PC_STATE_KEY = 'pm_portfolio_calendar';
 const PC_COL_W = 120; // px per month column
@@ -9062,12 +9062,15 @@ function pcDevIds(i) {
   return ids;
 }
 
-/** One initiative's Weighted Score for one member: PM and Dev = 1, PM or Dev only = 0.5. */
+const PC_CR_WEIGHT = 0.25;
+
+/** One initiative's Weighted Score for one member: Project PM and Dev = 1, PM or Dev only = 0.5; CR = 0.25. */
 function pcWeight(i, memberId) {
   const isPm = i.itPmId === memberId;
   const isDev = pcDevIds(i).includes(memberId);
-  if (isPm && isDev) return 1;
-  return isPm || isDev ? 0.5 : 0;
+  if (!isPm && !isDev) return 0;
+  if (i.type === 'CR') return PC_CR_WEIGHT;
+  return isPm && isDev ? 1 : 0.5;
 }
 
 function pcLoadClass(score) {
@@ -9106,6 +9109,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     months: [6, 12, 18, 24].includes(saved.months) ? saved.months : 12,
     // Row order in Project / CR view
     sort: ['start-asc', 'start-desc', 'name-asc', 'name-desc'].includes(saved.sort) ? saved.sort : 'start-asc',
+    department: typeof saved.department === 'string' ? saved.department : '',
     start: thisMonth - 1,
   };
   const teamSorted = team.slice().sort((a, b) => String(a.name || a.email).localeCompare(String(b.name || b.email)));
@@ -9117,10 +9121,21 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
   const initials = (name) => String(name || '?').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
 
   // Initiatives this team works on (as IT PM or IT Dev), for the chosen type; Cancelled excluded.
+  const deptNameById = new Map((LOOKUPS.departments || []).map((d) => [d.id, d.name]));
+  // Department options = names PM shows (two departments can share one, e.g. "Commercial").
+  const deptNames = [...new Set((LOOKUPS.departments || []).map((d) => d.name).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+  function deptMatches(i) {
+    if (!st.department) return true;
+    const name = deptNameById.get(i.departmentId);
+    return st.department === '__none__' ? !name : name === st.department;
+  }
+
   function related() {
     return all.filter((i) => {
       if (String(i.status || '').trim().toLowerCase() === 'cancelled') return false;
       if (st.type !== 'All' && i.type !== st.type) return false;
+      if (!deptMatches(i)) return false;
       return teamIds.has(i.itPmId) || pcDevIds(i).some((id) => teamIds.has(id));
     });
   }
@@ -9145,7 +9160,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         for (let mi = from; mi <= to; mi++) {
           const cell = scores.get(u.id)[mi - st.start];
           cell.total += w;
-          cell.items.push(`${w === 1 ? '1.0' : '0.5'}  ${i.name}`);
+          cell.items.push(`${w.toFixed(2)}  ${i.type === 'CR' ? 'CR' : 'PRJ'}  ${i.name}`);
         }
       }
     }
@@ -9279,6 +9294,12 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         <div class="card pc-toolbar">
           <div class="pc-field"><label>Initiative Type</label>
             <div class="pc-seg">${['All', 'Project', 'CR'].map((t) => `<button type="button" data-pc-type="${t}" class="${st.type === t ? 'active' : ''}">${t}</button>`).join('')}</div></div>
+          <div class="pc-field"><label>Department</label>
+            <select id="pc-dept">
+              <option value="">All departments</option>
+              ${deptNames.map((n) => `<option value="${escapeHtml(n)}" ${st.department === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
+              <option value="__none__" ${st.department === '__none__' ? 'selected' : ''}>(No department)</option>
+            </select></div>
           <div class="pc-field"><label>Rows (Y axis)</label>
             <select id="pc-yaxis"><option value="member" ${st.yAxis === 'member' ? 'selected' : ''}>Team Member (IT PM)</option>
               <option value="initiative" ${st.yAxis === 'initiative' ? 'selected' : ''}>Project / CR</option></select></div>
@@ -9298,12 +9319,12 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
             </div></div>
           <div class="pc-legend muted">
             <span><i class="pc-key pc-type-project"></i>Project</span><span><i class="pc-key pc-type-cr"></i>CR</span>
-            <span>Weighted Score: PM + Dev = 1, PM or Dev = 0.5</span>
+            <span>Weighted Score: Project PM + Dev = 1, PM or Dev = 0.5 · CR = 0.25</span>
             <span><i class="pc-key pc-load-ok"></i>≤1</span><span><i class="pc-key pc-load-busy"></i>≤2</span><span><i class="pc-key pc-load-over"></i>&gt;2</span>
           </div>
         </div>
 
-        <h3 class="pc-section-title">Team Weighted Score — ${pcMonthLabel(st.start)} to ${pcMonthLabel(st.start + st.months - 1)} (${st.type === 'All' ? 'Projects + CRs' : st.type + 's'})</h3>
+        <h3 class="pc-section-title">Team Weighted Score — ${pcMonthLabel(st.start)} to ${pcMonthLabel(st.start + st.months - 1)} (${st.type === 'All' ? 'Projects + CRs' : st.type + 's'}${st.department ? ` · ${escapeHtml(st.department === '__none__' ? 'No department' : st.department)}` : ''})</h3>
         <div class="pc-scores">${scoreCards}</div>
 
         <div class="card pc-calendar">
@@ -9342,7 +9363,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
 
   function setState(patch) {
     Object.assign(st, patch);
-    pcSaveState({ type: st.type, yAxis: st.yAxis, months: st.months, sort: st.sort });
+    pcSaveState({ type: st.type, yAxis: st.yAxis, months: st.months, sort: st.sort, department: st.department });
     draw();
   }
 
@@ -9443,6 +9464,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
 
   function wire() {
     container.querySelectorAll('[data-pc-type]').forEach((b) => { b.onclick = () => setState({ type: b.dataset.pcType }); });
+    container.querySelector('#pc-dept').onchange = (e) => setState({ department: e.target.value });
     container.querySelector('#pc-yaxis').onchange = (e) => setState({ yAxis: e.target.value });
     const sortSel = container.querySelector('#pc-sort');
     if (sortSel) sortSel.onchange = (e) => setState({ sort: e.target.value });
