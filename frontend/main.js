@@ -9206,7 +9206,10 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     return [pm ? `PM: ${pm}` : 'No IT PM', devs.length ? `Dev: ${devs.join(', ')}` : ''].filter(Boolean).join(' · ');
   }
 
-  function barHtml(i, left, width, lane, clipStart, clipEnd, labelOutside) {
+  // A card is at least as wide as its name. `fill` is the real plan period (solid);
+  // anything beyond it only holds the name and is striped, with a tick at the plan end.
+  function barHtml(i, left, fill, need, lane, clipStart, clipEnd) {
+    const width = Math.max(fill, need);
     const pm = userName(i.itPmId);
     const devs = pcDevIds(i).map(userName).filter(Boolean);
     const text = escapeHtml(barLabel(i));
@@ -9218,12 +9221,12 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       `Status: ${i.status || '—'} · ${i.priority || ''}`,
       'Drag to move · drag an edge to change start/end · click to open',
     ].join('\n');
-    return `<div class="pc-bar ${pcStatusClass(i.status)}${labelOutside ? ' pc-label-out' : ''}${clipStart ? ' pc-clip-start' : ''}${clipEnd ? ' pc-clip-end' : ''}"
-        data-id="${escapeHtml(i.id)}" style="left:${left}px;width:${width}px;top:${lane * PC_LANE_H + 6}px" title="${escapeHtml(tip)}">
+    return `<div class="pc-bar ${pcStatusClass(i.status)} ${i.type === 'CR' ? 'pc-shape-cr' : 'pc-shape-project'}${width > fill ? ' pc-has-tail' : ''}${clipStart ? ' pc-clip-start' : ''}${clipEnd ? ' pc-clip-end' : ''}"
+        data-id="${escapeHtml(i.id)}" data-fill="${fill}" data-need="${need}"
+        style="left:${left}px;width:${width}px;--fill:${fill}px;top:${lane * PC_LANE_H + 6}px" title="${escapeHtml(tip)}">
         ${clipStart ? '' : '<span class="pc-handle pc-handle-start"></span>'}
-        <span class="pc-bar-text"><b>${i.type === 'CR' ? 'CR' : 'PRJ'}</b>${labelOutside ? '' : ` ${text}`}</span>
+        <span class="pc-bar-text">${text}</span>
         ${clipEnd ? '' : '<span class="pc-handle pc-handle-end"></span>'}
-        ${labelOutside ? `<span class="pc-bar-outlabel">${text}</span>` : ''}
       </div>`;
   }
 
@@ -9238,12 +9241,9 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       const r = (pcPos(sp.e, true) - st.start) * PC_COL_W;
       if (r <= 0 || l >= width) continue;
       const p = { i, l: Math.max(0, l), r: Math.min(width, r), clipStart: l < 0, clipEnd: r > width };
-      // Full label inside the card when it fits (handles + type tag + padding ≈ 60px),
-      // otherwise written just to the right of it; lanes keep that space free.
-      const textW = pcTextWidth(barLabel(i));
-      const barW = Math.max(18, p.r - p.l);
-      p.labelOutside = barW < textW + 60;
-      p.ext = p.labelOutside ? p.l + barW + 8 + textW + 12 : p.r;
+      p.fill = Math.max(10, p.r - p.l);
+      p.need = pcTextWidth(barLabel(i)) + 28; // name + padding + resize handles
+      p.ext = p.l + Math.max(p.fill, p.need) + 4; // lanes keep the whole card (incl. name) clear
       placed.push(p);
     }
     placed.sort((a, b) => a.l - b.l);
@@ -9260,7 +9260,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       count: placed.length,
       html: `<div class="pc-track" style="width:${width}px;height:${lanes * PC_LANE_H + 12}px">
         ${todayLeft >= 0 && todayLeft <= width ? `<div class="pc-today" style="left:${todayLeft}px"></div>` : ''}
-        ${placed.map((p) => barHtml(p.i, p.l, Math.max(18, p.r - p.l), p.lane, p.clipStart, p.clipEnd, p.labelOutside)).join('')}
+        ${placed.map((p) => barHtml(p.i, p.l, p.fill, p.need, p.lane, p.clipStart, p.clipEnd)).join('')}
       </div>`,
     };
   }
@@ -9326,7 +9326,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         if (!t.count) return '';
         shown += 1;
         return `<div class="pc-row" data-initiative="${escapeHtml(i.id)}">
-          <div class="pc-label"><span class="pc-type-tag pc-type-${i.type === 'CR' ? 'cr' : 'project'}">${i.type === 'CR' ? 'CR' : 'PRJ'}</span>
+          <div class="pc-label"><span class="pc-shape-key ${i.type === 'CR' ? 'pc-shape-cr' : 'pc-shape-project'}" title="${i.type === 'CR' ? 'CR' : 'Project'}"></span>
             <div><a class="pc-label-name" href="#view/${escapeHtml(i.id)}" data-id="${escapeHtml(i.id)}">${escapeHtml(i.name)}</a><div class="muted">${escapeHtml(i.status || '')} · ${escapeHtml(i.priority || '')}</div></div></div>
           ${t.html}
         </div>`;
@@ -9363,8 +9363,11 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
               <select id="pc-months">${[6, 12, 18, 24].map((n) => `<option value="${n}" ${st.months === n ? 'selected' : ''}>${n} months</option>`).join('')}</select>
             </div></div>
           <div class="pc-legend muted">
+            <span><i class="pc-shape-key pc-shape-project"></i>Project</span><span><i class="pc-shape-key pc-shape-cr"></i>CR</span>
+            <span class="pc-legend-sep">·</span>
             <span><i class="pc-key pc-st-idle"></i>Not Started / On Hold</span><span><i class="pc-key pc-st-ok"></i>On Track</span>
             <span><i class="pc-key pc-st-risk"></i>At Risk</span><span><i class="pc-key pc-st-late"></i>Delayed</span><span><i class="pc-key pc-st-live"></i>Live</span>
+            <span><i class="pc-key pc-tail-key"></i>beyond plan end (name only)</span>
             <span>Weighted Score: Project PM + Dev = 1, PM or Dev = 0.5 · CR = 0.25</span>
             <span><i class="pc-key pc-load-ok"></i>≤${PC_LOAD_OK_MAX}</span><span><i class="pc-key pc-load-busy"></i>&gt;${PC_LOAD_OK_MAX} to ${PC_LOAD_BUSY_MAX}</span><span><i class="pc-key pc-load-over"></i>&gt;${PC_LOAD_BUSY_MAX}</span>
           </div>
@@ -9397,8 +9400,8 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         ${unscheduled.length ? `<div class="card pc-unscheduled">
           <h3>No plan dates (${unscheduled.length})</h3>
           <p class="muted">Not counted in the Weighted Score. Drag one onto a month in the calendar to give it plan dates for that month.</p>
-          <div class="pc-chips">${unscheduled.map((i) => `<span class="pc-chip ${pcStatusClass(i.status)}" data-id="${escapeHtml(i.id)}"
-              title="${escapeHtml(`${i.type}: ${i.name}\nIT PM: ${userName(i.itPmId) || '—'}\nClick to open · drag onto a month to plan it`)}"><b>${i.type === 'CR' ? 'CR' : 'PRJ'}</b> ${escapeHtml(i.name)}</span>`).join('')}</div>
+          <div class="pc-chips">${unscheduled.map((i) => `<span class="pc-chip ${pcStatusClass(i.status)} ${i.type === 'CR' ? 'pc-shape-cr' : 'pc-shape-project'}" data-id="${escapeHtml(i.id)}"
+              title="${escapeHtml(`${i.type}: ${i.name}\nIT PM: ${userName(i.itPmId) || '—'}\nClick to open · drag onto a month to plan it`)}">${escapeHtml(i.name)}</span>`).join('')}</div>
         </div>` : ''}
       </div>`;
 
@@ -9541,7 +9544,14 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       : e.target.classList.contains('pc-handle-start') ? 'start'
         : e.target.classList.contains('pc-handle-end') ? 'end' : 'move';
     const left0 = parseFloat(el.style.left) || 0;
-    const width0 = parseFloat(el.style.width) || 0;
+    const fill0 = parseFloat(el.dataset.fill) || 0;
+    const need = parseFloat(el.dataset.need) || 0;
+    const setFill = (f) => {
+      const fill = Math.max(10, f);
+      el.style.setProperty('--fill', `${fill}px`);
+      el.style.width = `${Math.max(fill, need)}px`;
+      el.classList.toggle('pc-has-tail', need > fill);
+    };
     const x0 = e.clientX;
     const y0 = e.clientY;
     let delta = 0;
@@ -9617,9 +9627,9 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
           }
         } else if (mode === 'start') {
           el.style.left = `${left0 + delta * PC_COL_W}px`;
-          el.style.width = `${Math.max(18, width0 - delta * PC_COL_W)}px`;
+          setFill(fill0 - delta * PC_COL_W);
         } else {
-          el.style.width = `${Math.max(18, width0 + delta * PC_COL_W)}px`;
+          setFill(fill0 + delta * PC_COL_W);
         }
         const p = proposed();
         label = p ? `${pcFormat(p.s)} → ${pcFormat(p.e)}` : 'Start must be before end';

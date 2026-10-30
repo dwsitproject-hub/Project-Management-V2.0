@@ -5734,11 +5734,12 @@ a.pc-label-name:hover { text-decoration: underline; }
 .pc-drop-target .pc-track { background-color: rgba(196, 58, 49, 0.06); box-shadow: inset 0 0 0 2px rgba(196, 58, 49, 0.35); }
 .pc-today { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--brand); opacity: 0.5; pointer-events: none; }
 
-.pc-bar { position: absolute; height: 24px; display: flex; align-items: center; border-radius: 6px; font-size: 12px; color: #fff; cursor: grab; box-shadow: var(--elevation-sm); touch-action: none; overflow: hidden; }
+.pc-bar { position: absolute; height: 24px; font-size: 12px; color: #fff; cursor: grab; box-shadow: var(--elevation-sm); touch-action: none; overflow: hidden; }
 .pc-bar.pc-dragging { cursor: grabbing; z-index: 10; opacity: 0.9; box-shadow: var(--elevation-lg); }
-.pc-bar-text { flex: 1; min-width: 0; padding: 0 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pc-bar-text b { font-size: 10px; opacity: 0.85; margin-right: 2px; }
-.pc-handle { flex: 0 0 8px; align-self: stretch; cursor: ew-resize; background: rgba(255, 255, 255, 0.25); }
+.pc-bar-text { position: relative; z-index: 1; display: block; line-height: 24px; padding: 0 14px; white-space: nowrap; }
+.pc-handle { position: absolute; top: 0; bottom: 0; width: 8px; z-index: 2; cursor: ew-resize; background: rgba(255, 255, 255, 0.25); }
+.pc-handle-start { left: 0; }
+.pc-handle-end { left: calc(var(--fill) - 8px); }
 .pc-handle:hover { background: rgba(255, 255, 255, 0.55); }
 .pc-clip-start { border-top-left-radius: 0; border-bottom-left-radius: 0; }
 .pc-clip-end { border-top-right-radius: 0; border-bottom-right-radius: 0; }
@@ -5749,7 +5750,6 @@ a.pc-label-name:hover { text-decoration: underline; }
 .pc-unscheduled h3 { margin-top: 0; }
 .pc-chips { display: flex; flex-wrap: wrap; gap: 8px; }
 .pc-chip { display: inline-flex; gap: 4px; align-items: center; max-width: 320px; padding: 5px 10px; border-radius: 6px; color: #fff; font-size: 12px; cursor: grab; touch-action: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; user-select: none; }
-.pc-chip b { font-size: 10px; opacity: 0.85; }
 .pc-ghost { position: fixed; z-index: 10000; pointer-events: none; opacity: 0.85; box-shadow: var(--elevation-lg); }
 .pc-drag-tip { position: fixed; z-index: 10001; display: none; pointer-events: none; white-space: pre; background: #1f2937; color: #fff; font-size: 12px; padding: 6px 8px; border-radius: 6px; box-shadow: var(--elevation-lg); }
 
@@ -5829,12 +5829,18 @@ body.pc-panel-open { overflow: hidden; }
 .pi-subhead { margin: 14px 0 8px !important; }
 
 /* Portfolio Calendar: card colour by status, full names outside short cards */
-.pc-st-idle { background: #a0aec0; color: #1a202c; }
-.pc-st-ok { background: #2f855a; color: #fff; }
-.pc-st-risk { background: #f6ad55; color: #1a202c; }
-.pc-st-late { background: #c53030; color: #fff; }
-.pc-st-live { background: #2b6cb0; color: #fff; }
-.pc-bar.pc-label-out { overflow: visible; }
-.pc-bar.pc-label-out .pc-bar-text { flex: 0 1 auto; padding: 0 4px; overflow: hidden; }
-.pc-bar-outlabel { position: absolute; left: calc(100% + 6px); top: 50%; transform: translateY(-50%); white-space: nowrap; color: var(--text); font-size: 12px; font-weight: 500; }
-.pc-bar.pc-dragging .pc-bar-outlabel { opacity: 0.8; }
+.pc-st-idle { background-color: #a0aec0; color: #1a202c; }
+.pc-st-ok { background-color: #2f855a; color: #fff; }
+.pc-st-risk { background-color: #f6ad55; color: #1a202c; }
+.pc-st-late { background-color: #c53030; color: #fff; }
+.pc-st-live { background-color: #2b6cb0; color: #fff; }
+/* Name always inside the card: past the plan end the card is striped, with a tick at the end */
+.pc-bar.pc-has-tail { background-image: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.2) 0 6px, transparent 6px 12px); background-size: calc(100% - var(--fill)) 100%; background-position: var(--fill) 0; background-repeat: no-repeat; }
+.pc-bar.pc-has-tail::after { content: ''; position: absolute; top: 3px; bottom: 3px; left: calc(var(--fill) - 1px); width: 2px; background: rgba(255, 255, 255, 0.95); }
+/* Shape tells the type: Project = squarer card, CR = pill */
+.pc-shape-project { border-radius: 3px; }
+.pc-shape-cr { border-radius: 999px; }
+.pc-shape-key { display: inline-block; flex: 0 0 auto; width: 20px; height: 11px; background: #718096; margin-right: 5px; vertical-align: -1px; }
+.pc-tail-key { background: #a0aec0 repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.55) 0 3px, transparent 3px 6px); }
+.pc-legend-sep { opacity: 0.5; }
+.pc-st-ok .pc-bar-text, .pc-st-late .pc-bar-text, .pc-st-live .pc-bar-text { text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35); }
