@@ -5844,3 +5844,17 @@ body.pc-panel-open { overflow: hidden; }
 .pc-tail-key { background: #a0aec0 repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.55) 0 3px, transparent 3px 6px); }
 .pc-legend-sep { opacity: 0.5; }
 .pc-st-ok .pc-bar-text, .pc-st-late .pc-bar-text, .pc-st-live .pc-bar-text { text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35); }
+
+/* Project / CR List: keep View / Edit / Delete visible at the right edge while scrolling */
+#initiatives-table .col-actions,
+#cr-table .col-actions { position: sticky; right: 0; z-index: 2; background: var(--surface); box-shadow: -6px 0 8px -6px rgba(0, 0, 0, 0.18); }
+#initiatives-table thead .col-actions,
+#cr-table thead .col-actions { z-index: 4; background: var(--gray-100); }
+#initiatives-table tbody tr:hover .col-actions,
+#cr-table tbody tr:hover .col-actions { background: var(--gray-50); }
+#initiatives-table .col-actions,
+#cr-table .col-actions { width: 236px; min-width: 236px; padding-left: 8px; padding-right: 8px; }
+#initiatives-table td.col-actions button,
+#cr-table td.col-actions button { padding: 6px 12px; }
+#initiatives-table td.col-actions button + button,
+#cr-table td.col-actions button + button { margin-left: 4px; }

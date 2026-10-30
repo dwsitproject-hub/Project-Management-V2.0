@@ -594,32 +594,37 @@ function wireListTableRowActions(viewType) {
     ? softRefreshListTable('crlist')
     : softRefreshListTable('list'));
 
+  // Admin only (the button is only rendered for admins; the server enforces it too).
+  // Deleting is permanent and also removes the item's tasks, documents, comments, etc.
   document.querySelectorAll('button.delete').forEach((btn) => {
     btn.onclick = async () => {
-      const ok = await confirmDialog(isCR ? 'Delete this CR?' : 'Delete this initiative?', {
-        title: isCR ? 'Delete CR' : 'Delete initiative',
-        confirmText: 'Delete',
+      const kind = isCR ? 'CR' : 'Project';
+      let preview;
+      try {
+        preview = await fetchJSON(`/api/initiatives/${btn.dataset.id}/delete-preview`);
+      } catch (e) {
+        if (!(e instanceof AuthRedirectError)) notify(`Cannot delete this ${kind}: ${e.message}`, 'error');
+        return;
+      }
+      const label = `${preview.ticket ? `${preview.ticket} — ` : ''}${preview.name}`;
+      const related = preview.related.length
+        ? `\n\nThis also deletes:\n${preview.related.map((r) => `• ${r.count} ${r.label}`).join('\n')}`
+        : '';
+      const ok = await confirmDialog(`${label}${related}\n\nThis cannot be undone.`, {
+        title: `Delete ${preview.type === 'CR' ? 'CR' : 'Project'} permanently?`,
+        confirmText: 'Delete permanently',
         danger: true,
       });
       if (!ok) return;
+      setButtonLoading(btn, true, 'Deleting…');
       try {
-        const result = await fetchJSON(`/api/initiatives/${btn.dataset.id}`, { method: 'DELETE' });
-        if (result?.trashId) {
-          const undo = await confirmDialog(isCR ? 'CR deleted. Undo?' : 'Initiative deleted. Undo?', {
-            title: 'Undo delete',
-            confirmText: 'Undo',
-          });
-          if (undo) {
-            await fetchJSON(`/api/initiatives/restore/${result.trashId}`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({}),
-            });
-          }
-        }
+        await fetchJSON(`/api/initiatives/${btn.dataset.id}`, { method: 'DELETE' });
+        notify(`Deleted: ${preview.name}`, 'success');
+        hubTrack('initiative_deleted', { type: preview.type });
         refresh();
       } catch (e) {
-        notify(`Failed to delete ${isCR ? 'CR' : 'initiative'}: ` + (e.message || String(e)));
+        setButtonLoading(btn, false);
+        if (!(e instanceof AuthRedirectError)) notify(`Failed to delete ${kind}: ${e.message || String(e)}`, 'error');
       }
     };
   });
@@ -1306,7 +1311,7 @@ const COLUMN_WIDTH_DEFAULTS = {
   'col-doc': 160,
   'col-doc-link': 200,
   'col-timeline': 280,
-  'col-actions': 140,
+  'col-actions': 236, // View + Edit + Delete (admins) side by side
 };
 
 function getColumnMinWidth(colClass) {
