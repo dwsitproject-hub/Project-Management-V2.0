@@ -2600,6 +2600,253 @@ window.exportCRListToExcel = function exportCRListToExcel() {
   hubTrack('list_exported', { list: 'cr', format: 'csv', rows: rows.length });
 };
 
+// ---------------------------------------------------------------------------
+// Admin: upload a project list from the Excel planning template
+// ---------------------------------------------------------------------------
+// Step 1 upload → server preview (nothing saved) → step 2 review: map the people and
+// status values found in the file, pick defaults, see every row's outcome → import.
+window.openProjectImport = async function openProjectImport() {
+  await ensureLookups();
+  const users = (LOOKUPS.users || []).filter((u) => u.active !== false)
+    .slice().sort((a, b) => String(a.name || a.email).localeCompare(String(b.name || b.email)));
+  const userName = (id) => { const u = users.find((x) => x.id === id); return u ? (u.name || u.email) : ''; };
+  const userOptions = (selected, emptyLabel) => `<option value="">${escapeHtml(emptyLabel)}</option>` +
+    users.map((u) => `<option value="${escapeHtml(u.id)}" ${u.id === selected ? 'selected' : ''}>${escapeHtml(u.name || u.email)}</option>`).join('');
+
+  const modal = document.createElement('div');
+  modal.className = 'modal pi-modal';
+  document.body.appendChild(modal);
+  const close = () => { document.removeEventListener('keydown', onKey); modal.remove(); };
+  const onKey = (e) => { if (e.key === 'Escape' && !document.querySelector('.confirm-dialog')) close(); };
+  document.addEventListener('keydown', onKey);
+
+  let preview = null;
+  const state = { peopleMap: {}, statusMap: {}, defaults: { priority: 'P2', departmentId: '', businessOwnerId: '', itManagerId: '' }, duplicateMode: 'skip' };
+
+  function showUpload(errorText) {
+    modal.innerHTML = `
+      <div class="modal-content pi-content" role="dialog" aria-modal="true" aria-labelledby="pi-title">
+        <div class="pi-head"><h3 id="pi-title">⬆ Upload Projects</h3><button type="button" class="pi-x" data-close aria-label="Close">✕</button></div>
+        <p class="muted">Create projects from the Excel planning template (Type, Initiative Name, IT PM, IT PIC, Status,
+          Notes / Decision needed, Plan Start Date, Plan End Date). You will review everything before anything is saved.</p>
+        <div class="pi-upload">
+          <input type="file" id="pi-file" accept=".xlsx,.xls">
+          <button type="button" class="btn" id="pi-template">Download template</button>
+        </div>
+        ${errorText ? `<div class="pi-error">${escapeHtml(errorText)}</div>` : ''}
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" data-close>Cancel</button>
+          <button type="button" class="btn-primary" id="pi-preview" disabled>Preview</button>
+        </div>
+      </div>`;
+    modal.querySelectorAll('[data-close]').forEach((b) => { b.onclick = close; });
+    const file = modal.querySelector('#pi-file');
+    const btn = modal.querySelector('#pi-preview');
+    file.onchange = () => { btn.disabled = !file.files.length; };
+    modal.querySelector('#pi-template').onclick = downloadTemplate;
+    btn.onclick = async () => {
+      const fd = new FormData();
+      fd.append('file', file.files[0]);
+      setButtonLoading(btn, true, 'Reading…');
+      try {
+        preview = await fetchJSON('/api/admin/project-import/preview', { method: 'POST', body: fd, timeoutMs: 60000 });
+      } catch (e) {
+        if (e instanceof AuthRedirectError) return close();
+        return showUpload(e.message);
+      }
+      state.peopleMap = Object.fromEntries(preview.people.map((p) => [p.name, p.userId || '']));
+      state.statusMap = Object.fromEntries(preview.statuses.map((s) => [s.value, { status: s.status, milestone: s.milestone }]));
+      showReview();
+    };
+  }
+
+  async function downloadTemplate() {
+    try {
+      const res = await fetch('/api/admin/project-import/template', { headers: { Authorization: `Bearer ${getToken()}` } });
+      if (!res.ok) throw new Error(`Download failed (${res.status})`);
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'PM-project-upload-template.xlsx';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  }
+
+  // What will happen to each row with the current choices.
+  function outcome(r) {
+    if (r.errors.length) return { action: 'error', label: 'Error', notes: r.errors };
+    const notes = [...(r.warnings || [])];
+    const pm = r.itPm.map((n) => state.peopleMap[n]).filter(Boolean);
+    if (!pm.length) notes.push(r.itPm.length ? `IT PM "${r.itPm.join(', ')}" not mapped — left empty` : 'No IT PM');
+    else if (r.itPm.length > 1) notes.push(`Several IT PMs — ${userName(pm[0])} is used`);
+    const unmappedPic = r.itPic.filter((n) => !state.peopleMap[n]);
+    if (unmappedPic.length) notes.push(`IT PIC "${unmappedPic.join(', ')}" not mapped — left out`);
+    if (r.existingId) {
+      return state.duplicateMode === 'update'
+        ? { action: 'update', label: 'Update', notes: ['A project with this name exists — its plan, IT PM/PIC, status and notes will be updated', ...notes] }
+        : { action: 'skip', label: 'Skip', notes: ['A project with this name already exists'] };
+    }
+    return { action: 'create', label: 'New', notes };
+  }
+
+  function showReview() {
+    const rows = preview.rows;
+    const outcomes = rows.map(outcome);
+    const count = (a) => outcomes.filter((o) => o.action === a).length;
+    const toImport = count('create') + count('update');
+    const deptOptions = `<option value="">— Not set —</option>` + (LOOKUPS.departments || []).slice()
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+      .map((d) => `<option value="${escapeHtml(d.id)}" ${d.id === state.defaults.departmentId ? 'selected' : ''}>${escapeHtml(d.name)}</option>`).join('');
+    const prevScroll = modal.querySelector('.pi-content')?.scrollTop || 0;
+
+    modal.innerHTML = `
+      <div class="modal-content pi-content pi-wide" role="dialog" aria-modal="true" aria-labelledby="pi-title">
+        <div class="pi-head"><h3 id="pi-title">⬆ Upload Projects — review</h3><button type="button" class="pi-x" data-close aria-label="Close">✕</button></div>
+        <div class="pi-summary">
+          <span><b>${escapeHtml(preview.fileName)}</b> · sheet “${escapeHtml(preview.sheet)}”</span>
+          <span class="pi-chip">${rows.length} rows</span>
+          <span class="pi-chip pi-new">${count('create')} new</span>
+          ${count('update') ? `<span class="pi-chip pi-upd">${count('update')} update</span>` : ''}
+          ${count('skip') ? `<span class="pi-chip pi-skip">${count('skip')} skip (already exist)</span>` : ''}
+          ${count('error') ? `<span class="pi-chip pi-err">${count('error')} with errors</span>` : ''}
+        </div>
+
+        <div class="pi-grid">
+          <section class="pi-box">
+            <h4>People in the file → PM users</h4>
+            <table class="pi-map">
+              ${preview.people.map((p) => `<tr><td>${escapeHtml(p.name)} <span class="muted">(${p.count})</span></td>
+                <td><select data-person="${escapeHtml(p.name)}">${userOptions(state.peopleMap[p.name], '— Leave empty —')}</select></td></tr>`).join('') ||
+                '<tr><td class="muted">No IT PM / IT PIC values in the file</td></tr>'}
+            </table>
+          </section>
+          <section class="pi-box">
+            <h4>Status in the file → PM status and milestone</h4>
+            <table class="pi-map">
+              ${preview.statuses.map((s) => `<tr><td>${escapeHtml(s.value)} <span class="muted">(${s.count})</span></td>
+                <td><select data-status="${escapeHtml(s.value)}">${preview.options.statuses.map((o) => `<option ${state.statusMap[s.value].status === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td>
+                <td><select data-milestone="${escapeHtml(s.value)}">${preview.options.milestones.map((o) => `<option ${state.statusMap[s.value].milestone === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td></tr>`).join('')}
+            </table>
+          </section>
+          <section class="pi-box">
+            <h4>Apply to every new project</h4>
+            <table class="pi-map">
+              <tr><td>Priority</td><td><select data-default="priority">${preview.options.priorities.map((o) => `<option ${state.defaults.priority === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td></tr>
+              <tr><td>Department</td><td><select data-default="departmentId">${deptOptions}</select></td></tr>
+              <tr><td>Business Owner</td><td><select data-default="businessOwnerId">${userOptions(state.defaults.businessOwnerId, '— Not set —')}</select></td></tr>
+              <tr><td>IT Manager</td><td><select data-default="itManagerId">${userOptions(state.defaults.itManagerId, '— Not set —')}</select></td></tr>
+            </table>
+            <p class="muted pi-hint">Description and Business Impact stay empty; fill them in later on each project.</p>
+          </section>
+          <section class="pi-box pi-box-wide">
+            <h4>Projects that already exist (same name)</h4>
+            <label class="pi-radio"><input type="radio" name="pi-dup" value="skip" ${state.duplicateMode === 'skip' ? 'checked' : ''}> Skip them (no change)</label>
+            <label class="pi-radio"><input type="radio" name="pi-dup" value="update" ${state.duplicateMode === 'update' ? 'checked' : ''}> Update their plan dates, IT PM / PIC, status and notes</label>
+            <span class="muted pi-hint">Updates are recorded in each project's Change History.</span>
+          </section>
+        </div>
+
+        <div class="pi-table-wrap">
+          <table class="pi-rows">
+            <thead><tr><th>Row</th><th>Initiative Name</th><th>IT PM</th><th>IT PIC</th><th>Status</th><th>Plan Start</th><th>Plan End</th><th>Result</th></tr></thead>
+            <tbody>
+              ${rows.map((r, k) => {
+                const o = outcomes[k];
+                const map = state.statusMap[r.statusRaw] || {};
+                return `<tr class="pi-row-${o.action}">
+                  <td>${r.rowNumber}</td>
+                  <td>${escapeHtml(r.name || '—')}${r.notes ? `<div class="muted pi-note">${escapeHtml(r.notes)}</div>` : ''}</td>
+                  <td>${escapeHtml(r.itPm.map((n) => userName(state.peopleMap[n]) || `${n} ✗`).join(', ') || '—')}</td>
+                  <td>${escapeHtml(r.itPic.map((n) => userName(state.peopleMap[n]) || `${n} ✗`).join(', ') || '—')}</td>
+                  <td>${escapeHtml(r.statusRaw)} → ${escapeHtml(map.status || '?')}<div class="muted">${escapeHtml(r.milestoneRaw || map.milestone || '')}</div></td>
+                  <td>${escapeHtml(r.planStartDate || '—')}</td>
+                  <td>${escapeHtml(r.planEndDate || '—')}</td>
+                  <td><span class="pi-badge pi-badge-${o.action}">${o.label}</span>${o.notes.map((n) => `<div class="pi-msg">${escapeHtml(n)}</div>`).join('')}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" id="pi-back">Choose another file</button>
+          <button type="button" class="btn-secondary" data-close>Cancel</button>
+          <button type="button" class="btn-primary" id="pi-import" ${toImport ? '' : 'disabled'}>Import ${toImport} project${toImport === 1 ? '' : 's'}</button>
+        </div>
+      </div>`;
+    modal.querySelector('.pi-content').scrollTop = prevScroll;
+
+    modal.querySelectorAll('[data-close]').forEach((b) => { b.onclick = close; });
+    modal.querySelector('#pi-back').onclick = () => showUpload();
+    modal.querySelectorAll('[data-person]').forEach((s) => { s.onchange = () => { state.peopleMap[s.dataset.person] = s.value; showReview(); }; });
+    modal.querySelectorAll('[data-status]').forEach((s) => { s.onchange = () => { state.statusMap[s.dataset.status].status = s.value; showReview(); }; });
+    modal.querySelectorAll('[data-milestone]').forEach((s) => { s.onchange = () => { state.statusMap[s.dataset.milestone].milestone = s.value; showReview(); }; });
+    modal.querySelectorAll('[data-default]').forEach((s) => { s.onchange = () => { state.defaults[s.dataset.default] = s.value; }; });
+    modal.querySelectorAll('input[name="pi-dup"]').forEach((r) => { r.onchange = () => { state.duplicateMode = r.value; showReview(); }; });
+    modal.querySelector('#pi-import').onclick = () => runImport(toImport);
+  }
+
+  async function runImport(toImport) {
+    const ok = await confirmDialog(
+      `Import ${toImport} project(s) from ${preview.fileName}?` +
+      (state.duplicateMode === 'update' ? '\nExisting projects with the same name will be updated.' : ''),
+      { title: 'Upload Projects', confirmText: 'Import' }
+    );
+    if (!ok) return;
+    const btn = modal.querySelector('#pi-import');
+    setButtonLoading(btn, true, 'Importing…');
+    let result;
+    try {
+      result = await fetchJSON('/api/admin/project-import/commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        timeoutMs: 120000,
+        body: JSON.stringify({
+          fileName: preview.fileName,
+          rows: preview.rows.filter((r) => !r.errors.length),
+          peopleMap: state.peopleMap,
+          statusMap: state.statusMap,
+          defaults: {
+            priority: state.defaults.priority,
+            departmentId: state.defaults.departmentId || null,
+            businessOwnerId: state.defaults.businessOwnerId || null,
+            itManagerIds: state.defaults.itManagerId ? [state.defaults.itManagerId] : [],
+          },
+          duplicateMode: state.duplicateMode,
+        }),
+      });
+    } catch (e) {
+      if (e instanceof AuthRedirectError) return close();
+      setButtonLoading(btn, false);
+      return notify(`Import failed: ${e.message}`, 'error');
+    }
+    hubTrack('projects_uploaded', { created: result.created, updated: result.updated, failed: result.failed.length });
+    modal.innerHTML = `
+      <div class="modal-content pi-content" role="dialog" aria-modal="true" aria-labelledby="pi-title">
+        <div class="pi-head"><h3 id="pi-title">✅ Upload finished</h3><button type="button" class="pi-x" data-close aria-label="Close">✕</button></div>
+        <div class="pi-summary">
+          <span class="pi-chip pi-new">${result.created} created</span>
+          <span class="pi-chip pi-upd">${result.updated} updated</span>
+          <span class="pi-chip pi-skip">${result.skipped} skipped</span>
+          ${result.failed.length ? `<span class="pi-chip pi-err">${result.failed.length} failed</span>` : ''}
+        </div>
+        ${result.failed.length ? `<ul class="pi-failed">${result.failed.map((f) => `<li>Row ${f.rowNumber} — ${escapeHtml(f.name)}: ${escapeHtml(f.error)}</li>`).join('')}</ul>` : ''}
+        <div class="modal-actions"><button type="button" class="btn-primary" data-close>Done</button></div>
+      </div>`;
+    modal.querySelectorAll('[data-close]').forEach((b) => {
+      b.onclick = () => {
+        close();
+        if (location.hash.startsWith('#list')) renderList();
+      };
+    });
+  }
+
+  showUpload();
+};
+
 async function renderList() {
   console.log('renderList called');
   setActive('#list');
@@ -3033,6 +3280,7 @@ async function renderList() {
           <button id="btn-columns" onclick="showColumnSettings('list')" title="Column Settings" class="icon-btn">⚙️</button>
           <button id="apply-filters-btn" class="primary" onclick="applyFilters()">Apply Filters</button>
           ${access.canCreateProject || access.isAdmin ? '<a href="#new/Project" class="btn primary">+ New Initiative</a>' : ''}
+          ${access.isAdmin ? '<button type="button" class="btn" onclick="openProjectImport()" title="Create projects from the Excel planning template (admin)">⬆ Upload Projects</button>' : ''}
         </div>
       </div>
       <div class="toolbar-advanced ${advancedOpen ? 'open' : ''}" id="toolbar-advanced">
