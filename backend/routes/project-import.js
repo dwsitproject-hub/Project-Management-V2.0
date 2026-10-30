@@ -1,6 +1,6 @@
 // Admin: bulk upload of a project list from an Excel planning template
 // (columns: Type, Initiative Name, Department, Business Owner, IT PM, IT PIC, Status,
-//  Notes / Decision needed, Plan Start Date, Plan End Date; optional Priority, Milestone).
+//  Notes / Decision needed, Plan Start Date, Plan End Date, Priority; optional Milestone).
 //
 //   GET  /template  → blank .xlsx in the expected layout
 //   POST /preview   → parse the uploaded file (nothing is saved): normalized rows, row
@@ -156,10 +156,10 @@ function findColumns(headerRow) {
 router.get('/template', (_req, res) => {
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet([
-    ['Type', 'Initiative Name', 'Department', 'Business Owner', 'IT PM', 'IT PIC', 'Status', 'Notes / Decision needed', 'Plan Start Date', 'Plan End Date'],
-    ['Project', 'Example project name', 'Logistic', 'Dinna Medhani', 'Jerry', 'Jerry, Stevanus', 'Not Started', 'Optional note', 'Jan-27', 'Mar-27'],
+    ['Type', 'Initiative Name', 'Department', 'Business Owner', 'Priority', 'IT PM', 'IT PIC', 'Status', 'Notes / Decision needed', 'Plan Start Date', 'Plan End Date'],
+    ['Project', 'Example project name', 'Logistic', 'Dinna Medhani', 'P1', 'Jerry', 'Jerry, Stevanus', 'Not Started', 'Optional note', 'Jan-27', 'Mar-27'],
   ]);
-  ws['!cols'] = [{ wch: 10 }, { wch: 50 }, { wch: 16 }, { wch: 20 }, { wch: 16 }, { wch: 22 }, { wch: 14 }, { wch: 40 }, { wch: 15 }, { wch: 15 }];
+  ws['!cols'] = [{ wch: 10 }, { wch: 50 }, { wch: 16 }, { wch: 20 }, { wch: 9 }, { wch: 16 }, { wch: 22 }, { wch: 14 }, { wch: 40 }, { wch: 15 }, { wch: 15 }];
   XLSX.utils.book_append_sheet(wb, ws, 'Proposed Plan');
   const help = XLSX.utils.aoa_to_sheet([
     ['Column', 'Values'],
@@ -169,7 +169,8 @@ router.get('/template', (_req, res) => {
     ['Plan Start / End Date', 'Month as Mmm-YY (e.g. Oct-26 = 1 Oct 2026 for start, 31 Oct 2026 for end) or a full date'],
     ['Department', 'Department name as in PM (e.g. Logistic, HC). Names PM does not have can be mapped during upload.'],
     ['Business Owner', 'Name as in PM (e.g. "Dinna Medhani" or "Victor")'],
-    ['Optional columns', 'Priority (P0/P1/P2), Milestone'],
+    ['Priority', 'P0, P1 or P2 (empty = the default chosen during upload)'],
+    ['Optional columns', 'Milestone (a Project milestone; otherwise it follows the status mapping)'],
   ]);
   help['!cols'] = [{ wch: 22 }, { wch: 110 }];
   XLSX.utils.book_append_sheet(wb, help, 'How to fill');
@@ -235,7 +236,10 @@ router.post('/preview', upload.single('file'), async (req, res) => {
       const key = normKey(name);
       if (key && seen.has(key)) errors.push(`Same name as row ${seen.get(key)}`);
       else if (key) seen.set(key, rowNumber);
-      const priority = norm(cell(r, 'priority')).toUpperCase();
+      const priorityRaw = norm(cell(r, 'priority'));
+      const priority = priorityRaw.toUpperCase();
+      const warnings = priorityRaw && !PRIORITIES.includes(priority)
+        ? [`Priority "${priorityRaw}" is not P0, P1 or P2 — the default is used`] : [];
       return {
         rowNumber: rowNumber || k + 2,
         name,
@@ -246,6 +250,7 @@ router.post('/preview', upload.single('file'), async (req, res) => {
         planStartDate,
         planEndDate,
         priority: PRIORITIES.includes(priority) ? priority : null,
+        warnings,
         milestoneRaw: norm(cell(r, 'milestone')) || null,
         departmentRaw: norm(cell(r, 'department')) || null,
         businessOwner: splitPeople(cell(r, 'businessOwner')).slice(0, 1),
@@ -360,6 +365,7 @@ router.post('/commit', express.json({ limit: '2mb' }), async (req, res) => {
           ...(picIds.length ? { itPicIds: picIds } : {}),
           ...(rowDeptId ? { departmentId: rowDeptId } : {}),
           ...(rowOwnerId ? { businessOwnerId: rowOwnerId } : {}),
+          ...(PRIORITIES.includes(r.priority) ? { priority: r.priority } : {}),
           ...(notes ? { remark: notes } : {}),
         };
         const changes = [];

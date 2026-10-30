@@ -2628,8 +2628,8 @@ window.openProjectImport = async function openProjectImport() {
       <div class="modal-content pi-content" role="dialog" aria-modal="true" aria-labelledby="pi-title">
         <div class="pi-head"><h3 id="pi-title">⬆ Upload Projects</h3><button type="button" class="pi-x" data-close aria-label="Close">✕</button></div>
         <p class="muted">Create projects from the Excel planning template (Type, Initiative Name, Department, Business Owner,
-          IT PM, IT PIC, Status, Notes / Decision needed, Plan Start Date, Plan End Date). You will review everything before
-          anything is saved.</p>
+          Priority, IT PM, IT PIC, Status, Notes / Decision needed, Plan Start Date, Plan End Date). You will review everything
+          before anything is saved.</p>
         <div class="pi-upload">
           <input type="file" id="pi-file" accept=".xlsx,.xls">
           <button type="button" class="btn" id="pi-template">Download template</button>
@@ -2694,7 +2694,7 @@ window.openProjectImport = async function openProjectImport() {
     }
     if (r.existingId) {
       return state.duplicateMode === 'update'
-        ? { action: 'update', label: 'Update', notes: ['A project with this name exists — its plan, department, business owner, IT PM/PIC, status and notes will be updated', ...notes] }
+        ? { action: 'update', label: 'Update', notes: ['A project with this name exists — its plan, department, business owner, priority, IT PM/PIC, status and notes will be updated', ...notes] }
         : { action: 'skip', label: 'Skip', notes: ['A project with this name already exists'] };
     }
     return { action: 'create', label: 'New', notes };
@@ -2755,7 +2755,7 @@ window.openProjectImport = async function openProjectImport() {
           <section class="pi-box">
             <h4>Apply to every new project</h4>
             <table class="pi-map">
-              <tr><td>Priority</td><td><select data-default="priority">${preview.options.priorities.map((o) => `<option ${state.defaults.priority === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td></tr>
+              <tr><td>Priority<div class="pi-roles">when the row has none</div></td><td><select data-default="priority">${preview.options.priorities.map((o) => `<option ${state.defaults.priority === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td></tr>
               <tr><td>Department<div class="pi-roles">when the row has none / unmapped</div></td><td><select data-default="departmentId">${deptOptions}</select></td></tr>
               <tr><td>Business Owner<div class="pi-roles">when the row has none / unmapped</div></td><td><select data-default="businessOwnerId">${userOptions(state.defaults.businessOwnerId, '— Not set —')}</select></td></tr>
               <tr><td>IT Manager</td><td><select data-default="itManagerId">${userOptions(state.defaults.itManagerId, '— Not set —')}</select></td></tr>
@@ -2765,14 +2765,14 @@ window.openProjectImport = async function openProjectImport() {
           <section class="pi-box pi-box-wide">
             <h4>Projects that already exist (same name)</h4>
             <label class="pi-radio"><input type="radio" name="pi-dup" value="skip" ${state.duplicateMode === 'skip' ? 'checked' : ''}> Skip them (no change)</label>
-            <label class="pi-radio"><input type="radio" name="pi-dup" value="update" ${state.duplicateMode === 'update' ? 'checked' : ''}> Update their plan dates, department, business owner, IT PM / PIC, status and notes</label>
+            <label class="pi-radio"><input type="radio" name="pi-dup" value="update" ${state.duplicateMode === 'update' ? 'checked' : ''}> Update their plan dates, department, business owner, priority, IT PM / PIC, status and notes</label>
             <span class="muted pi-hint">Updates are recorded in each project's Change History.</span>
           </section>
         </div>
 
         <div class="pi-table-wrap">
           <table class="pi-rows">
-            <thead><tr><th>Row</th><th>Initiative Name</th><th>Department</th><th>Business Owner</th><th>IT PM</th><th>IT PIC</th><th>Status</th><th>Plan Start</th><th>Plan End</th><th>Result</th></tr></thead>
+            <thead><tr><th>Row</th><th>Initiative Name</th><th>Department</th><th>Business Owner</th><th>Priority</th><th>IT PM</th><th>IT PIC</th><th>Status</th><th>Plan Start</th><th>Plan End</th><th>Result</th></tr></thead>
             <tbody>
               ${rows.map((r, k) => {
                 const o = outcomes[k];
@@ -2782,6 +2782,7 @@ window.openProjectImport = async function openProjectImport() {
                   <td>${escapeHtml(r.name || '—')}${r.notes ? `<div class="muted pi-note">${escapeHtml(r.notes)}</div>` : ''}</td>
                   <td>${escapeHtml(rowDept(r) || deptName(state.defaults.departmentId) || '—')}</td>
                   <td>${escapeHtml(rowOwner(r) || userName(state.defaults.businessOwnerId) || '—')}</td>
+                  <td>${r.priority ? escapeHtml(r.priority) : `${escapeHtml(state.defaults.priority)} <span class="muted">(default)</span>`}</td>
                   <td>${escapeHtml(r.itPm.map((n) => userName(state.peopleMap[n]) || `${n} ✗`).join(', ') || '—')}</td>
                   <td>${escapeHtml(r.itPic.map((n) => userName(state.peopleMap[n]) || `${n} ✗`).join(', ') || '—')}</td>
                   <td>${escapeHtml(r.statusRaw)} → ${escapeHtml(map.status || '?')}<div class="muted">${escapeHtml(r.milestoneRaw || map.milestone || '')}</div></td>
@@ -9077,6 +9078,30 @@ function pcWeight(i, memberId) {
 const PC_LOAD_OK_MAX = 4;
 const PC_LOAD_BUSY_MAX = 5;
 
+// Card colour by status: Not Started / On Hold grey, On Track green, At Risk amber,
+// Delayed red, Live blue.
+function pcStatusClass(status) {
+  const key = String(status || '').trim().toLowerCase();
+  return {
+    'not started': 'pc-st-idle',
+    'on hold': 'pc-st-idle',
+    'on track': 'pc-st-ok',
+    'at risk': 'pc-st-risk',
+    delayed: 'pc-st-late',
+    live: 'pc-st-live',
+  }[key] || 'pc-st-idle';
+}
+
+let pcMeasureCtx = null;
+/** Rendered width (px) of a card label, so names can be laid out in full. */
+function pcTextWidth(text) {
+  if (!pcMeasureCtx) {
+    pcMeasureCtx = document.createElement('canvas').getContext('2d');
+    pcMeasureCtx.font = '12px Inter, system-ui, -apple-system, "Segoe UI", sans-serif';
+  }
+  return Math.ceil(pcMeasureCtx.measureText(String(text || '')).width);
+}
+
 function pcLoadClass(score) {
   if (score <= 0) return 'pc-load-none';
   if (score <= PC_LOAD_OK_MAX) return 'pc-load-ok';
@@ -9140,7 +9165,9 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       if (String(i.status || '').trim().toLowerCase() === 'cancelled') return false;
       if (st.type !== 'All' && i.type !== st.type) return false;
       if (!deptMatches(i)) return false;
-      return teamIds.has(i.itPmId) || pcDevIds(i).some((id) => teamIds.has(id));
+      if (teamIds.has(i.itPmId) || pcDevIds(i).some((id) => teamIds.has(id))) return true;
+      // Nobody assigned yet (no IT PM, no IT PIC): show it so it can be dragged to a member.
+      return !i.itPmId && pcDevIds(i).length === 0;
     });
   }
   function span(i) {
@@ -9171,12 +9198,18 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     return scores;
   }
 
-  function barHtml(i, left, width, lane, clipStart, clipEnd) {
+  // Card text: the name (Team Member view) or who works on it (Project / CR view).
+  function barLabel(i) {
+    if (st.yAxis === 'member') return i.name || '';
     const pm = userName(i.itPmId);
     const devs = pcDevIds(i).map(userName).filter(Boolean);
-    const text = st.yAxis === 'member'
-      ? escapeHtml(i.name)
-      : escapeHtml([pm ? `PM: ${pm}` : 'No IT PM', devs.length ? `Dev: ${devs.join(', ')}` : ''].filter(Boolean).join(' · '));
+    return [pm ? `PM: ${pm}` : 'No IT PM', devs.length ? `Dev: ${devs.join(', ')}` : ''].filter(Boolean).join(' · ');
+  }
+
+  function barHtml(i, left, width, lane, clipStart, clipEnd, labelOutside) {
+    const pm = userName(i.itPmId);
+    const devs = pcDevIds(i).map(userName).filter(Boolean);
+    const text = escapeHtml(barLabel(i));
     const tip = [
       `${i.type}: ${i.name}`,
       `Plan: ${i.planStartDate?.slice(0, 10)} → ${i.planEndDate?.slice(0, 10)}`,
@@ -9185,11 +9218,12 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       `Status: ${i.status || '—'} · ${i.priority || ''}`,
       'Drag to move · drag an edge to change start/end · click to open',
     ].join('\n');
-    return `<div class="pc-bar pc-type-${i.type === 'CR' ? 'cr' : 'project'} pc-pri-${escapeHtml(String(i.priority || '').toLowerCase())}${clipStart ? ' pc-clip-start' : ''}${clipEnd ? ' pc-clip-end' : ''}"
+    return `<div class="pc-bar ${pcStatusClass(i.status)}${labelOutside ? ' pc-label-out' : ''}${clipStart ? ' pc-clip-start' : ''}${clipEnd ? ' pc-clip-end' : ''}"
         data-id="${escapeHtml(i.id)}" style="left:${left}px;width:${width}px;top:${lane * PC_LANE_H + 6}px" title="${escapeHtml(tip)}">
         ${clipStart ? '' : '<span class="pc-handle pc-handle-start"></span>'}
-        <span class="pc-bar-text"><b>${i.type === 'CR' ? 'CR' : 'PRJ'}</b> ${text}</span>
+        <span class="pc-bar-text"><b>${i.type === 'CR' ? 'CR' : 'PRJ'}</b>${labelOutside ? '' : ` ${text}`}</span>
         ${clipEnd ? '' : '<span class="pc-handle pc-handle-end"></span>'}
+        ${labelOutside ? `<span class="pc-bar-outlabel">${text}</span>` : ''}
       </div>`;
   }
 
@@ -9203,14 +9237,21 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       const l = (pcPos(sp.s, false) - st.start) * PC_COL_W;
       const r = (pcPos(sp.e, true) - st.start) * PC_COL_W;
       if (r <= 0 || l >= width) continue;
-      placed.push({ i, l: Math.max(0, l), r: Math.min(width, r), clipStart: l < 0, clipEnd: r > width });
+      const p = { i, l: Math.max(0, l), r: Math.min(width, r), clipStart: l < 0, clipEnd: r > width };
+      // Full label inside the card when it fits (handles + type tag + padding ≈ 60px),
+      // otherwise written just to the right of it; lanes keep that space free.
+      const textW = pcTextWidth(barLabel(i));
+      const barW = Math.max(18, p.r - p.l);
+      p.labelOutside = barW < textW + 60;
+      p.ext = p.labelOutside ? p.l + barW + 8 + textW + 12 : p.r;
+      placed.push(p);
     }
     placed.sort((a, b) => a.l - b.l);
     const laneEnds = [];
     for (const p of placed) {
       let lane = laneEnds.findIndex((end) => end <= p.l + 1);
       if (lane === -1) { lane = laneEnds.length; laneEnds.push(0); }
-      laneEnds[lane] = p.r;
+      laneEnds[lane] = p.ext;
       p.lane = lane;
     }
     const lanes = Math.max(1, laneEnds.length);
@@ -9219,7 +9260,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       count: placed.length,
       html: `<div class="pc-track" style="width:${width}px;height:${lanes * PC_LANE_H + 12}px">
         ${todayLeft >= 0 && todayLeft <= width ? `<div class="pc-today" style="left:${todayLeft}px"></div>` : ''}
-        ${placed.map((p) => barHtml(p.i, p.l, Math.max(18, p.r - p.l), p.lane, p.clipStart, p.clipEnd)).join('')}
+        ${placed.map((p) => barHtml(p.i, p.l, Math.max(18, p.r - p.l), p.lane, p.clipStart, p.clipEnd, p.labelOutside)).join('')}
       </div>`,
     };
   }
@@ -9260,7 +9301,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     let shown = 0;
     if (st.yAxis === 'member') {
       const rows = teamSorted.map((u) => ({ id: u.id, label: u.name || u.email, items: scheduled.filter((i) => i.itPmId === u.id) }));
-      rows.push({ id: '', label: 'No IT PM in team', note: 'IT PM empty or outside your team', items: scheduled.filter((i) => !teamIds.has(i.itPmId)) });
+      rows.push({ id: '', label: 'Unassigned / IT PM outside team', note: 'drag to a member to assign', items: scheduled.filter((i) => !teamIds.has(i.itPmId)) });
       rowsHtml = rows.map((row) => {
         const t = trackHtml(row.items);
         shown += t.count;
@@ -9322,7 +9363,8 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
               <select id="pc-months">${[6, 12, 18, 24].map((n) => `<option value="${n}" ${st.months === n ? 'selected' : ''}>${n} months</option>`).join('')}</select>
             </div></div>
           <div class="pc-legend muted">
-            <span><i class="pc-key pc-type-project"></i>Project</span><span><i class="pc-key pc-type-cr"></i>CR</span>
+            <span><i class="pc-key pc-st-idle"></i>Not Started / On Hold</span><span><i class="pc-key pc-st-ok"></i>On Track</span>
+            <span><i class="pc-key pc-st-risk"></i>At Risk</span><span><i class="pc-key pc-st-late"></i>Delayed</span><span><i class="pc-key pc-st-live"></i>Live</span>
             <span>Weighted Score: Project PM + Dev = 1, PM or Dev = 0.5 · CR = 0.25</span>
             <span><i class="pc-key pc-load-ok"></i>≤${PC_LOAD_OK_MAX}</span><span><i class="pc-key pc-load-busy"></i>&gt;${PC_LOAD_OK_MAX} to ${PC_LOAD_BUSY_MAX}</span><span><i class="pc-key pc-load-over"></i>&gt;${PC_LOAD_BUSY_MAX}</span>
           </div>
@@ -9355,7 +9397,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         ${unscheduled.length ? `<div class="card pc-unscheduled">
           <h3>No plan dates (${unscheduled.length})</h3>
           <p class="muted">Not counted in the Weighted Score. Drag one onto a month in the calendar to give it plan dates for that month.</p>
-          <div class="pc-chips">${unscheduled.map((i) => `<span class="pc-chip pc-type-${i.type === 'CR' ? 'cr' : 'project'}" data-id="${escapeHtml(i.id)}"
+          <div class="pc-chips">${unscheduled.map((i) => `<span class="pc-chip ${pcStatusClass(i.status)}" data-id="${escapeHtml(i.id)}"
               title="${escapeHtml(`${i.type}: ${i.name}\nIT PM: ${userName(i.itPmId) || '—'}\nClick to open · drag onto a month to plan it`)}"><b>${i.type === 'CR' ? 'CR' : 'PRJ'}</b> ${escapeHtml(i.name)}</span>`).join('')}</div>
         </div>` : ''}
       </div>`;
