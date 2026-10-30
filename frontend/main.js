@@ -5,6 +5,14 @@ import {
 } from './departmentGroups.js';
 
 const app = document.getElementById('app');
+
+// Embedded mode (?embed=1 inside an iframe): an initiative's detail page shown in another
+// PM page's floating panel (Portfolio Calendar). Only #view/ and #edit/ render here; any
+// other navigation (e.g. "Back to Projects", or the login page after a session expiry)
+// is handed back to the parent page, which closes the panel.
+const PM_EMBED = window.parent !== window && new URLSearchParams(location.search).has('embed');
+if (PM_EMBED) document.documentElement.classList.add('pm-embed');
+
 console.log('=== Frontend main.js loaded ===');
 console.log('App element:', app);
 console.log('Current hash:', location.hash);
@@ -909,6 +917,12 @@ function hubTrack(name, props) {
 }
 
 async function loadHubSdk() {
+  // The parent page already reports this session; a second SDK copy would double-count it.
+  if (PM_EMBED) {
+    hubSdkState = 'off';
+    window.DwsHub = [];
+    return;
+  }
   try {
     const res = await fetch('/api/hub-sdk/config', { cache: 'no-store' });
     const cfg = res.ok ? await res.json() : null;
@@ -8817,6 +8831,8 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     type: ['All', 'Project', 'CR'].includes(saved.type) ? saved.type : 'All',
     yAxis: saved.yAxis === 'initiative' ? 'initiative' : 'member',
     months: [6, 12, 18, 24].includes(saved.months) ? saved.months : 12,
+    // Row order in Project / CR view
+    sort: ['start-asc', 'start-desc', 'name-asc', 'name-desc'].includes(saved.sort) ? saved.sort : 'start-asc',
     start: thisMonth - 1,
   };
   const teamSorted = team.slice().sort((a, b) => String(a.name || a.email).localeCompare(String(b.name || b.email)));
@@ -8917,6 +8933,8 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
   }
 
   function draw() {
+    // Keep the calendar's horizontal scroll across redraws (after a drag, save or panel close).
+    const prevScrollLeft = container.querySelector('.pc-scroll')?.scrollLeft || 0;
     const items = related();
     const scheduled = items.filter(span);
     const unscheduled = items.filter((i) => !span(i));
@@ -8961,14 +8979,22 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         </div>`;
       }).join('');
     } else {
-      const ordered = scheduled.slice().sort((a, b) => pcPos(span(a).s) - pcPos(span(b).s));
+      const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base', numeric: true });
+      const byStart = (a, b) => pcPos(span(a).s) - pcPos(span(b).s) || byName(a, b);
+      const compare = {
+        'start-asc': byStart,
+        'start-desc': (a, b) => byStart(b, a),
+        'name-asc': byName,
+        'name-desc': (a, b) => byName(b, a),
+      }[st.sort];
+      const ordered = scheduled.slice().sort(compare);
       rowsHtml = ordered.map((i) => {
         const t = trackHtml([i]);
         if (!t.count) return '';
         shown += 1;
         return `<div class="pc-row" data-initiative="${escapeHtml(i.id)}">
           <div class="pc-label"><span class="pc-type-tag pc-type-${i.type === 'CR' ? 'cr' : 'project'}">${i.type === 'CR' ? 'CR' : 'PRJ'}</span>
-            <div><a class="pc-label-name" href="#view/${escapeHtml(i.id)}">${escapeHtml(i.name)}</a><div class="muted">${escapeHtml(i.status || '')} · ${escapeHtml(i.priority || '')}</div></div></div>
+            <div><a class="pc-label-name" href="#view/${escapeHtml(i.id)}" data-id="${escapeHtml(i.id)}">${escapeHtml(i.name)}</a><div class="muted">${escapeHtml(i.status || '')} · ${escapeHtml(i.priority || '')}</div></div></div>
           ${t.html}
         </div>`;
       }).join('') || `<div class="pc-row"><div class="pc-label muted">Nothing scheduled in this range</div><div class="pc-track" style="width:${st.months * PC_COL_W}px;height:40px"></div></div>`;
@@ -8983,6 +9009,13 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
           <div class="pc-field"><label>Rows (Y axis)</label>
             <select id="pc-yaxis"><option value="member" ${st.yAxis === 'member' ? 'selected' : ''}>Team Member (IT PM)</option>
               <option value="initiative" ${st.yAxis === 'initiative' ? 'selected' : ''}>Project / CR</option></select></div>
+          ${st.yAxis === 'initiative' ? `<div class="pc-field"><label>Sort rows by</label>
+            <select id="pc-sort">${[
+              ['start-asc', 'Plan Start (earliest first)'],
+              ['start-desc', 'Plan Start (latest first)'],
+              ['name-asc', 'Project / CR Name (A–Z)'],
+              ['name-desc', 'Project / CR Name (Z–A)'],
+            ].map(([v, l]) => `<option value="${v}" ${st.sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
           <div class="pc-field"><label>Months</label>
             <div class="pc-range">
               <button type="button" data-pc-shift="-3" title="Back 3 months">‹</button>
@@ -9004,8 +9037,8 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
           <div class="pc-cal-head">
             <h3>🗓️ Portfolio Calendar</h3>
             <span class="muted">${st.yAxis === 'member'
-              ? 'Drag a card sideways to move its plan dates, drag its edges to change start or end, or drop it on another member to change the IT PM.'
-              : 'Drag a card sideways to move its plan dates, or drag its edges to change start or end.'}
+              ? 'Click a card to view or edit it. Drag it sideways to move its plan dates, drag its edges to change start or end, or drop it on another member to change the IT PM.'
+              : 'Click a card to view or edit it. Drag it sideways to move its plan dates, or drag its edges to change start or end.'}
               ${hiddenCount > 0 ? ` ${hiddenCount} scheduled item(s) fall outside this range.` : ''}</span>
           </div>
           <div class="pc-scroll">
@@ -9025,16 +9058,18 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
           <h3>No plan dates (${unscheduled.length})</h3>
           <p class="muted">Not counted in the Weighted Score. Drag one onto a month in the calendar to give it plan dates for that month.</p>
           <div class="pc-chips">${unscheduled.map((i) => `<span class="pc-chip pc-type-${i.type === 'CR' ? 'cr' : 'project'}" data-id="${escapeHtml(i.id)}"
-              title="${escapeHtml(`${i.type}: ${i.name}\nIT PM: ${userName(i.itPmId) || '—'}`)}"><b>${i.type === 'CR' ? 'CR' : 'PRJ'}</b> ${escapeHtml(i.name)}</span>`).join('')}</div>
+              title="${escapeHtml(`${i.type}: ${i.name}\nIT PM: ${userName(i.itPmId) || '—'}\nClick to open · drag onto a month to plan it`)}"><b>${i.type === 'CR' ? 'CR' : 'PRJ'}</b> ${escapeHtml(i.name)}</span>`).join('')}</div>
         </div>` : ''}
       </div>`;
 
+    const scroller = container.querySelector('.pc-scroll');
+    if (scroller) scroller.scrollLeft = prevScrollLeft;
     wire();
   }
 
   function setState(patch) {
     Object.assign(st, patch);
-    pcSaveState({ type: st.type, yAxis: st.yAxis, months: st.months });
+    pcSaveState({ type: st.type, yAxis: st.yAxis, months: st.months, sort: st.sort });
     draw();
   }
 
@@ -9064,9 +9099,88 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     return lines.join('\n');
   }
 
+  // Floating panel with the initiative's real detail page (view + edit) in embedded mode.
+  // Closing it reloads the data, so edits made there (dates, IT PM, …) show up here.
+  function openPanel(item) {
+    const overlay = document.createElement('div');
+    overlay.className = 'pc-panel-backdrop';
+    overlay.innerHTML = `
+      <div class="pc-panel" role="dialog" aria-modal="true" aria-label="${escapeHtml(item.name)}">
+        <div class="pc-panel-head">
+          <span class="pc-type-tag pc-type-${item.type === 'CR' ? 'cr' : 'project'}">${item.type === 'CR' ? 'CR' : 'PRJ'}</span>
+          <strong class="pc-panel-title">${escapeHtml(item.name)}</strong>
+          <a class="pc-panel-full" href="#view/${escapeHtml(item.id)}">Open full page ↗</a>
+          <button type="button" class="pc-panel-close" aria-label="Close and return to the Portfolio Calendar" title="Close (Esc)">✕</button>
+        </div>
+        <iframe class="pc-panel-frame" title="${escapeHtml(item.name)}"
+          src="${location.pathname}?embed=1#view/${encodeURIComponent(item.id)}"></iframe>
+      </div>`;
+    const frame = overlay.querySelector('iframe');
+    let closed = false;
+
+    const hasUnsavedEdit = () => {
+      try { return !!frame.contentDocument?.getElementById('save-btn'); } catch (_) { return false; }
+    };
+    const close = async (force) => {
+      if (closed) return;
+      if (!force && hasUnsavedEdit() &&
+          !(await confirmDialog('You have an edit form open. Close without saving?', { title: 'Discard changes?', confirmText: 'Close', danger: true }))) {
+        return;
+      }
+      closed = true;
+      window.removeEventListener('message', onMessage);
+      document.removeEventListener('keydown', onKey);
+      document.body.classList.remove('pc-panel-open');
+      overlay.remove();
+      await reload();
+    };
+    const onKey = (e) => { if (e.key === 'Escape' && !document.querySelector('.confirm-dialog')) close(false); };
+    const onMessage = (e) => {
+      if (e.origin !== location.origin || e.source !== frame.contentWindow) return;
+      // The page inside left the detail view (Back link, or login after a session expiry).
+      if (e.data?.type === 'pm-embed-leave') close(true);
+    };
+
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(false); });
+    overlay.querySelector('.pc-panel-close').onclick = () => close(false);
+    overlay.querySelector('.pc-panel-full').onclick = () => {
+      closed = true; // leaving the calendar for the full page; no reload needed
+      window.removeEventListener('message', onMessage);
+      document.removeEventListener('keydown', onKey);
+      document.body.classList.remove('pc-panel-open');
+      overlay.remove();
+    };
+    window.addEventListener('message', onMessage);
+    document.addEventListener('keydown', onKey);
+    document.body.classList.add('pc-panel-open');
+    document.body.appendChild(overlay);
+    overlay.querySelector('.pc-panel-close').focus();
+    hubTrack('portfolio_calendar_open_detail', { type: item.type });
+  }
+
+  async function reload() {
+    try {
+      all = await fetchJSON('/api/initiatives?limit=0');
+    } catch (e) {
+      if (!(e instanceof AuthRedirectError)) notify(`Could not refresh the calendar: ${e.message}`, 'error');
+      return;
+    }
+    draw();
+  }
+
   function wire() {
     container.querySelectorAll('[data-pc-type]').forEach((b) => { b.onclick = () => setState({ type: b.dataset.pcType }); });
     container.querySelector('#pc-yaxis').onchange = (e) => setState({ yAxis: e.target.value });
+    const sortSel = container.querySelector('#pc-sort');
+    if (sortSel) sortSel.onchange = (e) => setState({ sort: e.target.value });
+    // Row names open the same floating panel as the cards
+    container.querySelectorAll('a.pc-label-name[data-id]').forEach((a) => {
+      a.onclick = (e) => {
+        e.preventDefault();
+        const item = all.find((i) => i.id === a.dataset.id);
+        if (item) openPanel(item);
+      };
+    });
     container.querySelector('#pc-months').onchange = (e) => setState({ months: Number(e.target.value) });
     container.querySelectorAll('[data-pc-shift]').forEach((b) => {
       b.onclick = () => setState({ start: Number(b.dataset.pcShift) === 0 ? thisMonth - 1 : st.start + Number(b.dataset.pcShift) });
@@ -9183,7 +9297,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       if (ghost) ghost.remove();
       el.classList.remove('pc-dragging');
       if (!moved) {
-        if (!isChip) location.hash = `#view/${item.id}`;
+        openPanel(item); // a click (not a drag) opens the detail in the floating panel
         return;
       }
       const changes = {};
@@ -12796,6 +12910,10 @@ async function router() {
   }
   
   const h = location.hash || defaultRoute;
+  if (PM_EMBED && !/^#(view|edit)\//.test(h)) {
+    window.parent.postMessage({ type: 'pm-embed-leave', hash: h }, location.origin);
+    return;
+  }
   if (!location.hash) {
     location.hash = defaultRoute;
     return;
