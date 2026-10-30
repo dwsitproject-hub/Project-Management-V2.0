@@ -632,13 +632,88 @@ router.put('/:id', async (req, res) => {
   }
 });
 
-router.delete('/:id', async (req, res) => {
+// --- Delete a Project / CR (admin only) -------------------------------------------
+// Removes the initiative and everything that belongs to it, so nothing is left orphaned:
+// CR dates, tasks, comments, documents (records + files), notifications, status /
+// milestone history, tags, change history, and meeting notes with their participants,
+// action items, email log and history. Permanent.
+const INITIATIVE_CHILD_TABLES = [
+  ['changeRequests', 'CR dates'],
+  ['tasks', 'tasks'],
+  ['comments', 'comments'],
+  ['documents', 'documents'],
+  ['meetingNotes', 'meeting notes'],
+  ['notifications', 'notifications'],
+  ['changeHistory', 'change history entries'],
+  ['statusHistory', 'status history entries'],
+  ['milestoneHistory', 'milestone history entries'],
+  ['initiativeTags', 'tags'],
+];
+const MEETING_NOTE_CHILD_TABLES = ['meetingNoteParticipants', 'meetingNoteActionItems', 'meetingNoteEmailLog', 'meetingNoteHistory'];
+
+function requireAdminUser(req, res) {
+  if (req.user?.isAdmin) return true;
+  res.status(403).json({ error: 'Only admins can delete projects and CRs' });
+  return false;
+}
+
+/** What deleting this initiative removes, per table (for the confirmation). */
+function deletionImpact(data, id) {
+  const counts = {};
+  for (const [table] of INITIATIVE_CHILD_TABLES) {
+    counts[table] = (data[table] || []).filter((r) => r.initiativeId === id).length;
+  }
+  return counts;
+}
+
+router.get('/:id/delete-preview', async (req, res) => {
+  if (!requireAdminUser(req, res)) return;
   const data = await store.read();
-  const before = data.initiatives.length;
-  data.initiatives = data.initiatives.filter(x => x.id !== req.params.id);
-  data.changeRequests = data.changeRequests.filter(x => x.initiativeId !== req.params.id);
-  await store.write(data);
-  res.json({ ok: true, deleted: before - data.initiatives.length });
+  const initiative = (data.initiatives || []).find((x) => x.id === req.params.id);
+  if (!initiative) return res.status(404).json({ error: 'Not found' });
+  const counts = deletionImpact(data, initiative.id);
+  res.json({
+    id: initiative.id,
+    type: initiative.type,
+    name: initiative.name,
+    ticket: initiative.ticket || null,
+    related: INITIATIVE_CHILD_TABLES
+      .map(([table, label]) => ({ table, label, count: counts[table] }))
+      .filter((r) => r.count > 0),
+  });
+});
+
+router.delete('/:id', async (req, res) => {
+  if (!requireAdminUser(req, res)) return;
+  try {
+    const id = req.params.id;
+    const data = await store.read();
+    const initiative = (data.initiatives || []).find((x) => x.id === id);
+    if (!initiative) return res.status(404).json({ error: 'Not found' });
+
+    const removed = deletionImpact(data, id);
+    const documents = (data.documents || []).filter((d) => d.initiativeId === id);
+    const noteIds = new Set((data.meetingNotes || []).filter((n) => n.initiativeId === id).map((n) => n.id));
+
+    data.initiatives = data.initiatives.filter((x) => x.id !== id);
+    for (const [table] of INITIATIVE_CHILD_TABLES) {
+      if (Array.isArray(data[table])) data[table] = data[table].filter((r) => r.initiativeId !== id);
+    }
+    for (const table of MEETING_NOTE_CHILD_TABLES) {
+      if (Array.isArray(data[table])) data[table] = data[table].filter((r) => !noteIds.has(r.meetingNoteId));
+    }
+    await store.write(data);
+
+    // Files only after the records are gone (a failed write leaves everything intact).
+    await Promise.all(documents.filter((d) => d.filePath).map((d) => fs.unlink(d.filePath).catch(() => {})));
+
+    const summary = Object.entries(removed).filter(([, n]) => n).map(([t, n]) => `${t}=${n}`).join(', ') || 'no related records';
+    console.log(`[DELETE] ${initiative.type} "${initiative.name}" (${id}) by ${req.user.email || req.user.id}: ${summary}`);
+    res.json({ ok: true, deleted: 1, removed });
+  } catch (e) {
+    console.error('[initiatives DELETE] Failed:', e);
+    res.status(500).json({ error: 'Failed to delete' });
+  }
 });
 
 export default router;
