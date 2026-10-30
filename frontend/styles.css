@@ -5709,17 +5709,21 @@ button.btn-fixed.primary:hover {
 .pc-score-cell.pc-current { outline: 2px solid var(--text); outline-offset: -1px; }
 .pc-load-none { background: #f1f3f5; color: #9aa0a6; }
 .pc-load-ok { background: #dcf5e7; color: #116236; }
-.pc-load-busy { background: #fff1d6; color: #8a5a00; }
+.pc-load-busy { background: #fef3c7; color: #854d0e; }
 .pc-load-over { background: #fde0dd; color: #9e2c25; }
 
 .pc-calendar { padding: 16px 0 8px; }
 .pc-cal-head { display: flex; flex-wrap: wrap; gap: 4px 16px; align-items: baseline; padding: 0 20px 12px; }
 .pc-cal-head h3 { margin: 0; }
 .pc-cal-head .muted { font-size: 13px; }
-.pc-scroll { overflow-x: auto; }
+/* Own scroll area so the month row (top) and the name column (left) stay frozen */
+/* Height leaves room for PM's sticky page header (--pm-header-h, measured in JS), so the
+   frozen month row is never tucked under it. */
+.pc-scroll { overflow: auto; max-height: calc(100vh - var(--pm-header-h, 160px) - 24px); min-height: 240px; overscroll-behavior: contain; }
 .pc-table { display: inline-block; min-width: 100%; user-select: none; }
 .pc-row { display: flex; border-top: 1px solid var(--border-light); }
-.pc-row.pc-head { border-top: 0; position: sticky; top: 0; z-index: 3; background: var(--surface); }
+.pc-row.pc-head { border-top: 0; position: sticky; top: 0; z-index: 5; background: var(--surface); box-shadow: 0 1px 0 var(--border-light), 0 4px 6px -4px rgba(0, 0, 0, 0.12); }
+.pc-row.pc-head .pc-label { z-index: 6; }
 .pc-label { flex: 0 0 240px; position: sticky; left: 0; z-index: 2; background: var(--surface); display: flex; gap: 10px; align-items: center; padding: 8px 12px 8px 20px; border-right: 1px solid var(--border-light); font-size: 13px; min-width: 0; }
 .pc-head .pc-label { font-size: 12px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; }
 .pc-label > div { min-width: 0; }
@@ -5859,3 +5863,16 @@ body:not(.pm-is-admin) #initiatives-table .col-actions,
 body:not(.pm-is-admin) #cr-table .col-actions { display: none !important; }
 .pm-delete-sm { padding: 3px 10px; font-size: 12px; line-height: 1.4; border-radius: 6px; border: 1px solid #f1c3bf; background: #fff; color: var(--danger); cursor: pointer; }
 .pm-delete-sm:hover { background: #fdecea; border-color: var(--danger); }
+
+/* Team Member view: cards where the member is IT PIC (not IT PM) have a dashed outline */
+.pc-bar.pc-role-pic { outline: 2px dashed rgba(26, 32, 44, 0.6); outline-offset: -2px; }
+.pc-pic-key { background: #cbd5e0; outline: 2px dashed rgba(26, 32, 44, 0.6); outline-offset: -2px; }
+.pc-label { box-shadow: 4px 0 6px -4px rgba(0, 0, 0, 0.12); }
+
+/* Full page view of the Portfolio Calendar tab */
+.pc-fullpage-btn { margin-left: auto; order: 3; padding: 6px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); color: var(--text); cursor: pointer; font-size: 13px; white-space: nowrap; }
+.pc-fullpage-btn:hover { background: var(--gray-100); }
+.pc-cal-head .muted { order: 2; flex-basis: 100%; }
+body.pc-fullpage-open { overflow: hidden; }
+.pc.pc-fullpage { position: fixed; inset: 0; z-index: 1500; overflow: auto; background: var(--gray-50); padding: 12px 16px 16px; gap: 12px; }
+.pc.pc-fullpage .pc-scroll { max-height: calc(100vh - 130px); }
