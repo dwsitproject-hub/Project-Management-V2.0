@@ -9073,10 +9073,14 @@ function pcWeight(i, memberId) {
   return isPm && isDev ? 1 : 0.5;
 }
 
+// Monthly load colours: green up to 4, amber above 4 up to 5, red above 5.
+const PC_LOAD_OK_MAX = 4;
+const PC_LOAD_BUSY_MAX = 5;
+
 function pcLoadClass(score) {
   if (score <= 0) return 'pc-load-none';
-  if (score <= 1) return 'pc-load-ok';
-  if (score <= 2) return 'pc-load-busy';
+  if (score <= PC_LOAD_OK_MAX) return 'pc-load-ok';
+  if (score <= PC_LOAD_BUSY_MAX) return 'pc-load-busy';
   return 'pc-load-over';
 }
 
@@ -9320,7 +9324,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
           <div class="pc-legend muted">
             <span><i class="pc-key pc-type-project"></i>Project</span><span><i class="pc-key pc-type-cr"></i>CR</span>
             <span>Weighted Score: Project PM + Dev = 1, PM or Dev = 0.5 · CR = 0.25</span>
-            <span><i class="pc-key pc-load-ok"></i>≤1</span><span><i class="pc-key pc-load-busy"></i>≤2</span><span><i class="pc-key pc-load-over"></i>&gt;2</span>
+            <span><i class="pc-key pc-load-ok"></i>≤${PC_LOAD_OK_MAX}</span><span><i class="pc-key pc-load-busy"></i>&gt;${PC_LOAD_OK_MAX} to ${PC_LOAD_BUSY_MAX}</span><span><i class="pc-key pc-load-over"></i>&gt;${PC_LOAD_BUSY_MAX}</span>
           </div>
         </div>
 
