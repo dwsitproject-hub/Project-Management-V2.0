@@ -16,7 +16,7 @@ Content-Type: application/json
   "name": "My Integration",
   "clientId": "my-integration-app",
   "clientSecret": "REPLACE_WITH_STRONG_SECRET",
-  "scopes": "cr:read cr:write",
+  "scopes": "cr:read cr:write project:read project:write",
   "active": true
 }
 
@@ -81,3 +81,60 @@ X-Request-Id: smoke-003b
   "milestone": "Fully Live"
 }
 
+### (Admin) Grant Project scopes to an existing API client (v1.2)
+PATCH http://localhost:3000/api/admin/api-clients/{{api_client_id}}
+Authorization: Bearer {{admin_token}}
+Content-Type: application/json
+
+{
+  "scopes": "cr:read cr:write project:read project:write"
+}
+
+### (Consumer) List Projects — caller chooses the type (v1.2)
+POST http://localhost:3000/api/v1/initiatives/list
+Authorization: Bearer {{access_token}}
+Content-Type: application/json
+X-Request-Id: smoke-004
+
+{
+  "type": "Project",
+  "filters": { "status": ["ON TRACK", "AT RISK", "DELAYED"] },
+  "page": 1,
+  "pageSize": 20
+}
+
+### (Consumer) Update a Project (v1.2)
+PATCH http://localhost:3000/api/v1/initiatives/{{project_initiative_id}}
+Authorization: Bearer {{access_token}}
+Content-Type: application/json
+X-Request-Id: smoke-005
+
+{
+  "type": "Project",
+  "status": "On Track",
+  "milestone": "Testing",
+  "planEndDate": "2026-12-15"
+}
+
+### (Consumer) Update a CR through the generic endpoint (v1.2)
+PATCH http://localhost:3000/api/v1/initiatives/{{cr_initiative_id}}
+Authorization: Bearer {{access_token}}
+Content-Type: application/json
+X-Request-Id: smoke-006
+
+{
+  "type": "CR",
+  "milestone": "UAT",
+  "cr": { "uatStart": "2026-11-03" }
+}
+
+### (Consumer) Wrong type for the id — expect 400 "Not a Project initiative (this id is a CR)"
+PATCH http://localhost:3000/api/v1/initiatives/{{cr_initiative_id}}
+Authorization: Bearer {{access_token}}
+Content-Type: application/json
+X-Request-Id: smoke-006b
+
+{
+  "type": "Project",
+  "status": "On Track"
+}

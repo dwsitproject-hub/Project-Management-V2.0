@@ -1,22 +1,30 @@
 openapi: 3.0.3
 info:
-  title: Project Management Tools API - CR List
-  version: 1.1.0
+  title: Project Management Tools API - CR & Project
+  version: 1.2.0
   description: |
-    OpenAPI for integrating external applications (API Consumers) with the Project Management Tools app (API Provider),
-    focused on the CR List page data (read/list + update).
+    OpenAPI for integrating external applications (API Consumers) with the Project Management Tools app (API Provider):
+    list and partial update of initiatives.
+
+    **v1.2:** new `/api/v1/initiatives/*` endpoints where the caller chooses the initiative `type`
+    (`CR` or `Project`). The CR-only `/api/v1/crs/*` endpoints (v1.1) are unchanged and remain supported.
+    New scopes `project:read` / `project:write`. Invalid/expired tokens return 401; a temporary
+    server-side failure returns 503.
 
     **CR milestone phases (v1.1):** `Live` was split into `Live (Warranty Period)` and `Fully Live`.
-    Legacy `Live` is accepted on PATCH and normalized to `Live (Warranty Period)`.
-    When `status` is `Live` and `milestone` is `Fully Live`, `endDate` (Actual End Date) is required.
+    Legacy `Live` is accepted on PATCH and normalized to `Live (Warranty Period)` (CR and Project).
+    For CRs, when `status` is `Live` and `milestone` is `Fully Live`, `endDate` (Actual End Date) is required.
 servers:
-  - url: http://localhost:3000
-    description: Backend API (local)
-  - url: http://localhost:8080
-    description: Frontend proxy (local dev)
+  - url: https://pm.energi-up.com
+    description: Production
+  - url: http://test-pm.kpndomain.com
+    description: Staging
 tags:
   - name: Auth
+  - name: Initiatives
+    description: CR or Project, chosen with `type` (v1.2)
   - name: CRs
+    description: CR-only endpoints (v1.1, unchanged)
 security:
   - bearerAuth: []
 paths:
@@ -25,8 +33,9 @@ paths:
       tags: [Auth]
       summary: Client credentials token (API Consumer)
       description: |
-        Exchange `clientId` and `clientSecret` for a short-lived JWT access token.
-        Use the returned token in `Authorization: Bearer <token>`.
+        Exchange `clientId` and `clientSecret` for a JWT access token valid for 30 minutes.
+        There is no refresh token: request a new token before it expires (or after a 401).
+        `clientId` is matched case-insensitively. The token carries the client's scopes at issue time.
       security: []
       requestBody:
         required: true
@@ -49,7 +58,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [access_token, token_type, expires_in]
+                required: [access_token, token_type, expires_in, scope]
                 properties:
                   access_token:
                     type: string
@@ -61,21 +70,102 @@ paths:
                     example: 1800
                   scope:
                     type: string
-                    example: cr:read cr:write
+                    example: cr:read cr:write project:read project:write
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
-        "429":
-          $ref: "#/components/responses/TooManyRequests"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /api/v1/initiatives/list:
+    post:
+      tags: [Initiatives]
+      summary: List CRs or Projects (filters + pagination)
+      description: |
+        Returns initiatives of the requested `type`. Requires scope `cr:read` for `type=CR`,
+        `project:read` for `type=Project`. CR items include the nested `cr` dates object; Project items do not.
+      parameters:
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InitiativeListRequest"
+      responses:
+        "200":
+          description: Paginated list
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/XRequestId" }
+            X-Response-Time-Ms: { $ref: "#/components/headers/XResponseTimeMs" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InitiativeListResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
+
+  /api/v1/initiatives/{id}:
+    patch:
+      tags: [Initiatives]
+      summary: Update a CR or Project (partial update)
+      description: |
+        Only properties present in the body are updated. `type` is required and must match the stored
+        initiative (400 otherwise), so a CR id can't be updated as a Project or the reverse.
+        Requires scope `cr:write` for `type=CR`, `project:write` for `type=Project`.
+
+        - `milestone` is validated against the type's list (`CrMilestonePhase` or `ProjectMilestone`).
+        - CR only: when the resulting `status` is `Live` and `milestone` is `Fully Live`, `endDate` must be non-empty.
+        - CR only: nested `cr` dates. Sending `cr` for a Project returns 400.
+      parameters:
+        - $ref: "#/components/parameters/InitiativeId"
+        - $ref: "#/components/parameters/XRequestId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InitiativeUpdateRequest"
+      responses:
+        "200":
+          description: Update successful
+          headers:
+            X-Request-Id: { $ref: "#/components/headers/XRequestId" }
+            X-Response-Time-Ms: { $ref: "#/components/headers/XResponseTimeMs" }
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UpdateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
+        "504":
+          $ref: "#/components/responses/GatewayTimeout"
 
   /api/v1/crs/list:
     post:
       tags: [CRs]
-      summary: CR List (filters + pagination)
+      summary: CR List (filters + pagination) — CR only
       description: |
-        Returns CR list data used by the CR List page.
-        The API Provider enforces a 5 second processing timeout and may return 504 if exceeded.
+        Same as `/api/v1/initiatives/list` with `type` fixed to `CR` (no `type` field needed). Scope `cr:read`.
       parameters:
         - $ref: "#/components/parameters/XRequestId"
       requestBody:
@@ -88,38 +178,30 @@ paths:
         "200":
           description: Paginated CR list
           headers:
-            X-Request-Id:
-              schema: { type: string }
-            X-Response-Time-Ms:
-              schema: { type: integer }
+            X-Request-Id: { $ref: "#/components/headers/XRequestId" }
+            X-Response-Time-Ms: { $ref: "#/components/headers/XResponseTimeMs" }
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/CrListResponse"
-        "400":
-          $ref: "#/components/responses/BadRequest"
+                $ref: "#/components/schemas/InitiativeListResponse"
         "401":
           $ref: "#/components/responses/Unauthorized"
         "403":
           $ref: "#/components/responses/Forbidden"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
 
   /api/v1/crs/{id}:
     patch:
       tags: [CRs]
-      summary: Update CR (partial update)
+      summary: Update CR (partial update) — CR only
       description: |
-        Update CR fields needed to keep CR List data in sync from external systems.
-        Only supports `type=CR` initiatives.
-
-        **Milestone validation:** `milestone` must be a valid CR phase (see `CrMilestonePhase` schema).
-        Legacy value `Live` is accepted and stored as `Live (Warranty Period)`.
-
-        **Business rule:** When resulting `status` is `Live` and `milestone` is `Fully Live`,
-        `endDate` (Actual End Date) must be non-empty or the request returns **400**.
+        Same as `PATCH /api/v1/initiatives/{id}` with `type` fixed to `CR` (no `type` field needed). Scope `cr:write`.
+        Returns 400 `Not a CR initiative …` if the id belongs to a Project.
       parameters:
-        - $ref: "#/components/parameters/CrId"
+        - $ref: "#/components/parameters/InitiativeId"
         - $ref: "#/components/parameters/XRequestId"
       requestBody:
         required: true
@@ -131,17 +213,12 @@ paths:
         "200":
           description: Update successful
           headers:
-            X-Request-Id:
-              schema: { type: string }
+            X-Request-Id: { $ref: "#/components/headers/XRequestId" }
+            X-Response-Time-Ms: { $ref: "#/components/headers/XResponseTimeMs" }
           content:
             application/json:
               schema:
-                type: object
-                required: [ok]
-                properties:
-                  ok:
-                    type: boolean
-                    example: true
+                $ref: "#/components/schemas/UpdateResponse"
         "400":
           $ref: "#/components/responses/BadRequest"
         "401":
@@ -150,6 +227,10 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+        "413":
+          $ref: "#/components/responses/PayloadTooLarge"
+        "503":
+          $ref: "#/components/responses/ServiceUnavailable"
         "504":
           $ref: "#/components/responses/GatewayTimeout"
 
@@ -161,31 +242,40 @@ components:
       bearerFormat: JWT
 
   parameters:
-    CrId:
+    InitiativeId:
       name: id
       in: path
       required: true
       schema: { type: string }
+      description: Initiative UUID
     XRequestId:
       name: X-Request-Id
       in: header
       required: false
+      schema: { type: string, maxLength: 128 }
+      description: Optional correlation id provided by the API Consumer; echoed on the response.
+
+  headers:
+    XRequestId:
+      description: Echo of the request's X-Request-Id (when provided)
       schema: { type: string }
-      description: Optional request correlation id provided by API Consumer.
+    XResponseTimeMs:
+      description: Server processing time in milliseconds
+      schema: { type: integer }
 
   responses:
     BadRequest:
-      description: Bad request
+      description: Bad request (missing/invalid type, invalid milestone, business rule, type mismatch)
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
     Unauthorized:
-      description: Unauthorized (missing/invalid token)
+      description: Missing, invalid or expired token; or API client not found/inactive
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
     Forbidden:
-      description: Forbidden (insufficient scope/permissions)
+      description: Insufficient scope for the initiative type
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -194,13 +284,17 @@ components:
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
-    TooManyRequests:
-      description: Too many requests
+    PayloadTooLarge:
+      description: Request body larger than 1 MB
+    ServiceUnavailable:
+      description: Temporary server-side failure (e.g. database unavailable). Retry with backoff.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
     GatewayTimeout:
-      description: Processing exceeded 5 seconds
+      description: |
+        Processing exceeded 5 seconds. The work is not cancelled: a PATCH may still have been applied.
+        PATCH is idempotent, so it is safe to retry, or re-read with list first.
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -217,54 +311,65 @@ components:
       properties:
         error:
           type: string
-        details:
-          oneOf:
-            - type: string
-            - type: object
+
+    InitiativeType:
+      type: string
+      enum: [CR, Project]
+      description: Matched case-insensitively (`cr`, `project` are accepted).
+
+    UpdateResponse:
+      type: object
+      required: [ok]
+      properties:
+        ok: { type: boolean, example: true }
+        id: { type: string }
+        type: { $ref: "#/components/schemas/InitiativeType" }
+
+    ListFilters:
+      type: object
+      properties:
+        status:
+          type: array
+          items: { type: string }
+          description: Matched case-insensitively (trimmed, upper-cased).
+          example: [ON TRACK, AT RISK, DELAYED]
+        priority:
+          type: array
+          items: { type: string }
+          example: [P0, P1]
+        milestone:
+          type: array
+          description: |
+            Exact label for the type (`CrMilestonePhase` or `ProjectMilestone`).
+            `Live (Warranty Period)` also matches legacy `Live`.
+          items: { type: string }
+        departmentId:
+          type: array
+          items: { type: string }
+        itPicId:
+          type: array
+          items: { type: string }
+        itPmId:
+          type: array
+          items: { type: string }
+        businessOwnerId:
+          type: array
+          items: { type: string }
+        systemImpactedId:
+          type: array
+          items: { type: string }
+          description: Master DWS Application IDs (any-of match). Alias `systemImpactedIds`.
+        active:
+          type: boolean
+          description: When true, excludes `Not Started` only (Live, On Hold and Cancelled are kept).
 
     CrListRequest:
       type: object
       properties:
         q:
           type: string
-          description: Text search in name/description/ticket
-        filters:
-          type: object
-          properties:
-            status:
-              type: array
-              items: { type: string }
-              example: [LIVE, DELAYED]
-            priority:
-              type: array
-              items: { type: string }
-              example: [P0, P1]
-            milestone:
-              type: array
-              description: |
-                Filter by CR milestone phase (exact match after normalization).
-                Filter value `Live` matches stored `Live (Warranty Period)` and legacy `Live`.
-              items:
-                $ref: "#/components/schemas/CrMilestonePhase"
-            departmentId:
-              type: array
-              items: { type: string }
-            itPicId:
-              type: array
-              items: { type: string }
-            itPmId:
-              type: array
-              items: { type: string }
-            businessOwnerId:
-              type: array
-              items: { type: string }
-            systemImpactedId:
-              type: array
-              items: { type: string }
-              description: Master DWS Application IDs (any-of match)
-            active:
-              type: boolean
-              description: When true, filters out NOT STARTED
+          description: Case-insensitive text search in name/description/ticket
+        filters: { $ref: "#/components/schemas/ListFilters" }
         page:
           type: integer
           minimum: 1
@@ -280,17 +385,27 @@ components:
             field:
               type: string
               example: updatedAt
+              description: Any item property; compared as text (ISO dates sort correctly).
             direction:
               type: string
               enum: [asc, desc]
               default: desc
 
-    CrListItem:
+    InitiativeListRequest:
+      allOf:
+        - $ref: "#/components/schemas/CrListRequest"
+        - type: object
+          required: [type]
+          properties:
+            type: { $ref: "#/components/schemas/InitiativeType" }
+
+    InitiativeItem:
       type: object
+      description: Unknown/new properties may be added over time; consumers should ignore them.
       required: [id, type, name]
       properties:
         id: { type: string }
-        type: { type: string, enum: [CR] }
+        type: { $ref: "#/components/schemas/InitiativeType" }
         name: { type: string }
         ticket: { type: string, nullable: true }
         description: { type: string, nullable: true }
@@ -314,10 +429,14 @@ components:
           items: { type: string }
         status: { type: string, nullable: true }
         milestone:
-          allOf:
-            - $ref: "#/components/schemas/CrMilestonePhase"
+          type: string
           nullable: true
-          description: Canonical label returned in list responses (legacy `Live` normalized).
+          description: Label for the type; legacy `Live` is returned as `Live (Warranty Period)`.
+        crMilestonePhase:
+          type: string
+          nullable: true
+          deprecated: true
+          description: Legacy column, normally null. Use `milestone`.
         startDate: { type: string, nullable: true }
         endDate: { type: string, nullable: true }
         planStartDate: { type: string, nullable: true }
@@ -327,33 +446,47 @@ components:
         createdAt: { type: string, nullable: true }
         updatedAt: { type: string, nullable: true }
         cr:
-          type: object
+          description: CR items only (absent for Projects). Null when the CR has no dates row.
+          allOf:
+            - $ref: "#/components/schemas/CrDates"
           nullable: true
-          properties:
-            initiativeId: { type: string }
-            crSubmissionStart: { type: string, nullable: true }
-            crSubmissionEnd: { type: string, nullable: true }
-            developmentStart: { type: string, nullable: true }
-            developmentEnd: { type: string, nullable: true }
-            sitStart: { type: string, nullable: true }
-            sitEnd: { type: string, nullable: true }
-            uatStart: { type: string, nullable: true }
-            uatEnd: { type: string, nullable: true }
-            liveDate: { type: string, nullable: true }
 
-    CrListResponse:
+    CrDates:
+      type: object
+      properties:
+        initiativeId: { type: string }
+        crSubmissionStart: { type: string, nullable: true }
+        crSubmissionEnd: { type: string, nullable: true }
+        developmentStart: { type: string, nullable: true }
+        developmentEnd: { type: string, nullable: true }
+        sitStart: { type: string, nullable: true }
+        sitEnd: { type: string, nullable: true }
+        uatStart: { type: string, nullable: true }
+        uatEnd: { type: string, nullable: true }
+        liveDate: { type: string, nullable: true }
+        crSection1Start: { type: string, nullable: true, readOnly: true, description: Legacy, read-only }
+        crSection1End: { type: string, nullable: true, readOnly: true, description: Legacy, read-only }
+        crSection2Start: { type: string, nullable: true, readOnly: true, description: Legacy, read-only }
+        crSection2End: { type: string, nullable: true, readOnly: true, description: Legacy, read-only }
+        crSection3Start: { type: string, nullable: true, readOnly: true, description: Legacy, read-only }
+        crSection3End: { type: string, nullable: true, readOnly: true, description: Legacy, read-only }
+        liveStart: { type: string, nullable: true, readOnly: true, description: Legacy, read-only }
+        liveEnd: { type: string, nullable: true, readOnly: true, description: Legacy, read-only }
+
+    InitiativeListResponse:
       type: object
       required: [items, page, pageSize, total]
       properties:
         items:
           type: array
-          items: { $ref: "#/components/schemas/CrListItem" }
+          items: { $ref: "#/components/schemas/InitiativeItem" }
         page: { type: integer }
         pageSize: { type: integer }
         total: { type: integer }
 
     CrUpdateRequest:
       type: object
+      description: Unknown top-level keys are ignored (not rejected).
       properties:
         ticket: { type: string, nullable: true }
         name: { type: string }
@@ -361,7 +494,7 @@ components:
         businessImpact: { type: string, nullable: true }
         priority:
           type: string
-          enum: [P0, P1, P2]
+          description: Recommended P0, P1, P2 (stored as sent).
         businessOwnerId: { type: string, nullable: true }
         businessUserIds:
           type: array
@@ -378,9 +511,13 @@ components:
         systemImpactedIds:
           type: array
           items: { type: string }
-        status: { type: string }
+        status:
+          type: string
+          description: Recommended exact values from the status list (stored as sent).
         milestone:
-          $ref: "#/components/schemas/CrMilestonePhase"
+          type: string
+          nullable: true
+          description: CrMilestonePhase for CR, ProjectMilestone for Project. Null or "" clears it.
         startDate: { type: string, nullable: true }
         endDate: { type: string, nullable: true }
         planStartDate: { type: string, nullable: true }
@@ -389,6 +526,7 @@ components:
         documentationLink: { type: string, nullable: true }
         cr:
           type: object
+          description: CR only.
           properties:
             crSubmissionStart: { type: string, nullable: true }
             crSubmissionEnd: { type: string, nullable: true }
@@ -399,13 +537,18 @@ components:
             uatStart: { type: string, nullable: true }
             uatEnd: { type: string, nullable: true }
             liveDate: { type: string, nullable: true }
-      additionalProperties: false
+
+    InitiativeUpdateRequest:
+      allOf:
+        - $ref: "#/components/schemas/CrUpdateRequest"
+        - type: object
+          required: [type]
+          properties:
+            type: { $ref: "#/components/schemas/InitiativeType" }
 
     CrMilestonePhase:
       type: string
-      description: |
-        CR initiative milestone phase (stored in `milestone` for type=CR).
-        Use exact labels. Legacy `Live` is accepted on PATCH only.
+      description: CR milestone phase (type=CR). Legacy `Live` is accepted on PATCH only.
       enum:
         - User Initiate
         - CR Created
@@ -422,3 +565,18 @@ components:
         - Fully Live
         - Live
       example: SIT
+
+    ProjectMilestone:
+      type: string
+      description: Project milestone (type=Project). Legacy `Live` is accepted on PATCH only.
+      enum:
+        - Preparation
+        - Business Requirement
+        - Tech Assessment
+        - Planning
+        - Development
+        - Testing
+        - Live (Warranty Period)
+        - Fully Live
+        - Live
+      example: Development
