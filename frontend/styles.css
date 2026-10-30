@@ -5844,3 +5844,18 @@ body.pc-panel-open { overflow: hidden; }
 .pc-tail-key { background: #a0aec0 repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.55) 0 3px, transparent 3px 6px); }
 .pc-legend-sep { opacity: 0.5; }
 .pc-st-ok .pc-bar-text, .pc-st-late .pc-bar-text, .pc-st-live .pc-bar-text { text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35); }
+
+/* Project / CR List: keep View / Edit / Delete visible at the right edge while scrolling */
+#initiatives-table .col-actions,
+#cr-table .col-actions { position: sticky; right: 0; z-index: 2; background: var(--surface); box-shadow: -6px 0 8px -6px rgba(0, 0, 0, 0.18); }
+#initiatives-table thead .col-actions,
+#cr-table thead .col-actions { z-index: 4; background: var(--gray-100); }
+#initiatives-table tbody tr:hover .col-actions,
+#cr-table tbody tr:hover .col-actions { background: var(--gray-50); }
+#initiatives-table .col-actions,
+#cr-table .col-actions { width: 84px; min-width: 84px; padding-left: 6px; padding-right: 6px; }
+/* Admin-only column: hidden for everyone else */
+body:not(.pm-is-admin) #initiatives-table .col-actions,
+body:not(.pm-is-admin) #cr-table .col-actions { display: none !important; }
+.pm-delete-sm { padding: 3px 10px; font-size: 12px; line-height: 1.4; border-radius: 6px; border: 1px solid #f1c3bf; background: #fff; color: var(--danger); cursor: pointer; }
+.pm-delete-sm:hover { background: #fdecea; border-color: var(--danger); }

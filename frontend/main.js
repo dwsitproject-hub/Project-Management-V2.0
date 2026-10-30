@@ -594,41 +594,41 @@ function wireListTableRowActions(viewType) {
     ? softRefreshListTable('crlist')
     : softRefreshListTable('list'));
 
+  // Admin only (the button is only rendered for admins; the server enforces it too).
+  // Deleting is permanent and also removes the item's tasks, documents, comments, etc.
   document.querySelectorAll('button.delete').forEach((btn) => {
     btn.onclick = async () => {
-      const ok = await confirmDialog(isCR ? 'Delete this CR?' : 'Delete this initiative?', {
-        title: isCR ? 'Delete CR' : 'Delete initiative',
-        confirmText: 'Delete',
+      const kind = isCR ? 'CR' : 'Project';
+      let preview;
+      try {
+        preview = await fetchJSON(`/api/initiatives/${btn.dataset.id}/delete-preview`);
+      } catch (e) {
+        if (!(e instanceof AuthRedirectError)) notify(`Cannot delete this ${kind}: ${e.message}`, 'error');
+        return;
+      }
+      const label = `${preview.ticket ? `${preview.ticket} — ` : ''}${preview.name}`;
+      const related = preview.related.length
+        ? `\n\nThis also deletes:\n${preview.related.map((r) => `• ${r.count} ${r.label}`).join('\n')}`
+        : '';
+      const ok = await confirmDialog(`${label}${related}\n\nThis cannot be undone.`, {
+        title: `Delete ${preview.type === 'CR' ? 'CR' : 'Project'} permanently?`,
+        confirmText: 'Delete permanently',
         danger: true,
       });
       if (!ok) return;
+      setButtonLoading(btn, true, 'Deleting…');
       try {
-        const result = await fetchJSON(`/api/initiatives/${btn.dataset.id}`, { method: 'DELETE' });
-        if (result?.trashId) {
-          const undo = await confirmDialog(isCR ? 'CR deleted. Undo?' : 'Initiative deleted. Undo?', {
-            title: 'Undo delete',
-            confirmText: 'Undo',
-          });
-          if (undo) {
-            await fetchJSON(`/api/initiatives/restore/${result.trashId}`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({}),
-            });
-          }
-        }
+        await fetchJSON(`/api/initiatives/${btn.dataset.id}`, { method: 'DELETE' });
+        notify(`Deleted: ${preview.name}`, 'success');
+        hubTrack('initiative_deleted', { type: preview.type });
         refresh();
       } catch (e) {
-        notify(`Failed to delete ${isCR ? 'CR' : 'initiative'}: ` + (e.message || String(e)));
+        setButtonLoading(btn, false);
+        if (!(e instanceof AuthRedirectError)) notify(`Failed to delete ${kind}: ${e.message || String(e)}`, 'error');
       }
     };
   });
-  document.querySelectorAll('button.view').forEach((btn) => {
-    btn.onclick = () => { location.hash = `#view/${btn.dataset.id}`; };
-  });
-  document.querySelectorAll('button.edit').forEach((btn) => {
-    btn.onclick = () => { location.hash = `#edit/${btn.dataset.id}`; };
-  });
+  // (No View / Edit buttons: the item's name opens it.)
 }
 
 function wireListSearchControls(viewType) {
@@ -1036,7 +1036,8 @@ let CURRENT_ACCESS = null;
 function computeAccessRules(user, profile) {
   if (!user) return null;
 
-  const isAdmin = !!user.isAdmin;
+  // Prefer the profile (current database value); the login token's flag can be hours old.
+  const isAdmin = profile && typeof profile.isAdmin === 'boolean' ? profile.isAdmin : !!user.isAdmin;
   const email = (user.email || profile?.email || '').toLowerCase();
   const isEnergiDomain = email.endsWith('@energi-up.com');
   const type = profile?.type || null;
@@ -1146,6 +1147,8 @@ async function getUserAccess() {
     hubIdentify({ hubUserId: profile?.hubUserId, email: profile?.email || user.email });
     const access = computeAccessRules(user, profile);
     CURRENT_ACCESS = access;
+    // CSS uses this to show admin-only list columns (e.g. Delete).
+    document.body.classList.toggle('pm-is-admin', !!access?.isAdmin);
     return access;
   })();
   accessCache = { promise: p, at: Date.now() };
@@ -1306,7 +1309,7 @@ const COLUMN_WIDTH_DEFAULTS = {
   'col-doc': 160,
   'col-doc-link': 200,
   'col-timeline': 280,
-  'col-actions': 140,
+  'col-actions': 84, // small Delete button (admins only)
 };
 
 function getColumnMinWidth(colClass) {
@@ -1343,6 +1346,7 @@ function applyColumnWidths(viewType, tableSelector) {
     const minW = getColumnMinWidth(col);
     let w = Number(saved[col]);
     if (!Number.isFinite(w) || w < minW) w = minW;
+    if (col === 'col-actions') w = minW; // fixed: just the small Delete button (old saved widths ignored)
     w = Math.min(560, w);
     th.style.width = `${w}px`;
     th.style.minWidth = `${w}px`;
@@ -1417,6 +1421,7 @@ function resolveColumnVisibility(viewType) {
 function clearUser() {
   currentUser = null;
   CURRENT_ACCESS = null;
+  document.body.classList.remove('pm-is-admin');
   LOOKUPS = { users: [], departments: [], dwsApplications: [] };
   setToken(null);
 }
@@ -2340,56 +2345,8 @@ function initiativeRow(i, crData = null, colVisibility = null) {
   // CR Timeline display - removed (CR dates no longer used)
   const timelineCell = '';
 
-  // Helper to decide if current user is part of the initiative team
-  const isUserInInitiativeTeam = (initiative, userId) => {
-    if (!initiative || !userId) return false;
-    const normalizeIds = (val) => {
-      if (!val) return [];
-      if (Array.isArray(val)) return val.map(v => String(v).trim()).filter(Boolean);
-      if (typeof val === 'string') {
-        return val.split(',').map(v => v.trim()).filter(Boolean);
-      }
-      return [];
-    };
-    const candidateId = String(userId);
-    const check = (id) => id && String(id) === candidateId;
-
-    if (check(initiative.itPicId)) return true;
-    if (normalizeIds(initiative.itPicIds).some(check)) return true;
-    if (check(initiative.itPmId)) return true;
-    if (normalizeIds(initiative.itPmIds).some(check)) return true;
-    if (normalizeIds(initiative.itManagerIds).some(check)) return true;
-    if (check(initiative.businessOwnerId)) return true;
-    if (normalizeIds(initiative.businessUserIds).some(check)) return true;
-    return false;
-  };
-
-  const canEditInitiative = (initiative) => {
-    const user = currentUser;
-    const access = CURRENT_ACCESS;
-    if (!user || !access) return false;
-    if (access.isAdmin) return true;
-
-    const type = initiative.type || '';
-    // All authenticated users with access rules can edit CRs
-    if (type === 'CR') {
-      return access.canEditCR !== false;
-    }
-
-    if (type === 'Project') {
-      if (!access.canViewProjectList) return false;
-      if (access.canEditAnyProject) return true;
-      if (access.restrictProjectEditToOwnTeamOnly) {
-        return isUserInInitiativeTeam(initiative, user.id);
-      }
-      return false;
-    }
-
-    return false;
-  };
-
-  const canEdit = canEditInitiative(i);
-  const canDelete = !!currentUser?.isAdmin;
+  // Admin per the current profile (see computeAccessRules); the server checks it too.
+  const canDelete = !!CURRENT_ACCESS?.isAdmin;
 
   // Expand/collapse support for long text cells (Description + Remark)
   const makeExpandable = (text, maxLen, colClass) => {
@@ -2433,9 +2390,7 @@ function initiativeRow(i, crData = null, colVisibility = null) {
     <td class="col-doc" style="display: ${colVisibility['col-doc'] !== false ? 'table-cell' : 'none'}" title="${doc}">${doc.slice(0, 40)}${doc.length > 40 ? '...' : ''}</td>
     ${timelineCell}
     <td class="col-actions">
-      <button data-id="${i.id}" class="view" style="margin-right: 8px;">View</button>
-      ${canEdit ? `<button data-id="${i.id}" class="edit" style="margin-right: 8px; color: var(--brand);">Edit</button>` : ''}
-      ${canDelete ? `<button data-id="${i.id}" class="delete" style="color: var(--danger);">Delete</button>` : ''}
+      ${canDelete ? `<button type="button" data-id="${i.id}" class="delete pm-delete-sm" title="Delete permanently">Delete</button>` : ''}
     </td>
   </tr>`;
 }
