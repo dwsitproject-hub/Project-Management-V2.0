@@ -6,28 +6,28 @@ export function requestTimeout(ms) {
       res.setHeader('X-Request-Id', requestId);
     }
 
-    let finished = false;
+    // Stamp the elapsed time just before the headers go out. (Setting it on 'finish'
+    // is too late: headers are already sent, and the throw there crashed the process.)
+    const writeHead = res.writeHead;
+    res.writeHead = function patchedWriteHead(...args) {
+      if (!res.headersSent) res.setHeader('X-Response-Time-Ms', String(Date.now() - start));
+      return writeHead.apply(this, args);
+    };
+
     const timer = setTimeout(() => {
-      if (finished) return;
-      finished = true;
+      if (res.headersSent) return;
       res.status(504).json({ error: `Request exceeded ${ms}ms timeout` });
+      // The route handler can't be cancelled and may still finish its work (e.g. a
+      // PATCH may still be saved). Make its late reply a no-op instead of an error.
+      res.status = () => res;
+      res.json = () => res;
+      res.send = () => res;
     }, ms);
 
-    res.on('finish', () => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-      const elapsed = Date.now() - start;
-      res.setHeader('X-Response-Time-Ms', String(elapsed));
-    });
-
-    res.on('close', () => {
-      if (finished) return;
-      finished = true;
-      clearTimeout(timer);
-    });
+    const done = () => clearTimeout(timer);
+    res.on('finish', done);
+    res.on('close', done);
 
     next();
   };
 }
-

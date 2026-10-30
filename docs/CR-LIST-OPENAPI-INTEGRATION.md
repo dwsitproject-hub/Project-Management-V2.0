@@ -1,341 +1,203 @@
-# CR List OpenAPI — Integration Guide
+# PM Tools OpenAPI (CR & Project) — Integration Guide
 
-This application is the **API Provider**. External systems integrating with it are **API Consumers**.
+This application is the API Provider. External systems integrating with it are API Consumers.
 
-The integration surface is focused on **CR (Change Request)** data aligned with the **CR List** page: read/list and partial update.
+The integration surface covers initiative data — **Change Requests (CR)** and **Projects** — as shown on the CR List and Project List pages: read/list and partial update. The API Consumer chooses which initiative type it reads or updates.
 
-**Spec version 1.1** — CR milestone phases now include `Live (Warranty Period)` and `Fully Live` (replacing the former single `Live` phase). See [CR milestone phase values](#cr-milestone-phase-values).
+**Specification Update:** Spec version 1.2 (28 Oct 2026) — new `/api/v1/initiatives` endpoints where the caller chooses the initiative type (`CR` or `Project`), new scopes `project:read` / `project:write`, API-client management for admins, 401 for expired tokens, and a stability fix for all `/api/v1` calls. The CR-only `/api/v1/crs` endpoints are unchanged. See the Changelog at the end.
+
+**Previous update:** Spec version 1.1 — milestone `Live` split into `Live (Warranty Period)` and `Fully Live`.
 
 | Resource | Location |
-|----------|----------|
-| OpenAPI 3.0 spec | [`docs/openapi-cr-list.yaml`](openapi-cr-list.yaml) |
-| Route implementation | [`backend/routes/api-v1-crs.js`](../backend/routes/api-v1-crs.js) |
-| Client token | [`backend/routes/auth.js`](../backend/routes/auth.js) (`POST /api/auth/client-token`) |
-| API client admin | [`backend/routes/admin.js`](../backend/routes/admin.js) (`POST /api/admin/api-clients`) |
-| Smoke tests | [`tests/cr-list-openapi-smoke.http`](../tests/cr-list-openapi-smoke.http) |
-
----
+|---|---|
+| OpenAPI 3.0 spec (v1.2.0) | `docs/openapi-cr-list.yaml` |
+| Route implementation | `backend/routes/api-v1-initiatives.js` |
+| Authentication and scopes | `backend/middleware/auth.js` |
+| Timeout and response headers | `backend/middleware/timeout.js` |
+| Client token | `backend/routes/auth.js` (POST /api/auth/client-token) |
+| API client management (admin) | `backend/routes/admin.js` (/api/admin/api-clients) |
+| Smoke tests | `tests/cr-list-openapi-smoke.http` |
 
 ## Base URL
 
 | Environment | Base URL |
-|-------------|----------|
-| Local backend | `http://localhost:3000` |
-| Local via frontend proxy | `http://localhost:8080` |
+|---|---|
+| Staging | http://test-pm.kpndomain.com/ |
+| Production | https://pm.energi-up.com/ |
 
-All paths below are relative to the base URL.
+All paths below are relative to the base URL. Production is HTTPS only. Staging is HTTP, so use separate API clients (and secrets) per environment and never reuse a production secret on staging.
 
----
+## Endpoints at a Glance
 
-## Authentication overview
+| Method | Path | Scope | Purpose |
+|---|---|---|---|
+| POST | /api/auth/client-token | — | Get an access token |
+| POST | /api/v1/initiatives/list | cr:read (type CR)<br>project:read (type Project) | List CRs or Projects (v1.2) |
+| PATCH | /api/v1/initiatives/{id} | cr:write (type CR)<br>project:write (type Project) | Update a CR or a Project (v1.2) |
+| POST | /api/v1/crs/list | cr:read | List CRs — CR only (v1.1, unchanged) |
+| PATCH | /api/v1/crs/{id} | cr:write | Update a CR — CR only (v1.1, unchanged) |
 
-1. **Provider (admin)** creates an API client with `clientId`, `clientSecret`, and scopes.
-2. **Consumer** exchanges credentials for a JWT at `POST /api/auth/client-token`.
-3. **Consumer** calls CR APIs with `Authorization: Bearer <access_token>`.
+New integrations should use `/api/v1/initiatives`. Existing integrations on `/api/v1/crs` keep working without changes; it behaves exactly like `/api/v1/initiatives` with `type` fixed to `CR`.
+
+## Choosing the Initiative Type
+
+- On `/api/v1/initiatives/list` and `PATCH /api/v1/initiatives/{id}` the request body must contain `"type": "CR"` or `"type": "Project"` (case-insensitive). Missing or other values → 400 `type is required: "CR" or "Project"`.
+- On PATCH, `type` must match the stored initiative. This prevents updating a Project when a CR was meant (or the reverse). Mismatch → 400, e.g. `Not a Project initiative (this id is a CR)`.
+- The required scope depends on the type (see Security Scopes).
+
+| Aspect | CR | Project |
+|---|---|---|
+| Read / write scope | cr:read / cr:write | project:read / project:write |
+| Milestone values | CR milestone phases (e.g. SIT, UAT) | Project milestones (e.g. Planning, Testing) |
+| endDate required when status Live + milestone Fully Live | Yes (400 if missing) | No |
+| Nested `cr` dates object | Returned in list; updatable on PATCH | Not returned; sending `cr` → 400 |
+| ticket | Auto-generated for CRs created in PM (CRDDMMYYYYNNN) | Usually empty |
+
+## Authentication Overview
+
+- Provider (PM admin) creates an API client with clientId, clientSecret and scopes (see Provider: Managing API Clients). There is no screen for this in PM yet; it is done through the admin API.
+- Consumer exchanges its credentials for a JWT at `POST /api/auth/client-token`.
+- Consumer calls the APIs with `Authorization: Bearer <access_token>`.
+
+Available Security Scopes:
 
 | Scope | Required for |
-|-------|----------------|
-| `cr:read` | `POST /api/v1/crs/list` |
-| `cr:write` | `PATCH /api/v1/crs/{id}` |
+|---|---|
+| cr:read | POST /api/v1/initiatives/list with type CR; POST /api/v1/crs/list |
+| cr:write | PATCH /api/v1/initiatives/{id} with type CR; PATCH /api/v1/crs/{id} |
+| project:read | POST /api/v1/initiatives/list with type Project (v1.2) |
+| project:write | PATCH /api/v1/initiatives/{id} with type Project (v1.2) |
 
-Default scope string when creating a client: `cr:read cr:write` (space-separated).
+- Default scope string when creating a client: `cr:read cr:write` (space-separated). Project scopes must be granted explicitly, at creation or later. Existing clients keep CR-only access until an admin adds them.
+- Token lifetime: 30 minutes (`expires_in`: 1800 seconds). There is no refresh token; request a new token shortly before expiry, or when a call returns 401.
+- Scopes are copied into the token when it is issued. After an admin changes a client's scopes, request a new token to use them.
+- Deactivating a client blocks its tokens on the next request. Rotating its secret does not revoke tokens already issued; they expire within 30 minutes.
+- Interactive user tokens (normal PM login, including DWS Hub SSO) are also accepted and skip scope checks. Integrations must use client credentials.
 
-Token lifetime: **30 minutes** (`expires_in: 1800` seconds).
+## Provider: Managing API Clients (Admin)
 
-### End-to-end use case diagram (all APIs)
+These endpoints require a PM **admin** user token (from the normal PM login). Client secrets are stored hashed and are never returned.
 
-```mermaid
-usecaseDiagram
-  left to right direction
+| Method / path | Body | Result |
+|---|---|---|
+| POST /api/admin/api-clients | name, clientId, clientSecret (required); scopes, active (optional) | 201 { ok, id }. 400 if a required field is missing; 409 if clientId already exists (case-insensitive). |
+| GET /api/admin/api-clients | — | 200 list of { id, name, clientId, scopes, active, createdAt } |
+| PATCH /api/admin/api-clients/{id} (v1.2) | Any of: scopes, active, name, clientSecret (rotates the secret) | 200 { ok, id, scopes, active }. 400 for an unknown scope or empty secret; 404 unknown id. |
 
-  actor "Admin User" as Admin
-  actor "API Consumer\n(External System)" as Consumer
+### Example — grant Project access to an existing client
 
-  rectangle "Project Management Tools\n(API Provider)" {
-    usecase "UC1\nCreate API Client" as UC1
-    usecase "UC2\nObtain Access Token" as UC2
-    usecase "UC3\nList CRs" as UC3
-    usecase "UC4\nUpdate CR" as UC4
-  }
-
-  Admin --> UC1
-  Consumer --> UC2
-  Consumer --> UC3
-  Consumer --> UC4
-
-  UC2 ..> UC1 : <<include>>\nclient must exist
-  UC3 ..> UC2 : <<include>>\nBearer + cr:read
-  UC4 ..> UC2 : <<include>>\nBearer + cr:write
 ```
+PATCH /api/admin/api-clients/{api_client_id} HTTP/1.1
+Authorization: Bearer <admin token>
+Content-Type: application/json
+
+{
+  "scopes": "cr:read cr:write project:read project:write"
+}
+```
+
+## End-to-End Use Case Flow Steps
 
 | Step | API | Actor | Typical goal |
-|------|-----|-------|----------------|
-| 1 | `POST /api/admin/api-clients` | Admin | Register integration credentials (one-time setup) |
-| 2 | `POST /api/auth/client-token` | API Consumer | Get JWT before each session / on expiry |
-| 3 | `POST /api/v1/crs/list` | API Consumer | Read or sync CR List data |
-| 4 | `PATCH /api/v1/crs/{id}` | API Consumer | Push status, milestone, or dates from external tool |
+|---|---|---|---|
+| 1 | POST /api/auth/client-token | API Consumer | Get a JWT; reuse it until it expires (30 min) |
+| 2 | POST /api/v1/initiatives/list | API Consumer | Read or sync CR or Project data (choose type) |
+| 3 | PATCH /api/v1/initiatives/{id} | API Consumer | Push status, milestone or dates from an external tool |
 
----
-
-## Common headers
+## Common Headers
 
 | Header | Required | Type | Length | Validation |
-|--------|----------|------|--------|------------|
-| `Authorization` | Yes (CR APIs) | string | — | Format: `Bearer <JWT>`. Missing or invalid token → **401**. |
-| `Content-Type` | Yes (bodies) | string | — | Must be `application/json` for POST/PATCH with body. |
-| `X-Request-Id` | No | string | 1–128 recommended | Optional correlation ID. Echoed on response when provided. |
+|---|---|---|---|---|
+| Authorization | Yes (all /api/v1) | string | — | Format: Bearer <JWT>. Missing, invalid or expired → 401. |
+| Content-Type | Yes (bodies) | string | — | application/json for POST/PATCH with a body. |
+| X-Request-Id | No | string | 1–128 recommended | Optional correlation id. Echoed on /api/v1 responses once the token is accepted (not on 401). |
 
-### CR API timeout (Provider)
+## Authentication and Scope Errors (all /api/v1 endpoints)
 
-Routes under `/api/v1/crs/*` use a **5 second** server timeout.
+| Status | Body example | Cause / what to do |
+|---|---|---|
+| 401 | { "error": "Authentication required" } | No Authorization header. |
+| 401 | { "error": "Invalid or expired token" } | Token expired (older than 30 min), malformed or not signed by this environment. Get a new token and retry once. |
+| 401 | { "error": "API client not found or inactive" } | The client was deactivated or removed. Contact the provider. |
+| 403 | { "error": "Insufficient scope" } | Token lacks the scope for the requested type (e.g. project:write). |
+| 503 | { "error": "Service temporarily unavailable. Please try again." } | Temporary provider-side failure (e.g. database). Retry with backoff; the token is still valid. |
 
-| HTTP status | When |
-|-------------|------|
-| **504** | Processing exceeds 5000 ms. Body: `{ "error": "Request exceeded 5000ms timeout" }` |
-| Response header | `X-Response-Time-Ms` — elapsed milliseconds (on successful completion) |
+**Change in v1.2:** an expired or invalid token now returns **401** (previously 403 with the same message).
 
----
+## API Timeout (Provider)
 
-## 1. Create API client (Provider / Admin)
+Routes under `/api/v1/*` use a 5 second server timeout.
 
-Used once per integration. Requires an **admin user** session token (normal login), not a client-credentials token.
+| HTTP Status / Asset | When / Description |
+|---|---|
+| 504 | Processing exceeds 5000 ms. Body: { "error": "Request exceeded 5000ms timeout" } |
+| Response header X-Response-Time-Ms | Elapsed milliseconds, on every /api/v1 response including 504 (fixed in v1.2; earlier versions did not deliver it). |
 
-| | |
-|--|--|
-| **Method / path** | `POST /api/admin/api-clients` |
-| **Auth** | `Authorization: Bearer <admin_user_jwt>` |
+**Important:** a 504 does not cancel the work: a PATCH may still have been saved. PATCH is idempotent (it sets values), so it is safe to resend the same PATCH, or re-read the record with list first.
 
-### Use case diagram
+## Limits and Good Practice
 
-```mermaid
-usecaseDiagram
-  left to right direction
+- Request body: maximum 1 MB (larger → 413).
+- No rate limit is enforced today. Keep to about 5 requests per second, reuse one token for its 30 minutes, and do not request a token per call.
+- `pageSize` is capped at 500. To sync everything, request pages until `page × pageSize ≥ total`.
+- The API allows cross-origin (CORS) calls, but it is meant for server-to-server use: never put a clientSecret or access token in browser code.
+- Ignore unknown response fields; new fields may be added without a version change.
 
-  actor "Admin User" as Admin
+## 1. Obtain Access Token (API Consumer)
 
-  rectangle "POST /api/admin/api-clients" {
-    usecase "Register API integration" as UC_REG
-    usecase "Assign OAuth scopes\n(cr:read, cr:write)" as UC_SCOPE
-    usecase "Store client secret\n(bcrypt hash)" as UC_SECRET
-    usecase "Enable or disable client" as UC_ACTIVE
-  }
+- Method / path: POST /api/auth/client-token
+- Auth: None
 
-  Admin --> UC_REG
-  UC_REG ..> UC_SCOPE : include
-  UC_REG ..> UC_SECRET : include
-  UC_REG ..> UC_ACTIVE : include
+### Request Payload
 
-  note right of UC_REG
-    Success: 201 + client id
-    Duplicate clientId: 409
-  end note
 ```
-
-| Use case | Description |
-|----------|-------------|
-| Register API integration | Admin creates a named integration with unique `clientId`. |
-| Assign scopes | Defines what the consumer may do (`cr:read`, `cr:write`). |
-| Store client secret | Plain secret is hashed; never returned again in API responses. |
-| Enable or disable client | `active: false` blocks token issuance later. |
-
-### Request payload
-
-```json
-{
-  "name": "My Integration",
-  "clientId": "my-integration-app",
-  "clientSecret": "REPLACE_WITH_STRONG_SECRET",
-  "scopes": "cr:read cr:write",
-  "active": true
-}
-```
-
-| Field | Type | Length | Required | Validation |
-|-------|------|--------|----------|------------|
-| `name` | string | 1–255 recommended | Yes | Non-empty display name for the integration. |
-| `clientId` | string | 3–64 recommended | Yes | Unique client identifier; compared case-insensitively. Duplicate → **409** `{ "error": "clientId already exists" }`. |
-| `clientSecret` | string | 16+ recommended | Yes | Plain text secret; stored as bcrypt hash. Shown only at creation time. |
-| `scopes` | string | — | No | Space-separated scopes. Default: `cr:read cr:write`. |
-| `active` | boolean | — | No | Default `true`. If `false`, client-token returns **401**. |
-
-### Success response (`201 Created`)
-
-```json
-{
-  "ok": true,
-  "id": "550e8400-e29b-41d4-a716-446655440000"
-}
-```
-
-| Field | Type | Length | Validation |
-|-------|------|--------|------------|
-| `ok` | boolean | — | Always `true` on success. |
-| `id` | string (UUID) | 36 | Internal API client record ID. |
-
-### Error responses
-
-| Status | Body example | Cause |
-|--------|--------------|-------|
-| 400 | `{ "error": "name, clientId and clientSecret are required" }` | Missing required fields |
-| 401/403 | `{ "error": "..." }` | Not authenticated / not admin |
-| 409 | `{ "error": "clientId already exists" }` | Duplicate `clientId` |
-| 500 | `{ "error": "Internal error" }` | Server error |
-
----
-
-## 2. Obtain access token (API Consumer)
-
-| | |
-|--|--|
-| **Method / path** | `POST /api/auth/client-token` |
-| **Auth** | None |
-
-### Use case diagram
-
-```mermaid
-usecaseDiagram
-  left to right direction
-
-  actor "API Consumer" as Consumer
-
-  rectangle "POST /api/auth/client-token" {
-    usecase "Submit client credentials" as UC_SUBMIT
-    usecase "Validate clientId\nand secret" as UC_VALIDATE
-    usecase "Issue JWT access token" as UC_TOKEN
-    usecase "Return scopes and expiry" as UC_META
-  }
-
-  Consumer --> UC_SUBMIT
-  UC_SUBMIT ..> UC_VALIDATE : include
-  UC_VALIDATE ..> UC_TOKEN : include
-  UC_TOKEN ..> UC_META : include
-
-  note right of UC_VALIDATE
-    Invalid or inactive: 401
-    Missing fields: 400
-    Token TTL: 30 minutes
-  end note
-```
-
-| Use case | Description |
-|----------|-------------|
-| Submit client credentials | Consumer sends `clientId` + `clientSecret` (no user password). |
-| Validate clientId and secret | Provider checks record exists, `active`, and bcrypt secret. |
-| Issue JWT access token | Short-lived Bearer token for CR APIs. |
-| Return scopes and expiry | Consumer knows granted scopes and when to refresh (`expires_in`). |
-
-### Request payload
-
-```json
 {
   "clientId": "my-integration-app",
   "clientSecret": "REPLACE_WITH_STRONG_SECRET"
 }
 ```
 
-| Field | Type | Length | Required | Validation |
-|-------|------|--------|----------|------------|
-| `clientId` | string | 3–64 recommended | Yes | Must match an active API client. |
-| `clientSecret` | string | — | Yes | Must match stored secret (bcrypt verify). |
+### Success Response (200 OK)
 
-### Success response (`200 OK`)
-
-```json
+```
 {
   "access_token": "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...",
   "token_type": "Bearer",
   "expires_in": 1800,
-  "scope": "cr:read cr:write"
+  "scope": "cr:read cr:write project:read project:write"
 }
 ```
 
-| Field | Type | Length | Validation |
-|-------|------|--------|------------|
-| `access_token` | string | — | JWT; use as Bearer token. |
-| `token_type` | string | — | Always `Bearer`. |
-| `expires_in` | integer | — | Seconds until expiry (1800 = 30 min). |
-| `scope` | string | — | Granted scopes from API client record. |
-
-### Error responses
+### Error Responses
 
 | Status | Body example | Cause |
-|--------|--------------|-------|
-| 400 | `{ "error": "clientId and clientSecret are required" }` | Missing fields |
-| 401 | `{ "error": "Invalid client credentials" }` | Unknown client, inactive client, or wrong secret |
-| 500 | `{ "error": "Internal error" }` | Server error |
+|---|---|---|
+| 400 | { "error": "clientId and clientSecret are required" } | Missing fields |
+| 401 | { "error": "Invalid client credentials" } | Unknown client, inactive client, or wrong secret (clientId is matched case-insensitively) |
+| 500 | { "error": "Internal error" } | Server error |
 
----
+## 2. List Initiatives (CR or Project)
 
-## 3. List CRs
+Returns paginated initiatives of the chosen type. CR items include the nested `cr` change-request dates object; Project items do not.
 
-Returns paginated CR initiatives (`type = "CR"`) with optional nested `cr` change-request dates.
+- Method / path: POST /api/v1/initiatives/list — or POST /api/v1/crs/list (CR only, no `type` needed)
+- Auth: Bearer token with scope `cr:read` (type CR) or `project:read` (type Project)
+- Body: `type` is required on /api/v1/initiatives/list; on /api/v1/crs/list the body is optional ({} is valid)
 
-| | |
-|--|--|
-| **Method / path** | `POST /api/v1/crs/list` |
-| **Auth** | `Bearer` token with scope **`cr:read`** |
-| **Body** | Optional (empty `{}` is valid) |
-
-### Use case diagram
-
-```mermaid
-usecaseDiagram
-  left to right direction
-
-  actor "API Consumer" as Consumer
-
-  rectangle "POST /api/v1/crs/list" {
-    usecase "Authenticate with Bearer token" as UC_AUTH
-    usecase "Search CRs by text (q)" as UC_SEARCH
-    usecase "Filter by status, priority,\nmilestone, department, etc." as UC_FILTER
-    usecase "Filter by impacted\nDWS application" as UC_DWS
-    usecase "Exclude NOT STARTED\n(active filter)" as UC_ACTIVE
-    usecase "Sort and paginate results" as UC_PAGE
-    usecase "Return CR records\nwith nested cr dates" as UC_RETURN
-  }
-
-  Consumer --> UC_SEARCH
-  Consumer --> UC_FILTER
-  Consumer --> UC_DWS
-  Consumer --> UC_ACTIVE
-  Consumer --> UC_PAGE
-
-  UC_SEARCH ..> UC_AUTH : include
-  UC_FILTER ..> UC_AUTH : include
-  UC_DWS ..> UC_AUTH : include
-  UC_ACTIVE ..> UC_AUTH : include
-  UC_PAGE ..> UC_AUTH : include
-  UC_SEARCH ..> UC_RETURN : include
-  UC_FILTER ..> UC_RETURN : include
-  UC_PAGE ..> UC_RETURN : include
-
-  note bottom of UC_RETURN
-    5s timeout → 504
-    Missing cr:read → 403
-  end note
-```
-
-| Use case | Description |
-|----------|-------------|
-| Search CRs by text | Match `name`, `description`, or `ticket` (case-insensitive). |
-| Filter by dimensions | Multi-value filters on status, priority, milestone, owners, department. |
-| Filter by impacted DWS application | Any-of match on `systemImpactedIds`. |
-| Exclude NOT STARTED | `filters.active: true` hides not-started CRs. |
-| Sort and paginate | `sort.field` / `direction`, `page`, `pageSize` (max 500). |
-| Return CR records with nested cr dates | Each item includes initiative fields + optional `cr` date block. |
-
-**Typical consumer scenarios**
+### Typical Consumer Scenarios
 
 | Scenario | Filters / options used |
-|----------|-------------------------|
-| Nightly sync to data warehouse | `page` / `pageSize`, `sort.updatedAt desc` |
-| Portal showing open CRs for one app | `systemImpactedId`, `active: true` |
-| Operations dashboard by status | `status: ["ON TRACK","AT RISK","DELAYED"]` |
+|---|---|
+| Nightly sync of CRs to a data warehouse | type: "CR", page / pageSize, sort.updatedAt desc |
+| Nightly sync of Projects | type: "Project", page / pageSize, sort.updatedAt desc |
+| Portal showing open CRs for one app | type: "CR", systemImpactedId, status: ["NOT STARTED","ON TRACK","AT RISK","DELAYED"] |
+| Operations dashboard by status | type: "Project" or "CR", status: ["ON TRACK","AT RISK","DELAYED"] |
 
-### Request payload (full example)
+### Request Payload (Full Example)
 
-```json
+```
 {
+  "type": "CR",
   "q": "payment",
   "filters": {
     "status": ["LIVE", "DELAYED"],
@@ -357,40 +219,41 @@ usecaseDiagram
 }
 ```
 
-### Request fields — root
+### Request Fields — Root
 
 | Field | Type | Length | Required | Validation |
-|-------|------|--------|----------|------------|
-| `q` | string | — | No | Case-insensitive search in `name`, `description`, `ticket`. |
-| `filters` | object | — | No | See table below. Omitted = no filter on that dimension. |
-| `page` | integer | — | No | Default `1`. Coerced with `Math.max(1, page)`. |
-| `pageSize` | integer | — | No | Default `100`. Min `1`, max `500` (values above 500 are capped). |
-| `sort` | object | — | No | See sort table below. |
+|---|---|---|---|---|
+| type | string | — | Yes on /initiatives/list | CR or Project (case-insensitive). Ignored on /crs/list (always CR). |
+| q | string | — | No | Case-insensitive search in name, description, ticket. |
+| filters | object | — | No | See filters table below. Omitted = no filter on that dimension. |
+| page | integer | — | No | Default 1. Values below 1 or non-numbers fall back to 1. |
+| pageSize | integer | — | No | Default 100. Min 1, max 500 (higher values are capped). Non-numbers fall back to 100. |
+| sort | object | — | No | See sort table below. |
 
-### Request fields — `filters`
-
-| Field | Type | Length | Required | Validation |
-|-------|------|--------|----------|------------|
-| `filters.status` | string[] | — | No | Each value uppercased for match. Match is **exact** against CR `status` (after uppercase). Recommended values: see [CR status values](#cr-status-values). |
-| `filters.priority` | string[] | — | No | Each value uppercased. Exact match. Recommended: `P0`, `P1`, `P2`. |
-| `filters.milestone` | string[] | — | No | Match on initiative `milestone` after **normalization**. Filter `Live` matches both legacy `Live` and `Live (Warranty Period)`. Use exact labels from [CR milestone phase values](#cr-milestone-phase-values). |
-| `filters.departmentId` | string[] | — | No | Exact match on `departmentId` (user/department UUID). |
-| `filters.itPicId` | string[] | — | No | Exact match on primary `itPicId`. |
-| `filters.itPmId` | string[] | — | No | Exact match on `itPmId`. |
-| `filters.businessOwnerId` | string[] | — | No | Exact match on `businessOwnerId`. |
-| `filters.systemImpactedId` | string[] | — | No | **Any-of** match: CR included if any listed DWS application ID appears in `systemImpactedIds`. Alias: `systemImpactedIds` (same behavior). |
-| `filters.active` | boolean | — | No | If `true`, excludes CRs with status `NOT STARTED` (case-insensitive). |
-
-### Request fields — `sort`
+### Request Fields — filters
 
 | Field | Type | Length | Required | Validation |
-|-------|------|--------|----------|------------|
-| `sort.field` | string | — | No | Initiative property name. Default `updatedAt`. Examples: `name`, `ticket`, `status`, `priority`, `planEndDate`, `createdAt`. |
-| `sort.direction` | string | — | No | `asc` or `desc` (case-insensitive). Default `desc`. |
+|---|---|---|---|---|
+| filters.status | string[] | — | No | Case-insensitive exact match (values trimmed and upper-cased). See Status values. |
+| filters.priority | string[] | — | No | Case-insensitive exact match. Recommended: P0, P1, P2. |
+| filters.milestone | string[] | — | No | Exact label for the chosen type (CR phase or Project milestone). Live (Warranty Period) also matches legacy Live. |
+| filters.departmentId | string[] | — | No | Exact match on departmentId. |
+| filters.itPicId | string[] | — | No | Exact match on primary itPicId. |
+| filters.itPmId | string[] | — | No | Exact match on itPmId. |
+| filters.businessOwnerId | string[] | — | No | Exact match on businessOwnerId. |
+| filters.systemImpactedId | string[] | — | No | Any-of match on systemImpactedIds (Master DWS Application IDs). Alias: systemImpactedIds. |
+| filters.active | boolean | — | No | If true, excludes Not Started only. Live, On Hold and Cancelled are still returned — for "open" items use the status filter instead. |
 
-### Success response (`200 OK`)
+### Request Fields — sort
 
-```json
+| Field | Type | Length | Required | Validation |
+|---|---|---|---|---|
+| sort.field | string | — | No | Any item property. Default updatedAt. Compared as text (ISO dates sort correctly); empty values sort first in ascending order. |
+| sort.direction | string | — | No | asc or desc (case-insensitive). Default desc. |
+
+### Success Response (200 OK) — type CR
+
+```
 {
   "items": [
     {
@@ -411,6 +274,7 @@ usecaseDiagram
       "systemImpactedIds": ["dws-app-uuid-1"],
       "status": "On Track",
       "milestone": "SIT",
+      "crMilestonePhase": null,
       "startDate": "2026-04-01",
       "endDate": null,
       "planStartDate": "2026-03-15",
@@ -429,7 +293,11 @@ usecaseDiagram
         "sitEnd": "2026-05-05",
         "uatStart": "2026-05-06",
         "uatEnd": "2026-05-15",
-        "liveDate": null
+        "liveDate": null,
+        "crSection1Start": null, "crSection1End": null,
+        "crSection2Start": null, "crSection2End": null,
+        "crSection3Start": null, "crSection3End": null,
+        "liveStart": null, "liveEnd": null
       }
     }
   ],
@@ -439,146 +307,114 @@ usecaseDiagram
 }
 ```
 
-### Response fields — pagination
+### Success Response (200 OK) — type Project (one item shown)
 
-| Field | Type | Length | Validation |
-|-------|------|--------|------------|
-| `items` | array | — | Array of CR objects (see below). |
-| `page` | integer | — | Current page (echo of request, after normalization). |
-| `pageSize` | integer | — | Page size used (capped at 500). |
-| `total` | integer | — | Total CRs matching filters **before** pagination. |
-
-### Response fields — each item in `items` (initiative)
-
-| Field | Type | Length | Validation |
-|-------|------|--------|------------|
-| `id` | string (UUID) | 36 | Initiative primary key. |
-| `type` | string | 2 | Always `"CR"` for this API. |
-| `name` | string | TEXT | CR title. |
-| `ticket` | string \| null | TEXT | Auto-generated ticket, e.g. `CR01052026001` (CR + DDMMYYYY + 3-digit run). |
-| `description` | string \| null | TEXT | Free text. |
-| `businessImpact` | string \| null | TEXT | Business impact statement. |
-| `priority` | string \| null | 2 | `P0`, `P1`, or `P2`. |
-| `businessOwnerId` | string \| null | 36 | User UUID. |
-| `businessUserIds` | string[] | — | User UUIDs (parsed from stored CSV in DB). |
-| `departmentId` | string \| null | 36 | Department UUID. |
-| `itPicId` | string \| null | 36 | Primary IT PIC user UUID. |
-| `itPicIds` | string[] | — | IT PIC user UUIDs. |
-| `itPmId` | string \| null | 36 | IT PM user UUID. |
-| `itManagerIds` | string[] | — | IT Manager user UUIDs. |
-| `systemImpactedIds` | string[] | — | Master DWS Application IDs. |
-| `status` | string \| null | — | See [CR status values](#cr-status-values). |
-| `milestone` | string \| null | — | Canonical CR phase label. Legacy stored `Live` is returned as `Live (Warranty Period)`. See [CR milestone phase values](#cr-milestone-phase-values). |
-| `startDate` | string \| null | 10–30 | ISO date `YYYY-MM-DD` or ISO 8601 datetime. |
-| `endDate` | string \| null | 10–30 | Actual end date. Required in UI/API when `status` is `Live` and `milestone` is `Fully Live`. |
-| `planStartDate` | string \| null | 10–30 | Planned start. |
-| `planEndDate` | string \| null | 10–30 | Planned end. |
-| `remark` | string \| null | TEXT | Remarks. |
-| `documentationLink` | string \| null | TEXT | URL or link to documentation. |
-| `createdAt` | string \| null | — | ISO 8601 timestamp. |
-| `updatedAt` | string \| null | — | ISO 8601 timestamp. |
-| `cr` | object \| null | — | Nested change-request dates (see below). |
-
-### Response fields — `cr` object (nested)
-
-| Field | Type | Length | Validation |
-|-------|------|--------|------------|
-| `cr.initiativeId` | string (UUID) | 36 | Same as parent initiative `id`. |
-| `cr.crSubmissionStart` | string \| null | 10–30 | CR submission window start. |
-| `cr.crSubmissionEnd` | string \| null | 10–30 | CR submission window end. |
-| `cr.developmentStart` | string \| null | 10–30 | Development phase start. |
-| `cr.developmentEnd` | string \| null | 10–30 | Development phase end. |
-| `cr.sitStart` | string \| null | 10–30 | SIT start. |
-| `cr.sitEnd` | string \| null | 10–30 | SIT end. |
-| `cr.uatStart` | string \| null | 10–30 | UAT start. |
-| `cr.uatEnd` | string \| null | 10–30 | UAT end. |
-| `cr.liveDate` | string \| null | 10–30 | Live / go-live date. |
-
-If no `changeRequests` row exists for the initiative, `cr` may be `null`.
-
-### List API errors
-
-| Status | Cause |
-|--------|-------|
-| 401 | Missing/invalid Bearer token |
-| 403 | Token missing `cr:read` scope (client credentials) |
-| 504 | Exceeded 5s timeout |
-
----
-
-## 4. Update CR (partial)
-
-Partial update of a single CR initiative and optional nested `cr` date fields. Only properties **sent in the body** are updated.
-
-| | |
-|--|--|
-| **Method / path** | `PATCH /api/v1/crs/{id}` |
-| **Auth** | `Bearer` token with scope **`cr:write`** |
-| **Path `id`** | Initiative UUID |
-
-### Use case diagram
-
-```mermaid
-usecaseDiagram
-  left to right direction
-
-  actor "API Consumer" as Consumer
-
-  rectangle "PATCH /api/v1/crs/{id}" {
-    usecase "Authenticate with Bearer token" as UC_AUTH
-    usecase "Resolve CR by initiative id" as UC_RESOLVE
-    usecase "Partial update initiative fields" as UC_INIT
-    usecase "Update status and milestone" as UC_STATUS
-    usecase "Update plan and actual dates" as UC_DATES
-    usecase "Update systemImpactedIds" as UC_SYSTEMS
-    usecase "Partial update cr phase dates" as UC_CR
-    usecase "Persist and set updatedAt" as UC_SAVE
-  }
-
-  Consumer --> UC_STATUS
-  Consumer --> UC_DATES
-  Consumer --> UC_SYSTEMS
-  Consumer --> UC_CR
-
-  UC_STATUS ..> UC_AUTH : include
-  UC_STATUS ..> UC_RESOLVE : include
-  UC_STATUS ..> UC_INIT : include
-  UC_DATES ..> UC_INIT : include
-  UC_SYSTEMS ..> UC_INIT : include
-  UC_CR ..> UC_RESOLVE : include
-  UC_INIT ..> UC_SAVE : include
-  UC_CR ..> UC_SAVE : include
-
-  note right of UC_RESOLVE
-    Not found: 404
-    Not type CR: 400
-    Missing cr:write: 403
-  end note
+```
+{
+  "items": [
+    {
+      "id": "initiative-uuid",
+      "type": "Project",
+      "name": "Data Loss Prevention (DLP)",
+      "ticket": null,
+      "priority": "P1",
+      "status": "On Track",
+      "milestone": "Testing",
+      "planStartDate": "2026-02-01",
+      "planEndDate": "2026-12-15",
+      "...": "same fields as a CR item, without cr"
+    }
+  ],
+  "page": 1,
+  "pageSize": 100,
+  "total": 1
+}
 ```
 
-| Use case | Description |
-|----------|-------------|
-| Resolve CR by initiative id | Path parameter `id` must be an existing initiative with `type = CR`. |
-| Partial update initiative fields | Only keys sent in the JSON body are changed. |
-| Update status and milestone | Sync workflow state from ITSM / external tracker. |
-| Update plan and actual dates | Align `planStartDate`, `planEndDate`, `startDate`, `endDate`. |
-| Update systemImpactedIds | Link CR to Master DWS applications. |
-| Partial update cr phase dates | Update nested `cr` object (SIT/UAT/live dates, etc.). |
-| Persist and set updatedAt | Server writes store and stamps `updatedAt` to now. |
+### Response Fields — Pagination
 
-**Typical consumer scenarios**
+| Field | Type | Length | Validation |
+|---|---|---|---|
+| items | array | — | Array of initiative objects (see below). |
+| page | integer | — | Current page (after normalization). |
+| pageSize | integer | — | Page size used (capped at 500). |
+| total | integer | — | Total initiatives matching the filters before pagination. |
+
+### Response Fields — Initiative Item
+
+| Field | Type | Length | Validation |
+|---|---|---|---|
+| id | string (UUID) | 36 | Initiative primary key. |
+| type | string | 2–7 | "CR" or "Project" — the type requested. |
+| name | string | TEXT | Initiative title. |
+| ticket | string \| null | TEXT | CRs created in PM get CRDDMMYYYYNNN (CR + date + 3-digit run). Imported records may use other formats (e.g. ERP0151855). Projects usually null. |
+| description | string \| null | TEXT | Free text. |
+| businessImpact | string \| null | TEXT | Business impact statement. |
+| priority | string \| null | 2 | P0, P1, or P2. |
+| businessOwnerId | string \| null | 36 | User UUID. |
+| businessUserIds | string[] | — | User UUIDs. |
+| departmentId | string \| null | 36 | Department UUID. |
+| itPicId | string \| null | 36 | Primary IT PIC user UUID. |
+| itPicIds | string[] | — | IT PIC user UUIDs. |
+| itPmId | string \| null | 36 | IT PM user UUID. |
+| itManagerIds | string[] | — | IT Manager user UUIDs. |
+| systemImpactedIds | string[] | — | Master DWS Application IDs. |
+| status | string \| null | — | See Status values. |
+| milestone | string \| null | — | CR phase (type CR) or Project milestone (type Project). Legacy Live is returned as Live (Warranty Period). |
+| crMilestonePhase | string \| null | — | Deprecated legacy field, normally null. Use milestone. |
+| startDate | string \| null | 10–30 | ISO date YYYY-MM-DD or ISO 8601 datetime. |
+| endDate | string \| null | 10–30 | Actual end date. Required for CRs when status is Live and milestone is Fully Live. |
+| planStartDate | string \| null | 10–30 | Planned start. |
+| planEndDate | string \| null | 10–30 | Planned end. |
+| remark | string \| null | TEXT | Remarks. |
+| documentationLink | string \| null | TEXT | URL or link to documentation. |
+| createdAt | string \| null | — | ISO 8601 timestamp. |
+| updatedAt | string \| null | — | ISO 8601 timestamp. |
+| cr | object \| null | — | CR items only (absent for Projects). Null if the CR has no dates row. |
+
+### Response Fields — Nested cr Object (CR only)
+
+| Field | Type | Length | Validation |
+|---|---|---|---|
+| cr.initiativeId | string (UUID) | 36 | Same as the parent initiative id. |
+| cr.crSubmissionStart | string \| null | 10–30 | CR submission window start. |
+| cr.crSubmissionEnd | string \| null | 10–30 | CR submission window end. |
+| cr.developmentStart | string \| null | 10–30 | Development phase start. |
+| cr.developmentEnd | string \| null | 10–30 | Development phase end. |
+| cr.sitStart | string \| null | 10–30 | SIT start. |
+| cr.sitEnd | string \| null | 10–30 | SIT end. |
+| cr.uatStart | string \| null | 10–30 | UAT start. |
+| cr.uatEnd | string \| null | 10–30 | UAT end. |
+| cr.liveDate | string \| null | 10–30 | Live / go-live date. |
+| cr.crSection1Start … cr.crSection3End | string \| null | 10–30 | Legacy, read-only (not updatable through the API). |
+| cr.liveStart, cr.liveEnd | string \| null | 10–30 | Legacy, read-only (not updatable through the API). |
+
+**Note:** the PM web pages no longer show or edit these CR phase dates. They are kept and returned for integrations, are updated only through this API, and are often null.
+
+## 3. Update Initiative (Partial)
+
+Partial update of a single CR or Project. Only properties sent in the body are updated.
+
+- Method / path: PATCH /api/v1/initiatives/{id} (with `type` in the body) — or PATCH /api/v1/crs/{id} (CR only)
+- Auth: Bearer token with scope `cr:write` (type CR) or `project:write` (type Project)
+- Path ID: initiative UUID
+
+### Typical Consumer Scenarios
 
 | Scenario | Fields commonly sent |
-|----------|----------------------|
-| ITSM ticket closed → warranty period | `status: "Live"`, `milestone: "Live (Warranty Period)"`, `endDate`, `cr.liveDate` |
-| CR past warranty → fully live | `status: "Live"`, `milestone: "Fully Live"`, **`endDate` required** |
-| Test tool finished SIT | `cr.sitStart`, `cr.sitEnd`, `milestone: "UAT"` |
-| Architecture review updates apps | `systemImpactedIds` |
+|---|---|
+| ITSM ticket closed → CR warranty period | type: "CR", status: "Live", milestone: "Live (Warranty Period)", endDate, cr.liveDate |
+| CR past warranty → fully live | type: "CR", status: "Live", milestone: "Fully Live", endDate (required) |
+| Test tool finished SIT | type: "CR", cr.sitStart, cr.sitEnd, milestone: "UAT" |
+| PPM tool updates a Project | type: "Project", status, milestone: "Testing", planEndDate |
+| Project go-live | type: "Project", status: "Live", milestone: "Live (Warranty Period)", endDate |
+| Architecture review updates apps | type: "CR" or "Project", systemImpactedIds |
 
-### Request payload (full example)
+### Request Payload Example — CR
 
-```json
+```
 {
+  "type": "CR",
   "ticket": "CR01052026001",
   "name": "CR - Payment gateway enhancement",
   "description": "Updated scope for payment flow",
@@ -601,157 +437,171 @@ usecaseDiagram
   "remark": "Integration sync",
   "documentationLink": "https://example.com/doc",
   "cr": {
-    "crSubmissionStart": "2026-03-01",
-    "crSubmissionEnd": "2026-03-10",
-    "developmentStart": "2026-03-11",
-    "developmentEnd": "2026-04-20",
     "sitStart": "2026-05-10",
-    "sitEnd": "2026-05-18",
-    "uatStart": null,
-    "uatEnd": null,
-    "liveDate": null
+    "sitEnd": "2026-05-18"
   }
 }
 ```
 
-### Request fields — initiative (all optional; partial update)
+### Request Payload Example — Project
 
-| Field | Type | Length | Required | Validation |
-|-------|------|--------|----------|------------|
-| `ticket` | string \| null | TEXT | No | CR ticket number. |
-| `name` | string | TEXT | No | If sent, updates name (not trimmed by API). |
-| `description` | string \| null | TEXT | No | |
-| `businessImpact` | string \| null | TEXT | No | |
-| `priority` | string | 2 | No | Recommended: `P0`, `P1`, `P2`. UI validation uses exact enum; API stores value as sent. |
-| `businessOwnerId` | string \| null | 36 | No | User UUID. |
-| `businessUserIds` | string[] | — | No | Array of user UUIDs. Non-array scalar coerced to single-element array. |
-| `departmentId` | string \| null | 36 | No | Department UUID. |
-| `itPicId` | string \| null | 36 | No | |
-| `itPicIds` | string[] | — | No | Array of user UUIDs. Non-array scalar coerced to single-element array. |
-| `itPmId` | string \| null | 36 | No | |
-| `itManagerIds` | string[] | — | No | Array of user UUIDs. Non-array scalar coerced to single-element array. |
-| `systemImpactedIds` | string[] | — | No | DWS application UUIDs. Stored as provided (array). |
-| `status` | string | — | No | Recommended: see [CR status values](#cr-status-values). |
-| `milestone` | string | — | No | Valid CR phase; see [CR milestone phase values](#cr-milestone-phase-values). Legacy `Live` accepted → stored as `Live (Warranty Period)`. Invalid value → **400**. |
-| `startDate` | string \| null | 10–30 | No | ISO date or datetime string. |
-| `endDate` | string \| null | 10–30 | No | Actual end date. **Required** when resulting `status` is `Live` and `milestone` is `Fully Live` (send in same PATCH or ensure already set). |
-| `planStartDate` | string \| null | 10–30 | No | |
-| `planEndDate` | string \| null | 10–30 | No | |
-| `remark` | string \| null | TEXT | No | |
-| `documentationLink` | string \| null | TEXT | No | |
-
-**Note:** The OpenAPI schema sets `additionalProperties: false`. The server **ignores** unknown top-level keys (does not reject the request).
-
-### Request fields — `cr` object (optional partial update)
-
-Only keys present under `cr` are updated. If no change-request row exists, one is created for the initiative.
-
-| Field | Type | Length | Required | Validation |
-|-------|------|--------|----------|------------|
-| `cr.crSubmissionStart` | string \| null | 10–30 | No | Date string. |
-| `cr.crSubmissionEnd` | string \| null | 10–30 | No | |
-| `cr.developmentStart` | string \| null | 10–30 | No | |
-| `cr.developmentEnd` | string \| null | 10–30 | No | |
-| `cr.sitStart` | string \| null | 10–30 | No | |
-| `cr.sitEnd` | string \| null | 10–30 | No | |
-| `cr.uatStart` | string \| null | 10–30 | No | |
-| `cr.uatEnd` | string \| null | 10–30 | No | |
-| `cr.liveDate` | string \| null | 10–30 | No | |
-
-### Success response (`200 OK`)
-
-```json
+```
 {
-  "ok": true
+  "type": "Project",
+  "status": "At Risk",
+  "milestone": "Testing",
+  "planEndDate": "2026-12-15",
+  "remark": "Vendor delay on UAT environment"
 }
 ```
 
-| Field | Type | Length | Validation |
-|-------|------|--------|------------|
-| `ok` | boolean | — | Always `true` on success. |
+### Request Fields — Initiative (Optional Partial Updates)
 
-On success, `updatedAt` on the initiative is set to current ISO timestamp server-side.
+| Field | Type | Length | Required | Validation |
+|---|---|---|---|---|
+| type | string | — | Yes on /initiatives/{id} | CR or Project (case-insensitive); must match the stored initiative. Ignored on /crs/{id}. |
+| ticket | string \| null | TEXT | No | Ticket number. |
+| name | string | TEXT | No | If sent, updates the name (not trimmed). |
+| description | string \| null | TEXT | No | Description text. |
+| businessImpact | string \| null | TEXT | No | Business impact statement. |
+| priority | string | 2 | No | Use P0, P1 or P2. Stored as sent (not validated). |
+| businessOwnerId | string \| null | 36 | No | User UUID. |
+| businessUserIds | string[] | — | No | Array of user UUIDs. A single value becomes a one-element array. |
+| departmentId | string \| null | 36 | No | Department UUID. |
+| itPicId | string \| null | 36 | No | IT PIC user UUID. |
+| itPicIds | string[] | — | No | Array of user UUIDs. A single value becomes a one-element array. |
+| itPmId | string \| null | 36 | No | IT PM user UUID. |
+| itManagerIds | string[] | — | No | Array of user UUIDs. A single value becomes a one-element array. |
+| systemImpactedIds | string[] | — | No | DWS application UUIDs. |
+| status | string | — | No | Use the exact values from Status values (e.g. "On Track"). Stored as sent, so other spellings would not display correctly in PM. |
+| milestone | string \| null | — | No | Validated for the type: CR phase or Project milestone; invalid → 400. Legacy Live is stored as Live (Warranty Period). null or "" clears it. |
+| startDate | string \| null | 10–30 | No | ISO date or datetime string. |
+| endDate | string \| null | 10–30 | No | Actual end date. CR only: required when the resulting status is Live and milestone is Fully Live (send it in the same PATCH or make sure it is already set). |
+| planStartDate | string \| null | 10–30 | No | Planned start. |
+| planEndDate | string \| null | 10–30 | No | Planned end. |
+| remark | string \| null | TEXT | No | Remarks. |
+| documentationLink | string \| null | TEXT | No | URL link to documentation. |
 
-### Update API errors
+**Note:** unknown top-level keys are ignored (the request is not rejected), so check spelling carefully.
+
+### Request Fields — cr Object Partial Update (CR only)
+
+| Field | Type | Length | Required | Validation |
+|---|---|---|---|---|
+| cr.crSubmissionStart | string \| null | 10–30 | No | Submission window start. |
+| cr.crSubmissionEnd | string \| null | 10–30 | No | Submission window end. |
+| cr.developmentStart | string \| null | 10–30 | No | Development phase start. |
+| cr.developmentEnd | string \| null | 10–30 | No | Development phase end. |
+| cr.sitStart | string \| null | 10–30 | No | SIT phase start. |
+| cr.sitEnd | string \| null | 10–30 | No | SIT phase end. |
+| cr.uatStart | string \| null | 10–30 | No | UAT phase start. |
+| cr.uatEnd | string \| null | 10–30 | No | UAT phase end. |
+| cr.liveDate | string \| null | 10–30 | No | Live / go-live date. |
+
+Sending `cr` with type Project returns 400.
+
+### Success Response (200 OK)
+
+```
+{
+  "ok": true,
+  "id": "initiative-uuid",
+  "type": "CR"
+}
+```
+
+**Side Effects:** `updatedAt` is set to the current server time. Updates made through the API are not written to the initiative's Change History in PM (edits made in PM are) and do not send notifications.
+
+### Update API Errors
 
 | Status | Body example | Cause |
-|--------|--------------|-------|
-| 400 | `{ "error": "Not a CR initiative" }` | Initiative exists but `type` is not `CR` |
-| 400 | `{ "error": "Invalid CR milestone phase" }` | Unknown `milestone` value |
-| 400 | `{ "error": "Missing required field: endDate (required when Status is Live and Milestone is Fully Live)" }` | `status` + `milestone` = Live + Fully Live without `endDate` |
-| 401 | `{ "error": "..." }` | Invalid/missing token |
-| 403 | `{ "error": "Insufficient scope" }` | Missing `cr:write` |
-| 404 | `{ "error": "Not found" }` | Unknown `id` |
-| 500 | `{ "error": "..." }` | Server/store error (e.g. database write failure) |
-| 504 | `{ "error": "Request exceeded 5000ms timeout" }` | Timeout |
+|---|---|---|
+| 400 | { "error": "type is required: \"CR\" or \"Project\"" } | type missing or invalid (/initiatives/{id} only) |
+| 400 | { "error": "Not a CR initiative (this id is a Project)" } | type does not match the stored initiative (same message family on /crs/{id} for a Project id) |
+| 400 | { "error": "Invalid CR milestone phase" } | Unknown milestone for a CR |
+| 400 | { "error": "Invalid Project milestone" } | Unknown milestone for a Project (e.g. a CR phase such as SIT) |
+| 400 | { "error": "Missing required field: endDate (required when Status is Live and Milestone is Fully Live)" } | CR status Live + milestone Fully Live without endDate |
+| 400 | { "error": "cr dates apply to CR initiatives only" } | `cr` sent with type Project |
+| 401 | { "error": "Invalid or expired token" } | See Authentication and Scope Errors |
+| 403 | { "error": "Insufficient scope" } | Missing cr:write / project:write for the type |
+| 404 | { "error": "Not found" } | Unknown id |
+| 413 | — | Body larger than 1 MB |
+| 500 | { "error": "..." } | Server error (e.g. database write failure) |
+| 503 | { "error": "Service temporarily unavailable. Please try again." } | Temporary provider-side failure; retry |
+| 504 | { "error": "Request exceeded 5000ms timeout" } | Timeout. The update may still have been saved; resending the same PATCH is safe. |
 
----
+## Canonical Value Lists
 
-## Canonical value lists
-
-Use these values for consistency with the CR List UI and initiative validation (`validateCommon` in the web app).
-
-### CR status values
-
-| Value | Notes |
-|-------|--------|
-| `Not Started` | |
-| `On Hold` | |
-| `On Track` | |
-| `At Risk` | |
-| `Delayed` | |
-| `Live` | |
-| `Cancelled` | |
-
-**List filter:** values are normalized to **UPPERCASE** before match. Sending `"LIVE"` or `"live"` in filters both match stored status when compared uppercase.
-
-### CR priority values
-
-| Value |
-|-------|
-| `P0` |
-| `P1` |
-| `P2` |
-
-### CR milestone phase values
-
-Stored in initiative `milestone` for `type = CR` (aligned with CR List UI and Milestone Distribution):
+### Status Values (CR and Project)
 
 | Value | Notes |
-|-------|--------|
-| `User Initiate` | |
-| `CR Created` | |
-| `CR Signed sec 2` | |
-| `CR Signed Sec 3` | |
-| `FSD` | |
-| `Development` | |
-| `Changes` | |
-| `Signed Changes` | |
-| `Development - Extended` | |
-| `SIT` | |
-| `UAT` | |
-| `Live (Warranty Period)` | Replaces former `Live` for CRs in warranty period |
-| `Fully Live` | Post-warranty / fully live; requires `endDate` when `status` is `Live` |
+|---|---|
+| Not Started | Counted as open on the CR Dashboard |
+| On Hold |  |
+| On Track | Counted as open |
+| At Risk | Counted as open |
+| Delayed | Counted as open |
+| Live |  |
+| Cancelled |  |
 
-**Legacy value `Live`**
+Send these exact values on PATCH. List filters are case-insensitive: "LIVE", "live" and "Live" all match.
+
+### Priority Values
+
+| Value | Notes |
+|---|---|
+| P0 | Highest |
+| P1 |  |
+| P2 | Lowest |
+
+### CR Milestone Phase Values (type CR)
+
+| Value | Notes |
+|---|---|
+| User Initiate |  |
+| CR Created |  |
+| CR Signed sec 2 |  |
+| CR Signed Sec 3 |  |
+| FSD |  |
+| Development |  |
+| Changes |  |
+| Signed Changes |  |
+| Development - Extended |  |
+| SIT |  |
+| UAT |  |
+| Live (Warranty Period) | Replaces the former Live for CRs in warranty period |
+| Fully Live | Post-warranty; requires endDate when status is Live |
+
+### Project Milestone Values (type Project) — new in this guide
+
+| Value | Notes |
+|---|---|
+| Preparation |  |
+| Business Requirement |  |
+| Tech Assessment |  |
+| Planning |  |
+| Development |  |
+| Testing |  |
+| Live (Warranty Period) | Legacy Live is accepted and stored as this |
+| Fully Live |  |
+
+### Legacy Value "Live" Conversion Matrix (CR and Project)
 
 | Context | Behavior |
-|---------|----------|
-| **PATCH request** | Accepted; persisted as `Live (Warranty Period)` |
-| **List response** | Always returned as `Live (Warranty Period)` (never raw `Live`) |
-| **List filter** | Filter `Live` or `Live (Warranty Period)` both match warranty-period CRs |
+|---|---|
+| PATCH request | Accepted; stored as Live (Warranty Period) |
+| List response | Always returned as Live (Warranty Period), never raw Live |
+| List filter | Live (Warranty Period) also matches records still stored as Live |
 
-**List filter:** use exact labels above (case-sensitive). Filter matching applies normalization (legacy `Live` ↔ `Live (Warranty Period)`).
+**List Filter Note:** use the exact labels above (case-sensitive) for milestones. Status and priority filters are case-insensitive.
 
-**Business rule (PATCH and web UI):** when `status` is `Live` and `milestone` is `Fully Live`, `endDate` (Actual End Date) must be set.
+**Business Rule:** for CRs (PATCH and the PM web pages), when status is Live and milestone is Fully Live, endDate (Actual End Date) must be set. Projects have no such rule.
 
----
-
-## Minimal integration flow (example)
+## Minimal Integration Flow Sequences (Examples)
 
 ### Step A — Get token
 
-```http
+```
 POST /api/auth/client-token HTTP/1.1
 Content-Type: application/json
 X-Request-Id: corr-001
@@ -762,18 +612,19 @@ X-Request-Id: corr-001
 }
 ```
 
-### Step B — List active CRs
+### Step B — List open CRs for one application
 
-```http
-POST /api/v1/crs/list HTTP/1.1
+```
+POST /api/v1/initiatives/list HTTP/1.1
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 Content-Type: application/json
 X-Request-Id: corr-002
 
 {
+  "type": "CR",
   "filters": {
     "systemImpactedId": ["dws-app-uuid-1"],
-    "active": true
+    "status": ["NOT STARTED", "ON TRACK", "AT RISK", "DELAYED"]
   },
   "page": 1,
   "pageSize": 50,
@@ -783,13 +634,14 @@ X-Request-Id: corr-002
 
 ### Step C — Update CR milestone and SIT dates
 
-```http
-PATCH /api/v1/crs/550e8400-e29b-41d4-a716-446655440000 HTTP/1.1
+```
+PATCH /api/v1/initiatives/550e8400-e29b-41d4-a716-446655440000 HTTP/1.1
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 Content-Type: application/json
 X-Request-Id: corr-003
 
 {
+  "type": "CR",
   "status": "On Track",
   "milestone": "SIT",
   "planEndDate": "2026-05-20",
@@ -802,13 +654,14 @@ X-Request-Id: corr-003
 
 ### Step D — Mark CR as Fully Live (requires Actual End Date)
 
-```http
-PATCH /api/v1/crs/550e8400-e29b-41d4-a716-446655440000 HTTP/1.1
+```
+PATCH /api/v1/initiatives/550e8400-e29b-41d4-a716-446655440000 HTTP/1.1
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 Content-Type: application/json
 X-Request-Id: corr-004
 
 {
+  "type": "CR",
   "status": "Live",
   "milestone": "Fully Live",
   "endDate": "2026-05-13"
@@ -817,13 +670,14 @@ X-Request-Id: corr-004
 
 ### Step E — List CRs in warranty period
 
-```http
-POST /api/v1/crs/list HTTP/1.1
+```
+POST /api/v1/initiatives/list HTTP/1.1
 Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
 Content-Type: application/json
 X-Request-Id: corr-005
 
 {
+  "type": "CR",
   "filters": {
     "milestone": ["Live (Warranty Period)"],
     "status": ["LIVE"]
@@ -833,42 +687,77 @@ X-Request-Id: corr-005
 }
 ```
 
----
+### Step F — List Projects in progress
 
-## Data types and length notes
+```
+POST /api/v1/initiatives/list HTTP/1.1
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Content-Type: application/json
+X-Request-Id: corr-006
 
-| Type in tables | Meaning |
-|----------------|---------|
-| TEXT | PostgreSQL `TEXT` — no fixed maximum in the database schema. |
-| UUID | String identifier, typically 36 characters (`xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx`). |
-| 10–30 | Date fields: commonly `YYYY-MM-DD` (10) or full ISO 8601 datetime (up to ~30). |
-| — | No practical limit documented in API layer. |
-
----
-
-## Error response shape (common)
-
-```json
 {
-  "error": "Human-readable message",
-  "details": {}
+  "type": "Project",
+  "filters": { "status": ["ON TRACK", "AT RISK", "DELAYED"] },
+  "page": 1,
+  "pageSize": 50
 }
 ```
 
-`details` is optional and may appear on some internal errors in development.
+### Step G — Update a Project
 
----
+```
+PATCH /api/v1/initiatives/7c9e6679-7425-40de-944b-e07fc1f90ae7 HTTP/1.1
+Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+Content-Type: application/json
+X-Request-Id: corr-007
 
-## Changelog / spec alignment
+{
+  "type": "Project",
+  "status": "On Track",
+  "milestone": "Testing",
+  "planEndDate": "2026-12-15"
+}
+```
+
+The same CR calls also work on the v1.1 paths `/api/v1/crs/list` and `/api/v1/crs/{id}` without the `type` field.
+
+## Data Types and Length Notes
+
+| Type in tables | Meaning |
+|---|---|
+| TEXT | PostgreSQL TEXT — no fixed maximum in the database schema (request body limit 1 MB). |
+| UUID | String identifier, typically 36 characters (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx). |
+| 10–30 | Date fields: commonly YYYY-MM-DD (10) or full ISO 8601 datetime (up to ~30). |
+| — | No practical limit documented in the API layer. |
+
+## Error Response Shape (Common)
+
+```
+{
+  "error": "Human-readable message"
+}
+```
+
+All errors use this shape. Rely on the HTTP status code; the message text may be refined over time.
+
+## Changelog / Spec Alignment Summary
 
 | Topic | Behavior |
-|-------|----------|
-| List method | `POST` (not `GET`) to support complex `filters` in body. |
-| Partial update | `PATCH` with only changed fields. |
-| `systemImpactedId` vs `systemImpactedIds` | Both accepted in list filters (same any-of logic). |
-| User JWT | Interactive user tokens from normal login also work on `/api/v1/crs/*` (scope check bypassed for `type === 'user'`). Prefer client-credentials tokens for integrations. |
-| **v1.1 — CR milestones** | `Live` split into `Live (Warranty Period)` + `Fully Live`. Legacy `Live` accepted on PATCH; list returns normalized labels. |
-| **v1.1 — Fully Live rule** | `endDate` required when `status` = `Live` and `milestone` = `Fully Live` on PATCH (400 if missing). |
-| **v1.1 — Milestone filter** | `filters.milestone` uses normalization (`Live` matches warranty-period CRs). |
+|---|---|
+| List method | POST (not GET) to support complex filters in the body. |
+| Partial update | PATCH with only the changed fields. |
+| systemImpactedId vs systemImpactedIds | Both accepted in list filters (same any-of logic). |
+| User JWT | Interactive user tokens from normal login also work on /api/v1/* (scope check skipped). Use client-credentials tokens for integrations. |
+| v1.1 — CR milestones | Live split into Live (Warranty Period) + Fully Live. Legacy Live accepted on PATCH; list returns normalized labels. |
+| v1.1 — Fully Live rule | endDate required when status = Live and milestone = Fully Live on PATCH (400 if missing). |
+| v1.1 — Milestone filter | filters.milestone uses normalization (Live matches warranty-period records). |
+| v1.2 — Initiative type | New POST /api/v1/initiatives/list and PATCH /api/v1/initiatives/{id} with required type CR \| Project; on PATCH the type must match the stored initiative. |
+| v1.2 — Project support | Projects can be listed and updated, with Project milestone validation. Scopes project:read / project:write; existing clients keep CR-only access until granted. |
+| v1.2 — API client management | PATCH /api/admin/api-clients/{id} to change scopes, deactivate, rename or rotate the secret. |
+| v1.2 — Auth errors | Expired/invalid token → 401 (was 403). Temporary provider failure → 503 (was 403, which looked like a bad token). |
+| v1.2 — Stability fix | Successful /api/v1 calls no longer cause the provider service to restart. X-Response-Time-Ms is now delivered. |
+| v1.2 — Paging | Non-numeric page / pageSize fall back to the defaults instead of returning an empty page. |
+| v1.2 — Responses | PATCH returns { ok, id, type }. List items also include crMilestonePhase (deprecated) and all stored cr date fields. |
+| v1.2 — Compatibility | /api/v1/crs/list and PATCH /api/v1/crs/{id} are unchanged; no action needed for existing CR integrations. |
 
-For machine-readable schemas and response models, refer to [`docs/openapi-cr-list.yaml`](openapi-cr-list.yaml).
+**Note:** for machine-readable schemas and response models, refer to `docs/openapi-cr-list.yaml` (version 1.2.0).

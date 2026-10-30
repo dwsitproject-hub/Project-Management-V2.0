@@ -5,6 +5,14 @@ import {
 } from './departmentGroups.js';
 
 const app = document.getElementById('app');
+
+// Embedded mode (?embed=1 inside an iframe): an initiative's detail page shown in another
+// PM page's floating panel (Portfolio Calendar). Only #view/ and #edit/ render here; any
+// other navigation (e.g. "Back to Projects", or the login page after a session expiry)
+// is handed back to the parent page, which closes the panel.
+const PM_EMBED = window.parent !== window && new URLSearchParams(location.search).has('embed');
+if (PM_EMBED) document.documentElement.classList.add('pm-embed');
+
 console.log('=== Frontend main.js loaded ===');
 console.log('App element:', app);
 console.log('Current hash:', location.hash);
@@ -909,6 +917,12 @@ function hubTrack(name, props) {
 }
 
 async function loadHubSdk() {
+  // The parent page already reports this session; a second SDK copy would double-count it.
+  if (PM_EMBED) {
+    hubSdkState = 'off';
+    window.DwsHub = [];
+    return;
+  }
   try {
     const res = await fetch('/api/hub-sdk/config', { cache: 'no-store' });
     const cfg = res.ok ? await res.json() : null;
@@ -2586,6 +2600,279 @@ window.exportCRListToExcel = function exportCRListToExcel() {
   hubTrack('list_exported', { list: 'cr', format: 'csv', rows: rows.length });
 };
 
+// ---------------------------------------------------------------------------
+// Admin: upload a project list from the Excel planning template
+// ---------------------------------------------------------------------------
+// Step 1 upload → server preview (nothing saved) → step 2 review: map the people and
+// status values found in the file, pick defaults, see every row's outcome → import.
+window.openProjectImport = async function openProjectImport() {
+  await ensureLookups();
+  const users = (LOOKUPS.users || []).filter((u) => u.active !== false)
+    .slice().sort((a, b) => String(a.name || a.email).localeCompare(String(b.name || b.email)));
+  const userName = (id) => { const u = users.find((x) => x.id === id); return u ? (u.name || u.email) : ''; };
+  const userOptions = (selected, emptyLabel) => `<option value="">${escapeHtml(emptyLabel)}</option>` +
+    users.map((u) => `<option value="${escapeHtml(u.id)}" ${u.id === selected ? 'selected' : ''}>${escapeHtml(u.name || u.email)}</option>`).join('');
+
+  const modal = document.createElement('div');
+  modal.className = 'modal pi-modal';
+  document.body.appendChild(modal);
+  const close = () => { document.removeEventListener('keydown', onKey); modal.remove(); };
+  const onKey = (e) => { if (e.key === 'Escape' && !document.querySelector('.confirm-dialog')) close(); };
+  document.addEventListener('keydown', onKey);
+
+  let preview = null;
+  const state = { peopleMap: {}, statusMap: {}, departmentMap: {}, defaults: { priority: 'P2', departmentId: '', businessOwnerId: '', itManagerId: '' }, duplicateMode: 'skip' };
+
+  function showUpload(errorText) {
+    modal.innerHTML = `
+      <div class="modal-content pi-content" role="dialog" aria-modal="true" aria-labelledby="pi-title">
+        <div class="pi-head"><h3 id="pi-title">⬆ Upload Projects</h3><button type="button" class="pi-x" data-close aria-label="Close">✕</button></div>
+        <p class="muted">Create projects from the Excel planning template (Type, Initiative Name, Department, Business Owner,
+          Priority, IT PM, IT PIC, Status, Notes / Decision needed, Plan Start Date, Plan End Date). You will review everything
+          before anything is saved.</p>
+        <div class="pi-upload">
+          <input type="file" id="pi-file" accept=".xlsx,.xls">
+          <button type="button" class="btn" id="pi-template">Download template</button>
+        </div>
+        ${errorText ? `<div class="pi-error">${escapeHtml(errorText)}</div>` : ''}
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" data-close>Cancel</button>
+          <button type="button" class="btn-primary" id="pi-preview" disabled>Preview</button>
+        </div>
+      </div>`;
+    modal.querySelectorAll('[data-close]').forEach((b) => { b.onclick = close; });
+    const file = modal.querySelector('#pi-file');
+    const btn = modal.querySelector('#pi-preview');
+    file.onchange = () => { btn.disabled = !file.files.length; };
+    modal.querySelector('#pi-template').onclick = downloadTemplate;
+    btn.onclick = async () => {
+      const fd = new FormData();
+      fd.append('file', file.files[0]);
+      setButtonLoading(btn, true, 'Reading…');
+      try {
+        preview = await fetchJSON('/api/admin/project-import/preview', { method: 'POST', body: fd, timeoutMs: 60000 });
+      } catch (e) {
+        if (e instanceof AuthRedirectError) return close();
+        return showUpload(e.message);
+      }
+      state.peopleMap = Object.fromEntries(preview.people.map((p) => [p.name, p.userId || '']));
+      state.statusMap = Object.fromEntries(preview.statuses.map((s) => [s.value, { status: s.status, milestone: s.milestone }]));
+      state.departmentMap = Object.fromEntries((preview.departments || []).map((d) => [d.value, d.departmentId || '']));
+      showReview();
+    };
+  }
+
+  async function downloadTemplate() {
+    try {
+      const res = await fetch('/api/admin/project-import/template', { headers: { Authorization: `Bearer ${getToken()}` } });
+      if (!res.ok) throw new Error(`Download failed (${res.status})`);
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'PM-project-upload-template.xlsx';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) {
+      notify(e.message, 'error');
+    }
+  }
+
+  // What will happen to each row with the current choices.
+  function outcome(r) {
+    if (r.errors.length) return { action: 'error', label: 'Error', notes: r.errors };
+    const notes = [...(r.warnings || [])];
+    const pm = r.itPm.map((n) => state.peopleMap[n]).filter(Boolean);
+    if (!pm.length) notes.push(r.itPm.length ? `IT PM "${r.itPm.join(', ')}" not mapped — left empty` : 'No IT PM');
+    else if (r.itPm.length > 1) notes.push(`Several IT PMs — ${userName(pm[0])} is used`);
+    const unmappedPic = r.itPic.filter((n) => !state.peopleMap[n]);
+    if (unmappedPic.length) notes.push(`IT PIC "${unmappedPic.join(', ')}" not mapped — left out`);
+    if (r.departmentRaw && !state.departmentMap[r.departmentRaw]) {
+      notes.push(`Department "${r.departmentRaw}" not mapped — ${state.defaults.departmentId ? 'default used' : 'left empty'}`);
+    }
+    if (r.businessOwner.length && !state.peopleMap[r.businessOwner[0]]) {
+      notes.push(`Business Owner "${r.businessOwner[0]}" not mapped — ${state.defaults.businessOwnerId ? 'default used' : 'left empty'}`);
+    }
+    if (r.existingId) {
+      return state.duplicateMode === 'update'
+        ? { action: 'update', label: 'Update', notes: ['A project with this name exists — its plan, department, business owner, priority, IT PM/PIC, status and notes will be updated', ...notes] }
+        : { action: 'skip', label: 'Skip', notes: ['A project with this name already exists'] };
+    }
+    return { action: 'create', label: 'New', notes };
+  }
+
+  function showReview() {
+    const rows = preview.rows;
+    const outcomes = rows.map(outcome);
+    const count = (a) => outcomes.filter((o) => o.action === a).length;
+    const toImport = count('create') + count('update');
+    const deptOptions = `<option value="">— Not set —</option>` + (LOOKUPS.departments || []).slice()
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+      .map((d) => `<option value="${escapeHtml(d.id)}" ${d.id === state.defaults.departmentId ? 'selected' : ''}>${escapeHtml(d.name)}</option>`).join('');
+    const prevScroll = modal.querySelector('.pi-content')?.scrollTop || 0;
+    const deptName = (id) => (LOOKUPS.departments || []).find((d) => d.id === id)?.name || '';
+    const rowDept = (r) => (r.departmentRaw ? deptName(state.departmentMap[r.departmentRaw]) || `${r.departmentRaw} ✗` : '');
+    const rowOwner = (r) => (r.businessOwner.length ? userName(state.peopleMap[r.businessOwner[0]]) || `${r.businessOwner[0]} ✗` : '');
+    const deptMapOptions = (selected) => `<option value="">— Not mapped —</option>` + (LOOKUPS.departments || []).slice()
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+      .map((d) => `<option value="${escapeHtml(d.id)}" ${d.id === selected ? 'selected' : ''}>${escapeHtml(d.name)}</option>`).join('');
+
+    modal.innerHTML = `
+      <div class="modal-content pi-content pi-wide" role="dialog" aria-modal="true" aria-labelledby="pi-title">
+        <div class="pi-head"><h3 id="pi-title">⬆ Upload Projects — review</h3><button type="button" class="pi-x" data-close aria-label="Close">✕</button></div>
+        <div class="pi-summary">
+          <span><b>${escapeHtml(preview.fileName)}</b> · sheet “${escapeHtml(preview.sheet)}”</span>
+          <span class="pi-chip">${rows.length} rows</span>
+          <span class="pi-chip pi-new">${count('create')} new</span>
+          ${count('update') ? `<span class="pi-chip pi-upd">${count('update')} update</span>` : ''}
+          ${count('skip') ? `<span class="pi-chip pi-skip">${count('skip')} skip (already exist)</span>` : ''}
+          ${count('error') ? `<span class="pi-chip pi-err">${count('error')} with errors</span>` : ''}
+        </div>
+
+        <div class="pi-grid">
+          <section class="pi-box">
+            <h4>People in the file → PM users</h4>
+            <table class="pi-map">
+              ${preview.people.map((p) => `<tr><td>${escapeHtml(p.name)} <span class="muted">(${p.count})</span>
+                  <div class="pi-roles">${escapeHtml((p.roles || []).join(' · '))}</div></td>
+                <td><select data-person="${escapeHtml(p.name)}">${userOptions(state.peopleMap[p.name], '— Leave empty —')}</select></td></tr>`).join('') ||
+                '<tr><td class="muted">No people in the file</td></tr>'}
+            </table>
+          </section>
+          <section class="pi-box">
+            <h4>Status in the file → PM status and milestone</h4>
+            <table class="pi-map">
+              ${preview.statuses.map((s) => `<tr><td>${escapeHtml(s.value)} <span class="muted">(${s.count})</span></td>
+                <td><select data-status="${escapeHtml(s.value)}">${preview.options.statuses.map((o) => `<option ${state.statusMap[s.value].status === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td>
+                <td><select data-milestone="${escapeHtml(s.value)}">${preview.options.milestones.map((o) => `<option ${state.statusMap[s.value].milestone === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td></tr>`).join('')}
+            </table>
+            ${(preview.departments || []).length ? `
+            <h4 class="pi-subhead">Department in the file → PM department</h4>
+            <table class="pi-map">
+              ${preview.departments.map((d) => `<tr><td>${escapeHtml(d.value)} <span class="muted">(${d.count})</span></td>
+                <td><select data-dept="${escapeHtml(d.value)}">${deptMapOptions(state.departmentMap[d.value])}</select></td></tr>`).join('')}
+            </table>` : ''}
+          </section>
+          <section class="pi-box">
+            <h4>Apply to every new project</h4>
+            <table class="pi-map">
+              <tr><td>Priority<div class="pi-roles">when the row has none</div></td><td><select data-default="priority">${preview.options.priorities.map((o) => `<option ${state.defaults.priority === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td></tr>
+              <tr><td>Department<div class="pi-roles">when the row has none / unmapped</div></td><td><select data-default="departmentId">${deptOptions}</select></td></tr>
+              <tr><td>Business Owner<div class="pi-roles">when the row has none / unmapped</div></td><td><select data-default="businessOwnerId">${userOptions(state.defaults.businessOwnerId, '— Not set —')}</select></td></tr>
+              <tr><td>IT Manager</td><td><select data-default="itManagerId">${userOptions(state.defaults.itManagerId, '— Not set —')}</select></td></tr>
+            </table>
+            <p class="muted pi-hint">Description and Business Impact stay empty; fill them in later on each project.</p>
+          </section>
+          <section class="pi-box pi-box-wide">
+            <h4>Projects that already exist (same name)</h4>
+            <label class="pi-radio"><input type="radio" name="pi-dup" value="skip" ${state.duplicateMode === 'skip' ? 'checked' : ''}> Skip them (no change)</label>
+            <label class="pi-radio"><input type="radio" name="pi-dup" value="update" ${state.duplicateMode === 'update' ? 'checked' : ''}> Update their plan dates, department, business owner, priority, IT PM / PIC, status and notes</label>
+            <span class="muted pi-hint">Updates are recorded in each project's Change History.</span>
+          </section>
+        </div>
+
+        <div class="pi-table-wrap">
+          <table class="pi-rows">
+            <thead><tr><th>Row</th><th>Initiative Name</th><th>Department</th><th>Business Owner</th><th>Priority</th><th>IT PM</th><th>IT PIC</th><th>Status</th><th>Plan Start</th><th>Plan End</th><th>Result</th></tr></thead>
+            <tbody>
+              ${rows.map((r, k) => {
+                const o = outcomes[k];
+                const map = state.statusMap[r.statusRaw] || {};
+                return `<tr class="pi-row-${o.action}">
+                  <td>${r.rowNumber}</td>
+                  <td>${escapeHtml(r.name || '—')}${r.notes ? `<div class="muted pi-note">${escapeHtml(r.notes)}</div>` : ''}</td>
+                  <td>${escapeHtml(rowDept(r) || deptName(state.defaults.departmentId) || '—')}</td>
+                  <td>${escapeHtml(rowOwner(r) || userName(state.defaults.businessOwnerId) || '—')}</td>
+                  <td>${r.priority ? escapeHtml(r.priority) : `${escapeHtml(state.defaults.priority)} <span class="muted">(default)</span>`}</td>
+                  <td>${escapeHtml(r.itPm.map((n) => userName(state.peopleMap[n]) || `${n} ✗`).join(', ') || '—')}</td>
+                  <td>${escapeHtml(r.itPic.map((n) => userName(state.peopleMap[n]) || `${n} ✗`).join(', ') || '—')}</td>
+                  <td>${escapeHtml(r.statusRaw)} → ${escapeHtml(map.status || '?')}<div class="muted">${escapeHtml(r.milestoneRaw || map.milestone || '')}</div></td>
+                  <td>${escapeHtml(r.planStartDate || '—')}</td>
+                  <td>${escapeHtml(r.planEndDate || '—')}</td>
+                  <td><span class="pi-badge pi-badge-${o.action}">${o.label}</span>${o.notes.map((n) => `<div class="pi-msg">${escapeHtml(n)}</div>`).join('')}</td>
+                </tr>`;
+              }).join('')}
+            </tbody>
+          </table>
+        </div>
+
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" id="pi-back">Choose another file</button>
+          <button type="button" class="btn-secondary" data-close>Cancel</button>
+          <button type="button" class="btn-primary" id="pi-import" ${toImport ? '' : 'disabled'}>Import ${toImport} project${toImport === 1 ? '' : 's'}</button>
+        </div>
+      </div>`;
+    modal.querySelector('.pi-content').scrollTop = prevScroll;
+
+    modal.querySelectorAll('[data-close]').forEach((b) => { b.onclick = close; });
+    modal.querySelector('#pi-back').onclick = () => showUpload();
+    modal.querySelectorAll('[data-person]').forEach((s) => { s.onchange = () => { state.peopleMap[s.dataset.person] = s.value; showReview(); }; });
+    modal.querySelectorAll('[data-status]').forEach((s) => { s.onchange = () => { state.statusMap[s.dataset.status].status = s.value; showReview(); }; });
+    modal.querySelectorAll('[data-milestone]').forEach((s) => { s.onchange = () => { state.statusMap[s.dataset.milestone].milestone = s.value; showReview(); }; });
+    modal.querySelectorAll('[data-default]').forEach((s) => { s.onchange = () => { state.defaults[s.dataset.default] = s.value; showReview(); }; });
+    modal.querySelectorAll('[data-dept]').forEach((s) => { s.onchange = () => { state.departmentMap[s.dataset.dept] = s.value; showReview(); }; });
+    modal.querySelectorAll('input[name="pi-dup"]').forEach((r) => { r.onchange = () => { state.duplicateMode = r.value; showReview(); }; });
+    modal.querySelector('#pi-import').onclick = () => runImport(toImport);
+  }
+
+  async function runImport(toImport) {
+    const ok = await confirmDialog(
+      `Import ${toImport} project(s) from ${preview.fileName}?` +
+      (state.duplicateMode === 'update' ? '\nExisting projects with the same name will be updated.' : ''),
+      { title: 'Upload Projects', confirmText: 'Import' }
+    );
+    if (!ok) return;
+    const btn = modal.querySelector('#pi-import');
+    setButtonLoading(btn, true, 'Importing…');
+    let result;
+    try {
+      result = await fetchJSON('/api/admin/project-import/commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        timeoutMs: 120000,
+        body: JSON.stringify({
+          fileName: preview.fileName,
+          rows: preview.rows.filter((r) => !r.errors.length),
+          peopleMap: state.peopleMap,
+          statusMap: state.statusMap,
+          departmentMap: state.departmentMap,
+          defaults: {
+            priority: state.defaults.priority,
+            departmentId: state.defaults.departmentId || null,
+            businessOwnerId: state.defaults.businessOwnerId || null,
+            itManagerIds: state.defaults.itManagerId ? [state.defaults.itManagerId] : [],
+          },
+          duplicateMode: state.duplicateMode,
+        }),
+      });
+    } catch (e) {
+      if (e instanceof AuthRedirectError) return close();
+      setButtonLoading(btn, false);
+      return notify(`Import failed: ${e.message}`, 'error');
+    }
+    hubTrack('projects_uploaded', { created: result.created, updated: result.updated, failed: result.failed.length });
+    modal.innerHTML = `
+      <div class="modal-content pi-content" role="dialog" aria-modal="true" aria-labelledby="pi-title">
+        <div class="pi-head"><h3 id="pi-title">✅ Upload finished</h3><button type="button" class="pi-x" data-close aria-label="Close">✕</button></div>
+        <div class="pi-summary">
+          <span class="pi-chip pi-new">${result.created} created</span>
+          <span class="pi-chip pi-upd">${result.updated} updated</span>
+          <span class="pi-chip pi-skip">${result.skipped} skipped</span>
+          ${result.failed.length ? `<span class="pi-chip pi-err">${result.failed.length} failed</span>` : ''}
+        </div>
+        ${result.failed.length ? `<ul class="pi-failed">${result.failed.map((f) => `<li>Row ${f.rowNumber} — ${escapeHtml(f.name)}: ${escapeHtml(f.error)}</li>`).join('')}</ul>` : ''}
+        <div class="modal-actions"><button type="button" class="btn-primary" data-close>Done</button></div>
+      </div>`;
+    modal.querySelectorAll('[data-close]').forEach((b) => {
+      b.onclick = () => {
+        close();
+        if (location.hash.startsWith('#list')) renderList();
+      };
+    });
+  }
+
+  showUpload();
+};
+
 async function renderList() {
   console.log('renderList called');
   setActive('#list');
@@ -3019,6 +3306,7 @@ async function renderList() {
           <button id="btn-columns" onclick="showColumnSettings('list')" title="Column Settings" class="icon-btn">⚙️</button>
           <button id="apply-filters-btn" class="primary" onclick="applyFilters()">Apply Filters</button>
           ${access.canCreateProject || access.isAdmin ? '<a href="#new/Project" class="btn primary">+ New Initiative</a>' : ''}
+          ${access.isAdmin ? '<button type="button" class="btn" onclick="openProjectImport()" title="Create projects from the Excel planning template (admin)">⬆ Upload Projects</button>' : ''}
         </div>
       </div>
       <div class="toolbar-advanced ${advancedOpen ? 'open' : ''}" id="toolbar-advanced">
@@ -8727,6 +9015,675 @@ async function renderDashboard() {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Manager Dashboard → Portfolio Calendar
+// ---------------------------------------------------------------------------
+// Months run across the top. Rows are either team members (cards = initiatives where
+// they are the IT PM) or initiatives (card = who works on it). Dragging a card sideways
+// moves its plan dates by whole months; its edges change Plan Start / Plan End only. In
+// Team Member view, dragging a card to another member's row changes the IT PM.
+// Weighted Score per member per month: for a Project, 1 where they are both IT PM and
+// IT Dev (IT PIC), 0.5 where they are only one of the two; a CR counts 0.25 either way.
+
+const PC_STATE_KEY = 'pm_portfolio_calendar';
+const PC_COL_W = 120; // px per month column
+const PC_LANE_H = 30; // px per stacked card lane
+
+function pcLoadState() {
+  try { return JSON.parse(localStorage.getItem(PC_STATE_KEY)) || {}; } catch (_) { return {}; }
+}
+function pcSaveState(state) {
+  try { localStorage.setItem(PC_STATE_KEY, JSON.stringify(state)); } catch (_) { /* optional */ }
+}
+
+// Dates are handled as plain calendar dates {y, m (0-based), d} to avoid timezone drift.
+function pcParseDate(value) {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value || ''));
+  return m ? { y: +m[1], m: +m[2] - 1, d: +m[3] } : null;
+}
+const pcDaysIn = (y, m) => new Date(Date.UTC(y, m + 1, 0)).getUTCDate();
+const pcMonthIndex = (p) => p.y * 12 + p.m;
+const pcFormat = (p) => `${p.y}-${String(p.m + 1).padStart(2, '0')}-${String(p.d).padStart(2, '0')}`;
+const pcMonthLabel = (idx) =>
+  new Date(Date.UTC(Math.floor(idx / 12), idx % 12, 1)).toLocaleString('en-US', { month: 'short', year: 'numeric', timeZone: 'UTC' });
+// Whole months, keeping the day of month (clamped: 31 Jan + 1 month → 28/29 Feb).
+function pcAddMonths(p, n) {
+  const idx = pcMonthIndex(p) + n;
+  const y = Math.floor(idx / 12);
+  const m = ((idx % 12) + 12) % 12;
+  return { y, m, d: Math.min(p.d, pcDaysIn(y, m)) };
+}
+// Position on the month axis: month index + elapsed fraction of that month.
+const pcPos = (p, isEnd) => pcMonthIndex(p) + (isEnd ? p.d : p.d - 1) / pcDaysIn(p.y, p.m);
+
+function pcDevIds(i) {
+  const raw = Array.isArray(i.itPicIds) ? i.itPicIds : String(i.itPicIds || '').split(',');
+  const ids = raw.map((s) => String(s).trim()).filter(Boolean);
+  if (i.itPicId && !ids.includes(i.itPicId)) ids.push(i.itPicId);
+  return ids;
+}
+
+const PC_CR_WEIGHT = 0.25;
+
+/** One initiative's Weighted Score for one member: Project PM and Dev = 1, PM or Dev only = 0.5; CR = 0.25. */
+function pcWeight(i, memberId) {
+  const isPm = i.itPmId === memberId;
+  const isDev = pcDevIds(i).includes(memberId);
+  if (!isPm && !isDev) return 0;
+  if (i.type === 'CR') return PC_CR_WEIGHT;
+  return isPm && isDev ? 1 : 0.5;
+}
+
+// Monthly load colours: green up to 4, amber above 4 up to 5, red above 5.
+const PC_LOAD_OK_MAX = 4;
+const PC_LOAD_BUSY_MAX = 5;
+
+// Card colour by status: Not Started / On Hold grey, On Track green, At Risk amber,
+// Delayed red, Live blue.
+function pcStatusClass(status) {
+  const key = String(status || '').trim().toLowerCase();
+  return {
+    'not started': 'pc-st-idle',
+    'on hold': 'pc-st-idle',
+    'on track': 'pc-st-ok',
+    'at risk': 'pc-st-risk',
+    delayed: 'pc-st-late',
+    live: 'pc-st-live',
+  }[key] || 'pc-st-idle';
+}
+
+let pcMeasureCtx = null;
+/** Rendered width (px) of a card label, so names can be laid out in full. */
+function pcTextWidth(text) {
+  if (!pcMeasureCtx) {
+    pcMeasureCtx = document.createElement('canvas').getContext('2d');
+    pcMeasureCtx.font = '12px Inter, system-ui, -apple-system, "Segoe UI", sans-serif';
+  }
+  return Math.ceil(pcMeasureCtx.measureText(String(text || '')).width);
+}
+
+function pcLoadClass(score) {
+  if (score <= 0) return 'pc-load-none';
+  if (score <= PC_LOAD_OK_MAX) return 'pc-load-ok';
+  if (score <= PC_LOAD_BUSY_MAX) return 'pc-load-busy';
+  return 'pc-load-over';
+}
+
+async function renderPortfolioCalendar(container, { team, currentUserId }) {
+  if (!team.length) {
+    container.innerHTML = `<div class="card pc-empty">
+      <h3>🗓️ Portfolio Calendar</h3>
+      <p class="muted">Add your team members in <a href="#profile">My Profile</a> to see their projects and workload here.</p>
+    </div>`;
+    return;
+  }
+
+  container.innerHTML = '<div class="card"><p class="muted">Loading portfolio calendar…</p></div>';
+  let all;
+  try {
+    all = await fetchJSON('/api/initiatives?limit=0');
+  } catch (e) {
+    if (e instanceof AuthRedirectError) return;
+    container.innerHTML = `<div class="error">Failed to load initiatives: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  const saved = pcLoadState();
+  const now = new Date();
+  const thisMonth = now.getFullYear() * 12 + now.getMonth();
+  const todayPos = thisMonth + (now.getDate() - 1) / pcDaysIn(now.getFullYear(), now.getMonth());
+  const st = {
+    type: ['All', 'Project', 'CR'].includes(saved.type) ? saved.type : 'All',
+    yAxis: saved.yAxis === 'initiative' ? 'initiative' : 'member',
+    months: [6, 12, 18, 24].includes(saved.months) ? saved.months : 12,
+    // Row order in Project / CR view
+    sort: ['start-asc', 'start-desc', 'name-asc', 'name-desc'].includes(saved.sort) ? saved.sort : 'start-asc',
+    department: typeof saved.department === 'string' ? saved.department : '',
+    start: thisMonth - 1,
+  };
+  const teamSorted = team.slice().sort((a, b) => String(a.name || a.email).localeCompare(String(b.name || b.email)));
+  const teamIds = new Set(teamSorted.map((u) => u.id));
+  const userName = (id) => {
+    const u = LOOKUPS.users.find((x) => x.id === id);
+    return u ? (u.name || u.email) : '';
+  };
+  const initials = (name) => String(name || '?').split(/\s+/).filter(Boolean).slice(0, 2).map((w) => w[0].toUpperCase()).join('');
+
+  // Initiatives this team works on (as IT PM or IT Dev), for the chosen type; Cancelled excluded.
+  const deptNameById = new Map((LOOKUPS.departments || []).map((d) => [d.id, d.name]));
+  // Department options = names PM shows (two departments can share one, e.g. "Commercial").
+  const deptNames = [...new Set((LOOKUPS.departments || []).map((d) => d.name).filter(Boolean))]
+    .sort((a, b) => a.localeCompare(b));
+  function deptMatches(i) {
+    if (!st.department) return true;
+    const name = deptNameById.get(i.departmentId);
+    return st.department === '__none__' ? !name : name === st.department;
+  }
+
+  function related() {
+    return all.filter((i) => {
+      if (String(i.status || '').trim().toLowerCase() === 'cancelled') return false;
+      if (st.type !== 'All' && i.type !== st.type) return false;
+      if (!deptMatches(i)) return false;
+      if (teamIds.has(i.itPmId) || pcDevIds(i).some((id) => teamIds.has(id))) return true;
+      // Nobody assigned yet (no IT PM, no IT PIC): show it so it can be dragged to a member.
+      return !i.itPmId && pcDevIds(i).length === 0;
+    });
+  }
+  function span(i) {
+    const s = pcParseDate(i.planStartDate);
+    const e = pcParseDate(i.planEndDate);
+    if (!s || !e || pcPos(e, true) <= pcPos(s, false)) return null;
+    return { s, e };
+  }
+
+  function scoreTable(items) {
+    // memberId → [score per visible month], plus the contributing initiatives per cell
+    const scores = new Map(teamSorted.map((u) => [u.id, Array.from({ length: st.months }, () => ({ total: 0, items: [] }))]));
+    for (const i of items) {
+      const sp = span(i);
+      if (!sp) continue;
+      const from = Math.max(pcMonthIndex(sp.s), st.start);
+      const to = Math.min(pcMonthIndex(sp.e), st.start + st.months - 1);
+      for (const u of teamSorted) {
+        const w = pcWeight(i, u.id);
+        if (!w) continue;
+        for (let mi = from; mi <= to; mi++) {
+          const cell = scores.get(u.id)[mi - st.start];
+          cell.total += w;
+          cell.items.push(`${w.toFixed(2)}  ${i.type === 'CR' ? 'CR' : 'PRJ'}  ${i.name}`);
+        }
+      }
+    }
+    return scores;
+  }
+
+  // Card text: the name (Team Member view) or who works on it (Project / CR view).
+  function barLabel(i) {
+    if (st.yAxis === 'member') return i.name || '';
+    const pm = userName(i.itPmId);
+    const devs = pcDevIds(i).map(userName).filter(Boolean);
+    return [pm ? `PM: ${pm}` : 'No IT PM', devs.length ? `Dev: ${devs.join(', ')}` : ''].filter(Boolean).join(' · ');
+  }
+
+  // A card is at least as wide as its name. `fill` is the real plan period (solid);
+  // anything beyond it only holds the name and is striped, with a tick at the plan end.
+  function barHtml(i, left, fill, need, lane, clipStart, clipEnd) {
+    const width = Math.max(fill, need);
+    const pm = userName(i.itPmId);
+    const devs = pcDevIds(i).map(userName).filter(Boolean);
+    const text = escapeHtml(barLabel(i));
+    const tip = [
+      `${i.type}: ${i.name}`,
+      `Plan: ${i.planStartDate?.slice(0, 10)} → ${i.planEndDate?.slice(0, 10)}`,
+      `IT PM: ${pm || '—'}`,
+      `IT Dev: ${devs.join(', ') || '—'}`,
+      `Status: ${i.status || '—'} · ${i.priority || ''}`,
+      'Drag to move · drag an edge to change start/end · click to open',
+    ].join('\n');
+    return `<div class="pc-bar ${pcStatusClass(i.status)} ${i.type === 'CR' ? 'pc-shape-cr' : 'pc-shape-project'}${width > fill ? ' pc-has-tail' : ''}${clipStart ? ' pc-clip-start' : ''}${clipEnd ? ' pc-clip-end' : ''}"
+        data-id="${escapeHtml(i.id)}" data-fill="${fill}" data-need="${need}"
+        style="left:${left}px;width:${width}px;--fill:${fill}px;top:${lane * PC_LANE_H + 6}px" title="${escapeHtml(tip)}">
+        ${clipStart ? '' : '<span class="pc-handle pc-handle-start"></span>'}
+        <span class="pc-bar-text">${text}</span>
+        ${clipEnd ? '' : '<span class="pc-handle pc-handle-end"></span>'}
+      </div>`;
+  }
+
+  // Lay out items in a track: stack overlapping cards into lanes.
+  function trackHtml(items) {
+    const width = st.months * PC_COL_W;
+    const placed = [];
+    for (const i of items) {
+      const sp = span(i);
+      if (!sp) continue;
+      const l = (pcPos(sp.s, false) - st.start) * PC_COL_W;
+      const r = (pcPos(sp.e, true) - st.start) * PC_COL_W;
+      if (r <= 0 || l >= width) continue;
+      const p = { i, l: Math.max(0, l), r: Math.min(width, r), clipStart: l < 0, clipEnd: r > width };
+      p.fill = Math.max(10, p.r - p.l);
+      p.need = pcTextWidth(barLabel(i)) + 28; // name + padding + resize handles
+      p.ext = p.l + Math.max(p.fill, p.need) + 4; // lanes keep the whole card (incl. name) clear
+      placed.push(p);
+    }
+    placed.sort((a, b) => a.l - b.l);
+    const laneEnds = [];
+    for (const p of placed) {
+      let lane = laneEnds.findIndex((end) => end <= p.l + 1);
+      if (lane === -1) { lane = laneEnds.length; laneEnds.push(0); }
+      laneEnds[lane] = p.ext;
+      p.lane = lane;
+    }
+    const lanes = Math.max(1, laneEnds.length);
+    const todayLeft = (todayPos - st.start) * PC_COL_W;
+    return {
+      count: placed.length,
+      html: `<div class="pc-track" style="width:${width}px;height:${lanes * PC_LANE_H + 12}px">
+        ${todayLeft >= 0 && todayLeft <= width ? `<div class="pc-today" style="left:${todayLeft}px"></div>` : ''}
+        ${placed.map((p) => barHtml(p.i, p.l, p.fill, p.need, p.lane, p.clipStart, p.clipEnd)).join('')}
+      </div>`,
+    };
+  }
+
+  function draw() {
+    // Keep the calendar's horizontal scroll across redraws (after a drag, save or panel close).
+    const prevScrollLeft = container.querySelector('.pc-scroll')?.scrollLeft || 0;
+    const items = related();
+    const scheduled = items.filter(span);
+    const unscheduled = items.filter((i) => !span(i));
+    const scores = scoreTable(items);
+    const monthIdx = Array.from({ length: st.months }, (_, k) => st.start + k);
+
+    const scoreCards = teamSorted.map((u) => {
+      const cells = scores.get(u.id);
+      const cur = thisMonth - st.start;
+      const current = cur >= 0 && cur < st.months ? cells[cur].total : null;
+      let peak = 0;
+      let peakAt = null;
+      cells.forEach((c, k) => { if (c.total > peak) { peak = c.total; peakAt = monthIdx[k]; } });
+      return `<div class="pc-score-card">
+        <div class="pc-score-head">
+          <span class="pc-avatar">${escapeHtml(initials(u.name || u.email))}</span>
+          <div class="pc-score-who">
+            <div class="pc-score-name">${escapeHtml(u.name || u.email)}</div>
+            <div class="muted">This month: <b>${current === null ? '—' : current}</b>${peak ? ` · Peak <b>${peak}</b> (${pcMonthLabel(peakAt)})` : ''}</div>
+          </div>
+        </div>
+        <div class="pc-score-strip" style="grid-template-columns:repeat(${st.months}, minmax(30px, 1fr))">
+          ${cells.map((c, k) => `<div class="pc-score-cell ${pcLoadClass(c.total)}${monthIdx[k] === thisMonth ? ' pc-current' : ''}"
+              title="${escapeHtml(`${pcMonthLabel(monthIdx[k])} — Weighted Score ${c.total}${c.items.length ? '\n' + c.items.join('\n') : ''}`)}">
+              <span>${pcMonthLabel(monthIdx[k]).slice(0, 3)}</span><b>${c.total || '·'}</b></div>`).join('')}
+        </div>
+      </div>`;
+    }).join('');
+
+    let rowsHtml = '';
+    let shown = 0;
+    if (st.yAxis === 'member') {
+      const rows = teamSorted.map((u) => ({ id: u.id, label: u.name || u.email, items: scheduled.filter((i) => i.itPmId === u.id) }));
+      rows.push({ id: '', label: 'Unassigned / IT PM outside team', note: 'drag to a member to assign', items: scheduled.filter((i) => !teamIds.has(i.itPmId)) });
+      rowsHtml = rows.map((row) => {
+        const t = trackHtml(row.items);
+        shown += t.count;
+        return `<div class="pc-row${row.id ? '' : ' pc-row-other'}" data-member="${escapeHtml(row.id)}">
+          <div class="pc-label"><span class="pc-avatar pc-avatar-sm">${row.id ? escapeHtml(initials(row.label)) : '–'}</span>
+            <div><div class="pc-label-name">${escapeHtml(row.label)}</div><div class="muted">${t.count} shown${row.note ? ` · ${row.note}` : ''}</div></div></div>
+          ${t.html}
+        </div>`;
+      }).join('');
+    } else {
+      const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base', numeric: true });
+      const byStart = (a, b) => pcPos(span(a).s) - pcPos(span(b).s) || byName(a, b);
+      const compare = {
+        'start-asc': byStart,
+        'start-desc': (a, b) => byStart(b, a),
+        'name-asc': byName,
+        'name-desc': (a, b) => byName(b, a),
+      }[st.sort];
+      const ordered = scheduled.slice().sort(compare);
+      rowsHtml = ordered.map((i) => {
+        const t = trackHtml([i]);
+        if (!t.count) return '';
+        shown += 1;
+        return `<div class="pc-row" data-initiative="${escapeHtml(i.id)}">
+          <div class="pc-label"><span class="pc-shape-key ${i.type === 'CR' ? 'pc-shape-cr' : 'pc-shape-project'}" title="${i.type === 'CR' ? 'CR' : 'Project'}"></span>
+            <div><a class="pc-label-name" href="#view/${escapeHtml(i.id)}" data-id="${escapeHtml(i.id)}">${escapeHtml(i.name)}</a><div class="muted">${escapeHtml(i.status || '')} · ${escapeHtml(i.priority || '')}</div></div></div>
+          ${t.html}
+        </div>`;
+      }).join('') || `<div class="pc-row"><div class="pc-label muted">Nothing scheduled in this range</div><div class="pc-track" style="width:${st.months * PC_COL_W}px;height:40px"></div></div>`;
+    }
+    const hiddenCount = scheduled.length - shown;
+
+    container.innerHTML = `
+      <div class="pc">
+        <div class="card pc-toolbar">
+          <div class="pc-field"><label>Initiative Type</label>
+            <div class="pc-seg">${['All', 'Project', 'CR'].map((t) => `<button type="button" data-pc-type="${t}" class="${st.type === t ? 'active' : ''}">${t}</button>`).join('')}</div></div>
+          <div class="pc-field"><label>Department</label>
+            <select id="pc-dept">
+              <option value="">All departments</option>
+              ${deptNames.map((n) => `<option value="${escapeHtml(n)}" ${st.department === n ? 'selected' : ''}>${escapeHtml(n)}</option>`).join('')}
+              <option value="__none__" ${st.department === '__none__' ? 'selected' : ''}>(No department)</option>
+            </select></div>
+          <div class="pc-field"><label>Rows (Y axis)</label>
+            <select id="pc-yaxis"><option value="member" ${st.yAxis === 'member' ? 'selected' : ''}>Team Member (IT PM)</option>
+              <option value="initiative" ${st.yAxis === 'initiative' ? 'selected' : ''}>Project / CR</option></select></div>
+          ${st.yAxis === 'initiative' ? `<div class="pc-field"><label>Sort rows by</label>
+            <select id="pc-sort">${[
+              ['start-asc', 'Plan Start (earliest first)'],
+              ['start-desc', 'Plan Start (latest first)'],
+              ['name-asc', 'Project / CR Name (A–Z)'],
+              ['name-desc', 'Project / CR Name (Z–A)'],
+            ].map(([v, l]) => `<option value="${v}" ${st.sort === v ? 'selected' : ''}>${l}</option>`).join('')}</select></div>` : ''}
+          <div class="pc-field"><label>Months</label>
+            <div class="pc-range">
+              <button type="button" data-pc-shift="-3" title="Back 3 months">‹</button>
+              <button type="button" data-pc-shift="0">Today</button>
+              <button type="button" data-pc-shift="3" title="Forward 3 months">›</button>
+              <select id="pc-months">${[6, 12, 18, 24].map((n) => `<option value="${n}" ${st.months === n ? 'selected' : ''}>${n} months</option>`).join('')}</select>
+            </div></div>
+          <div class="pc-legend muted">
+            <span><i class="pc-shape-key pc-shape-project"></i>Project</span><span><i class="pc-shape-key pc-shape-cr"></i>CR</span>
+            <span class="pc-legend-sep">·</span>
+            <span><i class="pc-key pc-st-idle"></i>Not Started / On Hold</span><span><i class="pc-key pc-st-ok"></i>On Track</span>
+            <span><i class="pc-key pc-st-risk"></i>At Risk</span><span><i class="pc-key pc-st-late"></i>Delayed</span><span><i class="pc-key pc-st-live"></i>Live</span>
+            <span><i class="pc-key pc-tail-key"></i>beyond plan end (name only)</span>
+            <span>Weighted Score: Project PM + Dev = 1, PM or Dev = 0.5 · CR = 0.25</span>
+            <span><i class="pc-key pc-load-ok"></i>≤${PC_LOAD_OK_MAX}</span><span><i class="pc-key pc-load-busy"></i>&gt;${PC_LOAD_OK_MAX} to ${PC_LOAD_BUSY_MAX}</span><span><i class="pc-key pc-load-over"></i>&gt;${PC_LOAD_BUSY_MAX}</span>
+          </div>
+        </div>
+
+        <h3 class="pc-section-title">Team Weighted Score — ${pcMonthLabel(st.start)} to ${pcMonthLabel(st.start + st.months - 1)} (${st.type === 'All' ? 'Projects + CRs' : st.type + 's'}${st.department ? ` · ${escapeHtml(st.department === '__none__' ? 'No department' : st.department)}` : ''})</h3>
+        <div class="pc-scores">${scoreCards}</div>
+
+        <div class="card pc-calendar">
+          <div class="pc-cal-head">
+            <h3>🗓️ Portfolio Calendar</h3>
+            <span class="muted">${st.yAxis === 'member'
+              ? 'Click a card to view or edit it. Drag it sideways to move its plan dates, drag its edges to change start or end, or drop it on another member to change the IT PM.'
+              : 'Click a card to view or edit it. Drag it sideways to move its plan dates, or drag its edges to change start or end.'}
+              ${hiddenCount > 0 ? ` ${hiddenCount} scheduled item(s) fall outside this range.` : ''}</span>
+          </div>
+          <div class="pc-scroll">
+            <div class="pc-table">
+              <div class="pc-row pc-head">
+                <div class="pc-label">${st.yAxis === 'member' ? 'Team Member (IT PM)' : 'Project / CR'}</div>
+                <div class="pc-months" style="width:${st.months * PC_COL_W}px">
+                  ${monthIdx.map((m) => `<div class="pc-month${m === thisMonth ? ' pc-current' : ''}" style="width:${PC_COL_W}px">${pcMonthLabel(m)}</div>`).join('')}
+                </div>
+              </div>
+              ${rowsHtml}
+            </div>
+          </div>
+        </div>
+
+        ${unscheduled.length ? `<div class="card pc-unscheduled">
+          <h3>No plan dates (${unscheduled.length})</h3>
+          <p class="muted">Not counted in the Weighted Score. Drag one onto a month in the calendar to give it plan dates for that month.</p>
+          <div class="pc-chips">${unscheduled.map((i) => `<span class="pc-chip ${pcStatusClass(i.status)} ${i.type === 'CR' ? 'pc-shape-cr' : 'pc-shape-project'}" data-id="${escapeHtml(i.id)}"
+              title="${escapeHtml(`${i.type}: ${i.name}\nIT PM: ${userName(i.itPmId) || '—'}\nClick to open · drag onto a month to plan it`)}">${escapeHtml(i.name)}</span>`).join('')}</div>
+        </div>` : ''}
+      </div>`;
+
+    const scroller = container.querySelector('.pc-scroll');
+    if (scroller) scroller.scrollLeft = prevScrollLeft;
+    wire();
+  }
+
+  function setState(patch) {
+    Object.assign(st, patch);
+    pcSaveState({ type: st.type, yAxis: st.yAxis, months: st.months, sort: st.sort, department: st.department });
+    draw();
+  }
+
+  async function save(item, changes, summary) {
+    const ok = await confirmDialog(summary, { title: 'Update plan', confirmText: 'Save' });
+    if (!ok) return draw();
+    try {
+      await fetchJSON(`/api/initiatives/${item.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...changes, changedBy: currentUserId || 'Unknown' }),
+      });
+      Object.assign(item, changes);
+      notify(`Updated: ${item.name}`, 'success');
+      hubTrack('portfolio_calendar_update', { fields: Object.keys(changes).join(',') });
+    } catch (e) {
+      if (!(e instanceof AuthRedirectError)) notify(`Update failed: ${e.message}`, 'error');
+    }
+    draw();
+  }
+
+  function describe(item, changes) {
+    const lines = [`${item.type}: ${item.name}`, ''];
+    if ('planStartDate' in changes) lines.push(`Plan Start: ${item.planStartDate?.slice(0, 10) || '—'} → ${changes.planStartDate}`);
+    if ('planEndDate' in changes) lines.push(`Plan End: ${item.planEndDate?.slice(0, 10) || '—'} → ${changes.planEndDate}`);
+    if ('itPmId' in changes) lines.push(`IT PM: ${userName(item.itPmId) || '—'} → ${userName(changes.itPmId)}`);
+    return lines.join('\n');
+  }
+
+  // Floating panel with the initiative's real detail page (view + edit) in embedded mode.
+  // Closing it reloads the data, so edits made there (dates, IT PM, …) show up here.
+  function openPanel(item) {
+    const overlay = document.createElement('div');
+    overlay.className = 'pc-panel-backdrop';
+    overlay.innerHTML = `
+      <div class="pc-panel" role="dialog" aria-modal="true" aria-label="${escapeHtml(item.name)}">
+        <div class="pc-panel-head">
+          <span class="pc-type-tag pc-type-${item.type === 'CR' ? 'cr' : 'project'}">${item.type === 'CR' ? 'CR' : 'PRJ'}</span>
+          <strong class="pc-panel-title">${escapeHtml(item.name)}</strong>
+          <a class="pc-panel-full" href="#view/${escapeHtml(item.id)}">Open full page ↗</a>
+          <button type="button" class="pc-panel-close" aria-label="Close and return to the Portfolio Calendar" title="Close (Esc)">✕</button>
+        </div>
+        <iframe class="pc-panel-frame" title="${escapeHtml(item.name)}"
+          src="${location.pathname}?embed=1#view/${encodeURIComponent(item.id)}"></iframe>
+      </div>`;
+    const frame = overlay.querySelector('iframe');
+    let closed = false;
+
+    const hasUnsavedEdit = () => {
+      try { return !!frame.contentDocument?.getElementById('save-btn'); } catch (_) { return false; }
+    };
+    const close = async (force) => {
+      if (closed) return;
+      if (!force && hasUnsavedEdit() &&
+          !(await confirmDialog('You have an edit form open. Close without saving?', { title: 'Discard changes?', confirmText: 'Close', danger: true }))) {
+        return;
+      }
+      closed = true;
+      window.removeEventListener('message', onMessage);
+      document.removeEventListener('keydown', onKey);
+      document.body.classList.remove('pc-panel-open');
+      overlay.remove();
+      await reload();
+    };
+    const onKey = (e) => { if (e.key === 'Escape' && !document.querySelector('.confirm-dialog')) close(false); };
+    const onMessage = (e) => {
+      if (e.origin !== location.origin || e.source !== frame.contentWindow) return;
+      // The page inside left the detail view (Back link, or login after a session expiry).
+      if (e.data?.type === 'pm-embed-leave') close(true);
+    };
+
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) close(false); });
+    overlay.querySelector('.pc-panel-close').onclick = () => close(false);
+    overlay.querySelector('.pc-panel-full').onclick = () => {
+      closed = true; // leaving the calendar for the full page; no reload needed
+      window.removeEventListener('message', onMessage);
+      document.removeEventListener('keydown', onKey);
+      document.body.classList.remove('pc-panel-open');
+      overlay.remove();
+    };
+    window.addEventListener('message', onMessage);
+    document.addEventListener('keydown', onKey);
+    document.body.classList.add('pc-panel-open');
+    document.body.appendChild(overlay);
+    overlay.querySelector('.pc-panel-close').focus();
+    hubTrack('portfolio_calendar_open_detail', { type: item.type });
+  }
+
+  async function reload() {
+    try {
+      all = await fetchJSON('/api/initiatives?limit=0');
+    } catch (e) {
+      if (!(e instanceof AuthRedirectError)) notify(`Could not refresh the calendar: ${e.message}`, 'error');
+      return;
+    }
+    draw();
+  }
+
+  function wire() {
+    container.querySelectorAll('[data-pc-type]').forEach((b) => { b.onclick = () => setState({ type: b.dataset.pcType }); });
+    container.querySelector('#pc-dept').onchange = (e) => setState({ department: e.target.value });
+    container.querySelector('#pc-yaxis').onchange = (e) => setState({ yAxis: e.target.value });
+    const sortSel = container.querySelector('#pc-sort');
+    if (sortSel) sortSel.onchange = (e) => setState({ sort: e.target.value });
+    // Row names open the same floating panel as the cards
+    container.querySelectorAll('a.pc-label-name[data-id]').forEach((a) => {
+      a.onclick = (e) => {
+        e.preventDefault();
+        const item = all.find((i) => i.id === a.dataset.id);
+        if (item) openPanel(item);
+      };
+    });
+    container.querySelector('#pc-months').onchange = (e) => setState({ months: Number(e.target.value) });
+    container.querySelectorAll('[data-pc-shift]').forEach((b) => {
+      b.onclick = () => setState({ start: Number(b.dataset.pcShift) === 0 ? thisMonth - 1 : st.start + Number(b.dataset.pcShift) });
+    });
+    container.querySelector('.pc-table').addEventListener('pointerdown', (e) => startDrag(e, e.target.closest('.pc-bar')));
+    container.querySelectorAll('.pc-chip').forEach((chip) => chip.addEventListener('pointerdown', (e) => startDrag(e, chip)));
+  }
+
+  // Pointer-based drag: cards move/resize in whole months; chips are placed on a month.
+  function startDrag(e, el) {
+    if (!el || e.button !== 0) return;
+    const item = all.find((i) => i.id === el.dataset.id);
+    if (!item) return;
+    e.preventDefault();
+    const isChip = el.classList.contains('pc-chip');
+    const mode = isChip ? 'place'
+      : e.target.classList.contains('pc-handle-start') ? 'start'
+        : e.target.classList.contains('pc-handle-end') ? 'end' : 'move';
+    const left0 = parseFloat(el.style.left) || 0;
+    const fill0 = parseFloat(el.dataset.fill) || 0;
+    const need = parseFloat(el.dataset.need) || 0;
+    const setFill = (f) => {
+      const fill = Math.max(10, f);
+      el.style.setProperty('--fill', `${fill}px`);
+      el.style.width = `${Math.max(fill, need)}px`;
+      el.classList.toggle('pc-has-tail', need > fill);
+    };
+    const x0 = e.clientX;
+    const y0 = e.clientY;
+    let delta = 0;
+    let moved = false;
+    let targetRow = null;
+    let ghost = null;
+    const tip = document.createElement('div');
+    tip.className = 'pc-drag-tip';
+    document.body.appendChild(tip);
+    el.classList.add('pc-dragging');
+
+    const rowAt = (x, y) => {
+      el.style.pointerEvents = 'none';
+      if (ghost) ghost.style.display = 'none';
+      const under = document.elementFromPoint(x, y);
+      el.style.pointerEvents = '';
+      if (ghost) ghost.style.display = '';
+      return under ? under.closest('.pc-row:not(.pc-head)') : null;
+    };
+    const monthAt = (row, x) => {
+      const track = row && row.querySelector('.pc-track');
+      if (!track) return null;
+      const k = Math.floor((x - track.getBoundingClientRect().left) / PC_COL_W);
+      return k >= 0 && k < st.months ? st.start + k : null;
+    };
+    const proposed = () => {
+      const sp = span(item);
+      if (mode === 'place' || !sp) return null;
+      if (mode === 'move') return { s: pcAddMonths(sp.s, delta), e: pcAddMonths(sp.e, delta) };
+      if (mode === 'start') {
+        const s = pcAddMonths(sp.s, delta);
+        return pcPos(s, false) < pcPos(sp.e, true) ? { s, e: sp.e } : null;
+      }
+      const end = pcAddMonths(sp.e, delta);
+      return pcPos(end, true) > pcPos(sp.s, false) ? { s: sp.s, e: end } : null;
+    };
+
+    const onMove = (ev) => {
+      const dx = ev.clientX - x0;
+      const dy = ev.clientY - y0;
+      if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
+      if (!moved) return;
+      delta = Math.round(dx / PC_COL_W);
+      container.querySelectorAll('.pc-drop-target').forEach((r) => r.classList.remove('pc-drop-target'));
+      targetRow = null;
+      let label = '';
+
+      if (mode === 'place') {
+        if (!ghost) {
+          ghost = el.cloneNode(true);
+          ghost.className += ' pc-ghost';
+          document.body.appendChild(ghost);
+        }
+        ghost.style.left = `${ev.clientX + 8}px`;
+        ghost.style.top = `${ev.clientY + 8}px`;
+        const row = rowAt(ev.clientX, ev.clientY);
+        const m = monthAt(row, ev.clientX);
+        if (m !== null) {
+          targetRow = row;
+          row.classList.add('pc-drop-target');
+          label = `Plan: ${pcMonthLabel(m)}`;
+        }
+      } else {
+        if (mode === 'move') {
+          el.style.left = `${left0 + delta * PC_COL_W}px`;
+          if (st.yAxis === 'member') {
+            el.style.transform = `translateY(${dy}px)`;
+            const row = rowAt(ev.clientX, ev.clientY);
+            if (row && row.dataset.member && row.dataset.member !== item.itPmId) {
+              targetRow = row;
+              row.classList.add('pc-drop-target');
+            }
+          }
+        } else if (mode === 'start') {
+          el.style.left = `${left0 + delta * PC_COL_W}px`;
+          setFill(fill0 - delta * PC_COL_W);
+        } else {
+          setFill(fill0 + delta * PC_COL_W);
+        }
+        const p = proposed();
+        label = p ? `${pcFormat(p.s)} → ${pcFormat(p.e)}` : 'Start must be before end';
+        if (targetRow) label += `\nIT PM → ${userName(targetRow.dataset.member)}`;
+      }
+      tip.textContent = label;
+      tip.style.display = label ? 'block' : 'none';
+      tip.style.left = `${ev.clientX + 14}px`;
+      tip.style.top = `${ev.clientY - 36}px`;
+    };
+
+    const onUp = (ev) => {
+      window.removeEventListener('pointermove', onMove);
+      window.removeEventListener('pointerup', onUp);
+      tip.remove();
+      if (ghost) ghost.remove();
+      el.classList.remove('pc-dragging');
+      if (!moved) {
+        openPanel(item); // a click (not a drag) opens the detail in the floating panel
+        return;
+      }
+      const changes = {};
+      if (mode === 'place') {
+        const m = monthAt(targetRow, ev.clientX);
+        if (m === null) return draw();
+        const y = Math.floor(m / 12);
+        const mo = m % 12;
+        const start = { y, m: mo, d: 1 };
+        const oldEnd = pcParseDate(item.planEndDate);
+        const end = oldEnd && pcPos(oldEnd, true) > pcPos(start, false) ? oldEnd : { y, m: mo, d: pcDaysIn(y, mo) };
+        changes.planStartDate = pcFormat(start);
+        changes.planEndDate = pcFormat(end);
+        if (st.yAxis === 'member' && targetRow.dataset.member && targetRow.dataset.member !== item.itPmId) {
+          changes.itPmId = targetRow.dataset.member;
+        }
+      } else {
+        const p = proposed();
+        if (p && delta !== 0) {
+          if (mode !== 'end') changes.planStartDate = pcFormat(p.s);
+          if (mode !== 'start') changes.planEndDate = pcFormat(p.e);
+        }
+        if (mode === 'move' && targetRow) changes.itPmId = targetRow.dataset.member;
+      }
+      if (!Object.keys(changes).length) return draw();
+      save(item, changes, describe(item, changes));
+    };
+
+    window.addEventListener('pointermove', onMove);
+    window.addEventListener('pointerup', onUp);
+  }
+
+  draw();
+}
+
 async function renderUserDashboard() {
   setActive('#user-dashboard');
   await ensureLookups();
@@ -8777,7 +9734,7 @@ async function renderUserDashboard() {
       ? teamMembers.map(m => ({ value: m.id, label: m.name || m.email }))
       : [];
     
-    app.innerHTML = `
+    const overviewHtml = `
       ${isManager && teamMemberOptions.length > 0 ? `
       <div class="card" style="margin-bottom: 24px; padding: 20px;">
         <div style="display: flex; gap: 24px; align-items: flex-end; flex-wrap: wrap;">
@@ -8906,7 +9863,42 @@ async function renderUserDashboard() {
         </div>
       </div>
     `;
-    
+
+    if (!isManager) {
+      app.innerHTML = overviewHtml;
+    } else {
+      // Managers get a second tab: the team's Portfolio Calendar (remembered per browser).
+      let tab = 'overview';
+      try { if (localStorage.getItem('pm_dashboard_tab') === 'calendar') tab = 'calendar'; } catch (_) { /* optional */ }
+      app.innerHTML = `
+        <div class="tabs dash-tabs" role="tablist">
+          <button type="button" class="tab" role="tab" data-dash-tab="overview">🏠 Overview</button>
+          <button type="button" class="tab" role="tab" data-dash-tab="calendar">🗓️ Portfolio Calendar</button>
+        </div>
+        <div id="dash-overview">${overviewHtml}</div>
+        <div id="dash-calendar"></div>`;
+      let calendarLoaded = false;
+      const showTab = (name) => {
+        app.querySelectorAll('[data-dash-tab]').forEach((b) => {
+          b.classList.toggle('active', b.dataset.dashTab === name);
+          b.setAttribute('aria-selected', String(b.dataset.dashTab === name));
+        });
+        document.getElementById('dash-overview').hidden = name !== 'overview';
+        document.getElementById('dash-calendar').hidden = name !== 'calendar';
+        try { localStorage.setItem('pm_dashboard_tab', name); } catch (_) { /* optional */ }
+        if (name === 'calendar' && !calendarLoaded) {
+          calendarLoaded = true;
+          hubCall('page', '/#/user-dashboard/portfolio-calendar');
+          renderPortfolioCalendar(document.getElementById('dash-calendar'), {
+            team: teamMembers,
+            currentUserId: currentUserProfile?.id,
+          });
+        }
+      };
+      app.querySelectorAll('[data-dash-tab]').forEach((b) => { b.onclick = () => showTab(b.dataset.dashTab); });
+      showTab(tab);
+    }
+
     // Add filter update functions
     window.updateUserDashboardFilters = () => {
       const teamMemberId = document.getElementById('filter-team-member')?.value || '';
@@ -12269,6 +13261,10 @@ async function router() {
   }
   
   const h = location.hash || defaultRoute;
+  if (PM_EMBED && !/^#(view|edit)\//.test(h)) {
+    window.parent.postMessage({ type: 'pm-embed-leave', hash: h }, location.origin);
+    return;
+  }
   if (!location.hash) {
     location.hash = defaultRoute;
     return;

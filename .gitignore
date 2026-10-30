@@ -85,3 +85,7 @@ test-results/
 # User-uploaded documents (persisted on host via docker volume; may be sensitive)
 uploads/
 
+
+# Database dumps (may contain production personal data)
+backups/
+*.dump
