@@ -2621,14 +2621,15 @@ window.openProjectImport = async function openProjectImport() {
   document.addEventListener('keydown', onKey);
 
   let preview = null;
-  const state = { peopleMap: {}, statusMap: {}, defaults: { priority: 'P2', departmentId: '', businessOwnerId: '', itManagerId: '' }, duplicateMode: 'skip' };
+  const state = { peopleMap: {}, statusMap: {}, departmentMap: {}, defaults: { priority: 'P2', departmentId: '', businessOwnerId: '', itManagerId: '' }, duplicateMode: 'skip' };
 
   function showUpload(errorText) {
     modal.innerHTML = `
       <div class="modal-content pi-content" role="dialog" aria-modal="true" aria-labelledby="pi-title">
         <div class="pi-head"><h3 id="pi-title">⬆ Upload Projects</h3><button type="button" class="pi-x" data-close aria-label="Close">✕</button></div>
-        <p class="muted">Create projects from the Excel planning template (Type, Initiative Name, IT PM, IT PIC, Status,
-          Notes / Decision needed, Plan Start Date, Plan End Date). You will review everything before anything is saved.</p>
+        <p class="muted">Create projects from the Excel planning template (Type, Initiative Name, Department, Business Owner,
+          IT PM, IT PIC, Status, Notes / Decision needed, Plan Start Date, Plan End Date). You will review everything before
+          anything is saved.</p>
         <div class="pi-upload">
           <input type="file" id="pi-file" accept=".xlsx,.xls">
           <button type="button" class="btn" id="pi-template">Download template</button>
@@ -2656,6 +2657,7 @@ window.openProjectImport = async function openProjectImport() {
       }
       state.peopleMap = Object.fromEntries(preview.people.map((p) => [p.name, p.userId || '']));
       state.statusMap = Object.fromEntries(preview.statuses.map((s) => [s.value, { status: s.status, milestone: s.milestone }]));
+      state.departmentMap = Object.fromEntries((preview.departments || []).map((d) => [d.value, d.departmentId || '']));
       showReview();
     };
   }
@@ -2684,9 +2686,15 @@ window.openProjectImport = async function openProjectImport() {
     else if (r.itPm.length > 1) notes.push(`Several IT PMs — ${userName(pm[0])} is used`);
     const unmappedPic = r.itPic.filter((n) => !state.peopleMap[n]);
     if (unmappedPic.length) notes.push(`IT PIC "${unmappedPic.join(', ')}" not mapped — left out`);
+    if (r.departmentRaw && !state.departmentMap[r.departmentRaw]) {
+      notes.push(`Department "${r.departmentRaw}" not mapped — ${state.defaults.departmentId ? 'default used' : 'left empty'}`);
+    }
+    if (r.businessOwner.length && !state.peopleMap[r.businessOwner[0]]) {
+      notes.push(`Business Owner "${r.businessOwner[0]}" not mapped — ${state.defaults.businessOwnerId ? 'default used' : 'left empty'}`);
+    }
     if (r.existingId) {
       return state.duplicateMode === 'update'
-        ? { action: 'update', label: 'Update', notes: ['A project with this name exists — its plan, IT PM/PIC, status and notes will be updated', ...notes] }
+        ? { action: 'update', label: 'Update', notes: ['A project with this name exists — its plan, department, business owner, IT PM/PIC, status and notes will be updated', ...notes] }
         : { action: 'skip', label: 'Skip', notes: ['A project with this name already exists'] };
     }
     return { action: 'create', label: 'New', notes };
@@ -2701,6 +2709,12 @@ window.openProjectImport = async function openProjectImport() {
       .sort((a, b) => String(a.name).localeCompare(String(b.name)))
       .map((d) => `<option value="${escapeHtml(d.id)}" ${d.id === state.defaults.departmentId ? 'selected' : ''}>${escapeHtml(d.name)}</option>`).join('');
     const prevScroll = modal.querySelector('.pi-content')?.scrollTop || 0;
+    const deptName = (id) => (LOOKUPS.departments || []).find((d) => d.id === id)?.name || '';
+    const rowDept = (r) => (r.departmentRaw ? deptName(state.departmentMap[r.departmentRaw]) || `${r.departmentRaw} ✗` : '');
+    const rowOwner = (r) => (r.businessOwner.length ? userName(state.peopleMap[r.businessOwner[0]]) || `${r.businessOwner[0]} ✗` : '');
+    const deptMapOptions = (selected) => `<option value="">— Not mapped —</option>` + (LOOKUPS.departments || []).slice()
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)))
+      .map((d) => `<option value="${escapeHtml(d.id)}" ${d.id === selected ? 'selected' : ''}>${escapeHtml(d.name)}</option>`).join('');
 
     modal.innerHTML = `
       <div class="modal-content pi-content pi-wide" role="dialog" aria-modal="true" aria-labelledby="pi-title">
@@ -2718,9 +2732,10 @@ window.openProjectImport = async function openProjectImport() {
           <section class="pi-box">
             <h4>People in the file → PM users</h4>
             <table class="pi-map">
-              ${preview.people.map((p) => `<tr><td>${escapeHtml(p.name)} <span class="muted">(${p.count})</span></td>
+              ${preview.people.map((p) => `<tr><td>${escapeHtml(p.name)} <span class="muted">(${p.count})</span>
+                  <div class="pi-roles">${escapeHtml((p.roles || []).join(' · '))}</div></td>
                 <td><select data-person="${escapeHtml(p.name)}">${userOptions(state.peopleMap[p.name], '— Leave empty —')}</select></td></tr>`).join('') ||
-                '<tr><td class="muted">No IT PM / IT PIC values in the file</td></tr>'}
+                '<tr><td class="muted">No people in the file</td></tr>'}
             </table>
           </section>
           <section class="pi-box">
@@ -2730,13 +2745,19 @@ window.openProjectImport = async function openProjectImport() {
                 <td><select data-status="${escapeHtml(s.value)}">${preview.options.statuses.map((o) => `<option ${state.statusMap[s.value].status === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td>
                 <td><select data-milestone="${escapeHtml(s.value)}">${preview.options.milestones.map((o) => `<option ${state.statusMap[s.value].milestone === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td></tr>`).join('')}
             </table>
+            ${(preview.departments || []).length ? `
+            <h4 class="pi-subhead">Department in the file → PM department</h4>
+            <table class="pi-map">
+              ${preview.departments.map((d) => `<tr><td>${escapeHtml(d.value)} <span class="muted">(${d.count})</span></td>
+                <td><select data-dept="${escapeHtml(d.value)}">${deptMapOptions(state.departmentMap[d.value])}</select></td></tr>`).join('')}
+            </table>` : ''}
           </section>
           <section class="pi-box">
             <h4>Apply to every new project</h4>
             <table class="pi-map">
               <tr><td>Priority</td><td><select data-default="priority">${preview.options.priorities.map((o) => `<option ${state.defaults.priority === o ? 'selected' : ''}>${o}</option>`).join('')}</select></td></tr>
-              <tr><td>Department</td><td><select data-default="departmentId">${deptOptions}</select></td></tr>
-              <tr><td>Business Owner</td><td><select data-default="businessOwnerId">${userOptions(state.defaults.businessOwnerId, '— Not set —')}</select></td></tr>
+              <tr><td>Department<div class="pi-roles">when the row has none / unmapped</div></td><td><select data-default="departmentId">${deptOptions}</select></td></tr>
+              <tr><td>Business Owner<div class="pi-roles">when the row has none / unmapped</div></td><td><select data-default="businessOwnerId">${userOptions(state.defaults.businessOwnerId, '— Not set —')}</select></td></tr>
               <tr><td>IT Manager</td><td><select data-default="itManagerId">${userOptions(state.defaults.itManagerId, '— Not set —')}</select></td></tr>
             </table>
             <p class="muted pi-hint">Description and Business Impact stay empty; fill them in later on each project.</p>
@@ -2744,14 +2765,14 @@ window.openProjectImport = async function openProjectImport() {
           <section class="pi-box pi-box-wide">
             <h4>Projects that already exist (same name)</h4>
             <label class="pi-radio"><input type="radio" name="pi-dup" value="skip" ${state.duplicateMode === 'skip' ? 'checked' : ''}> Skip them (no change)</label>
-            <label class="pi-radio"><input type="radio" name="pi-dup" value="update" ${state.duplicateMode === 'update' ? 'checked' : ''}> Update their plan dates, IT PM / PIC, status and notes</label>
+            <label class="pi-radio"><input type="radio" name="pi-dup" value="update" ${state.duplicateMode === 'update' ? 'checked' : ''}> Update their plan dates, department, business owner, IT PM / PIC, status and notes</label>
             <span class="muted pi-hint">Updates are recorded in each project's Change History.</span>
           </section>
         </div>
 
         <div class="pi-table-wrap">
           <table class="pi-rows">
-            <thead><tr><th>Row</th><th>Initiative Name</th><th>IT PM</th><th>IT PIC</th><th>Status</th><th>Plan Start</th><th>Plan End</th><th>Result</th></tr></thead>
+            <thead><tr><th>Row</th><th>Initiative Name</th><th>Department</th><th>Business Owner</th><th>IT PM</th><th>IT PIC</th><th>Status</th><th>Plan Start</th><th>Plan End</th><th>Result</th></tr></thead>
             <tbody>
               ${rows.map((r, k) => {
                 const o = outcomes[k];
@@ -2759,6 +2780,8 @@ window.openProjectImport = async function openProjectImport() {
                 return `<tr class="pi-row-${o.action}">
                   <td>${r.rowNumber}</td>
                   <td>${escapeHtml(r.name || '—')}${r.notes ? `<div class="muted pi-note">${escapeHtml(r.notes)}</div>` : ''}</td>
+                  <td>${escapeHtml(rowDept(r) || deptName(state.defaults.departmentId) || '—')}</td>
+                  <td>${escapeHtml(rowOwner(r) || userName(state.defaults.businessOwnerId) || '—')}</td>
                   <td>${escapeHtml(r.itPm.map((n) => userName(state.peopleMap[n]) || `${n} ✗`).join(', ') || '—')}</td>
                   <td>${escapeHtml(r.itPic.map((n) => userName(state.peopleMap[n]) || `${n} ✗`).join(', ') || '—')}</td>
                   <td>${escapeHtml(r.statusRaw)} → ${escapeHtml(map.status || '?')}<div class="muted">${escapeHtml(r.milestoneRaw || map.milestone || '')}</div></td>
@@ -2784,7 +2807,8 @@ window.openProjectImport = async function openProjectImport() {
     modal.querySelectorAll('[data-person]').forEach((s) => { s.onchange = () => { state.peopleMap[s.dataset.person] = s.value; showReview(); }; });
     modal.querySelectorAll('[data-status]').forEach((s) => { s.onchange = () => { state.statusMap[s.dataset.status].status = s.value; showReview(); }; });
     modal.querySelectorAll('[data-milestone]').forEach((s) => { s.onchange = () => { state.statusMap[s.dataset.milestone].milestone = s.value; showReview(); }; });
-    modal.querySelectorAll('[data-default]').forEach((s) => { s.onchange = () => { state.defaults[s.dataset.default] = s.value; }; });
+    modal.querySelectorAll('[data-default]').forEach((s) => { s.onchange = () => { state.defaults[s.dataset.default] = s.value; showReview(); }; });
+    modal.querySelectorAll('[data-dept]').forEach((s) => { s.onchange = () => { state.departmentMap[s.dataset.dept] = s.value; showReview(); }; });
     modal.querySelectorAll('input[name="pi-dup"]').forEach((r) => { r.onchange = () => { state.duplicateMode = r.value; showReview(); }; });
     modal.querySelector('#pi-import').onclick = () => runImport(toImport);
   }
@@ -2809,6 +2833,7 @@ window.openProjectImport = async function openProjectImport() {
           rows: preview.rows.filter((r) => !r.errors.length),
           peopleMap: state.peopleMap,
           statusMap: state.statusMap,
+          departmentMap: state.departmentMap,
           defaults: {
             priority: state.defaults.priority,
             departmentId: state.defaults.departmentId || null,

@@ -5827,3 +5827,5 @@ body.pc-panel-open { overflow: hidden; }
 .pi-badge-error { background: #fde0dd; color: #9e2c25; }
 .pi-msg { font-size: 11px; color: var(--muted); margin-top: 3px; }
 .pi-failed { font-size: 13px; color: #9e2c25; max-height: 40vh; overflow: auto; }
+.pi-roles { font-size: 11px; color: var(--muted); font-weight: 400; }
+.pi-subhead { margin: 14px 0 8px !important; }

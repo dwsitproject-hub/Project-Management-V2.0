@@ -1,6 +1,6 @@
 // Admin: bulk upload of a project list from an Excel planning template
-// (columns: Type, Initiative Name, IT PM, IT PIC, Status, Notes / Decision needed,
-//  Plan Start Date, Plan End Date; optional Priority, Milestone, Department).
+// (columns: Type, Initiative Name, Department, Business Owner, IT PM, IT PIC, Status,
+//  Notes / Decision needed, Plan Start Date, Plan End Date; optional Priority, Milestone).
 //
 //   GET  /template  → blank .xlsx in the expected layout
 //   POST /preview   → parse the uploaded file (nothing is saved): normalized rows, row
@@ -15,6 +15,7 @@ import crypto from 'crypto';
 import XLSX from 'xlsx';
 import store from '../store.js';
 import { PROJECT_MILESTONES, normalizeProjectMilestone, isValidProjectMilestone } from '../projectMilestones.js';
+import { normalizeDepartmentName } from '../departmentGroups.js';
 
 const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, files: 1 } });
@@ -49,7 +50,8 @@ const COLUMNS = {
   planEnd: ['plan end date', 'plan end', 'end date', 'end'],
   priority: ['priority'],
   milestone: ['milestone'],
-  department: ['department'],
+  department: ['department', 'dept'],
+  businessOwner: ['business owner', 'owner', 'bo'],
 };
 
 const now = () => new Date().toISOString();
@@ -123,6 +125,23 @@ function matchUser(name, users) {
   };
 }
 
+/**
+ * PM department for a file value. Departments are matched by the name PM shows
+ * (normalizeDepartmentName: "Operation" is shown as "Industrial", "Trader" as "Commercial"),
+ * exact (any case) first, else a unique prefix match.
+ */
+function matchDepartment(value, departments) {
+  const key = normKey(value);
+  if (!key) return null;
+  const shown = departments.map((d) => ({ id: d.id, names: [normKey(d.name), normKey(normalizeDepartmentName(d.name))] }));
+  const exact = shown.filter((d) => d.names.includes(key));
+  if (exact.length === 1) return exact[0].id;
+  if (exact.length > 1) return null; // e.g. two departments both shown as "Commercial": let the admin choose
+  if (key.length < 3) return null;
+  const partial = shown.filter((d) => d.names.some((n) => n.length >= 3 && (n.startsWith(key) || key.startsWith(n))));
+  return partial.length === 1 ? partial[0].id : null;
+}
+
 function findColumns(headerRow) {
   const idx = {};
   const headers = headerRow.map(normKey);
@@ -137,10 +156,10 @@ function findColumns(headerRow) {
 router.get('/template', (_req, res) => {
   const wb = XLSX.utils.book_new();
   const ws = XLSX.utils.aoa_to_sheet([
-    ['Type', 'Initiative Name', 'IT PM', 'IT PIC', 'Status', 'Notes / Decision needed', 'Plan Start Date', 'Plan End Date'],
-    ['Project', 'Example project name', 'Jerry', 'Jerry, Stevanus', 'Not Started', 'Optional note', 'Jan-27', 'Mar-27'],
+    ['Type', 'Initiative Name', 'Department', 'Business Owner', 'IT PM', 'IT PIC', 'Status', 'Notes / Decision needed', 'Plan Start Date', 'Plan End Date'],
+    ['Project', 'Example project name', 'Logistic', 'Dinna Medhani', 'Jerry', 'Jerry, Stevanus', 'Not Started', 'Optional note', 'Jan-27', 'Mar-27'],
   ]);
-  ws['!cols'] = [{ wch: 10 }, { wch: 50 }, { wch: 16 }, { wch: 22 }, { wch: 14 }, { wch: 40 }, { wch: 15 }, { wch: 15 }];
+  ws['!cols'] = [{ wch: 10 }, { wch: 50 }, { wch: 16 }, { wch: 20 }, { wch: 16 }, { wch: 22 }, { wch: 14 }, { wch: 40 }, { wch: 15 }, { wch: 15 }];
   XLSX.utils.book_append_sheet(wb, ws, 'Proposed Plan');
   const help = XLSX.utils.aoa_to_sheet([
     ['Column', 'Values'],
@@ -148,7 +167,9 @@ router.get('/template', (_req, res) => {
     ['IT PM / IT PIC', 'Name as in PM (e.g. "Jerry" or "Rian D"); several IT PICs separated by commas. "UNASSIGNED" / "New Hire …" are left empty.'],
     ['Status', 'Not Started, In Progress, At Risk, Done, Deferred (or PM statuses); mapped to PM status + milestone during upload'],
     ['Plan Start / End Date', 'Month as Mmm-YY (e.g. Oct-26 = 1 Oct 2026 for start, 31 Oct 2026 for end) or a full date'],
-    ['Optional columns', 'Priority (P0/P1/P2), Milestone, Department'],
+    ['Department', 'Department name as in PM (e.g. Logistic, HC). Names PM does not have can be mapped during upload.'],
+    ['Business Owner', 'Name as in PM (e.g. "Dinna Medhani" or "Victor")'],
+    ['Optional columns', 'Priority (P0/P1/P2), Milestone'],
   ]);
   help['!cols'] = [{ wch: 22 }, { wch: 110 }];
   XLSX.utils.book_append_sheet(wb, help, 'How to fill');
@@ -227,16 +248,26 @@ router.post('/preview', upload.single('file'), async (req, res) => {
         priority: PRIORITIES.includes(priority) ? priority : null,
         milestoneRaw: norm(cell(r, 'milestone')) || null,
         departmentRaw: norm(cell(r, 'department')) || null,
+        businessOwner: splitPeople(cell(r, 'businessOwner')).slice(0, 1),
         existingId: existingByName.get(key) || null,
         errors,
       };
     });
 
     const peopleCount = new Map();
-    for (const r of rows) for (const p of new Set([...r.itPm, ...r.itPic])) peopleCount.set(p, (peopleCount.get(p) || 0) + 1);
+    const peopleRoles = new Map();
+    const addPerson = (p, role) => {
+      if (!peopleRoles.has(p)) peopleRoles.set(p, new Set());
+      peopleRoles.get(p).add(role);
+    };
+    for (const r of rows) {
+      for (const p of new Set([...r.itPm, ...r.itPic, ...r.businessOwner])) peopleCount.set(p, (peopleCount.get(p) || 0) + 1);
+      [...r.itPm, ...r.itPic].forEach((p) => addPerson(p, 'IT PM / PIC'));
+      r.businessOwner.forEach((p) => addPerson(p, 'Business Owner'));
+    }
     const people = [...peopleCount.entries()]
       .sort((a, b) => b[1] - a[1])
-      .map(([name, count]) => ({ name, count, ...matchUser(name, users) }));
+      .map(([name, count]) => ({ name, count, roles: [...peopleRoles.get(name)], ...matchUser(name, users) }));
 
     const statusCount = new Map();
     for (const r of rows) statusCount.set(r.statusRaw, (statusCount.get(r.statusRaw) || 0) + 1);
@@ -246,13 +277,13 @@ router.post('/preview', upload.single('file'), async (req, res) => {
       return { value, count, status: sug.status, milestone: sug.milestone };
     });
 
-    const departments = data.departments || [];
+    const deptCount = new Map();
+    for (const r of rows) if (r.departmentRaw) deptCount.set(r.departmentRaw, (deptCount.get(r.departmentRaw) || 0) + 1);
+    const departments = [...deptCount.entries()]
+      .sort((a, b) => b[1] - a[1])
+      .map(([value, count]) => ({ value, count, departmentId: matchDepartment(value, data.departments || []) }));
+
     for (const r of rows) {
-      if (r.departmentRaw) {
-        const d = departments.find((x) => normKey(x.name) === normKey(r.departmentRaw));
-        r.departmentId = d ? d.id : null;
-        if (!d) r.warnings = [...(r.warnings || []), `Department "${r.departmentRaw}" not found`];
-      }
       if (r.milestoneRaw && !isValidProjectMilestone(r.milestoneRaw)) {
         r.warnings = [...(r.warnings || []), `Milestone "${r.milestoneRaw}" is not a Project milestone; the status mapping is used`];
         r.milestoneRaw = null;
@@ -264,6 +295,7 @@ router.post('/preview', upload.single('file'), async (req, res) => {
       sheet: sheetName,
       rows,
       people,
+      departments,
       statuses,
       options: { statuses: PM_STATUSES, milestones: PROJECT_MILESTONES, priorities: PRIORITIES },
     });
@@ -275,7 +307,7 @@ router.post('/preview', upload.single('file'), async (req, res) => {
 
 router.post('/commit', express.json({ limit: '2mb' }), async (req, res) => {
   try {
-    const { rows, peopleMap = {}, statusMap = {}, defaults = {}, duplicateMode = 'skip', fileName = '' } = req.body || {};
+    const { rows, peopleMap = {}, statusMap = {}, departmentMap = {}, defaults = {}, duplicateMode = 'skip', fileName = '' } = req.body || {};
     if (!Array.isArray(rows) || !rows.length) return res.status(400).json({ error: 'No rows to import' });
     if (rows.length > MAX_ROWS) return res.status(400).json({ error: `Too many rows; the limit is ${MAX_ROWS}` });
     if (!['skip', 'update'].includes(duplicateMode)) return res.status(400).json({ error: 'Invalid duplicateMode' });
@@ -312,6 +344,9 @@ router.post('/commit', express.json({ limit: '2mb' }), async (req, res) => {
       if (!isValidProjectMilestone(milestone)) { fail(r, `No milestone chosen for "${r.statusRaw}"`); continue; }
       const pmIds = resolve(r.itPm);
       const picIds = resolve(r.itPic);
+      // The row's own Department / Business Owner (when mapped) win over the defaults.
+      const rowDeptId = r.departmentRaw && deptIds.has(departmentMap[r.departmentRaw]) ? departmentMap[r.departmentRaw] : null;
+      const rowOwnerId = resolve(r.businessOwner)[0] || null;
       const notes = r.notes ? String(r.notes).slice(0, 5000) : null;
 
       const existing = byName.get(normKey(name));
@@ -323,6 +358,8 @@ router.post('/commit', express.json({ limit: '2mb' }), async (req, res) => {
           status,
           ...(pmIds[0] ? { itPmId: pmIds[0] } : {}),
           ...(picIds.length ? { itPicIds: picIds } : {}),
+          ...(rowDeptId ? { departmentId: rowDeptId } : {}),
+          ...(rowOwnerId ? { businessOwnerId: rowOwnerId } : {}),
           ...(notes ? { remark: notes } : {}),
         };
         const changes = [];
@@ -353,9 +390,9 @@ router.post('/commit', express.json({ limit: '2mb' }), async (req, res) => {
         description: null,
         businessImpact: null,
         priority: PRIORITIES.includes(r.priority) ? r.priority : priority,
-        businessOwnerId,
+        businessOwnerId: rowOwnerId || businessOwnerId,
         businessUserIds: [],
-        departmentId: (r.departmentId && deptIds.has(r.departmentId)) ? r.departmentId : departmentId,
+        departmentId: rowDeptId || departmentId,
         itPicId: picIds[0] || null,
         itPicIds: picIds,
         itPmId: pmIds[0] || null,
