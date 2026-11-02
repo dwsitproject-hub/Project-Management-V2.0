@@ -5874,3 +5874,17 @@ body:not(.pm-is-admin) #cr-table .col-actions { display: none !important; }
 body.pc-fullpage-open { overflow: hidden; }
 .pc.pc-fullpage { position: fixed; inset: 0; z-index: 1500; overflow: auto; background: var(--gray-50); padding: 12px 16px 16px; gap: 12px; }
 .pc.pc-fullpage .pc-scroll { max-height: calc(100vh - 130px); }
+.pc-avatar-me { background: var(--brand); color: #fff; }
+/* Team members: own calendar, view only */
+.pc-readonly .pc-handle { display: none; }
+.pc-readonly .pc-bar, .pc-readonly .pc-chip { cursor: pointer; }
+
+/* Department Master */
+.dm-table { width: 100%; }
+.dm-table td, .dm-table th { vertical-align: middle; }
+.dm-table td:not(:first-child), .dm-table th:not(:first-child) { text-align: center; width: 110px; }
+.dm-table .dm-actions { width: 170px; white-space: nowrap; }
+.dm-table .dm-edit { padding: 3px 12px; font-size: 12px; margin-right: 6px; }
+.dm-stored { font-size: 12px; }
+.dm-field { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+.dm-field input, .dm-field select { padding: 9px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; color: var(--text); background: var(--surface); }

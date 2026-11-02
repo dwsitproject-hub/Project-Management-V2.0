@@ -9096,8 +9096,13 @@ function pcLoadClass(score) {
   return 'pc-load-over';
 }
 
-async function renderPortfolioCalendar(container, { team, currentUserId }) {
-  if (!team.length) {
+async function renderPortfolioCalendar(container, { team, currentUserId, canPlan = true }) {
+  // canPlan = Manager: drag to re-plan / reassign, plus the Unassigned row. Otherwise the
+  // calendar shows the viewer's own work only and cards just open the detail panel.
+  // The Manager is shown too (first, marked "you"), with the same scoring and drag rules.
+  const me = (LOOKUPS.users || []).find((u) => u.id === currentUserId) || null;
+  const members = team.filter((u) => u.id !== currentUserId);
+  if (!members.length && !me) {
     container.innerHTML = `<div class="card pc-empty">
       <h3>🗓️ Portfolio Calendar</h3>
       <p class="muted">Add your team members in <a href="#profile">My Profile</a> to see their projects and workload here.</p>
@@ -9128,7 +9133,11 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     department: typeof saved.department === 'string' ? saved.department : '',
     start: thisMonth - 1,
   };
-  const teamSorted = team.slice().sort((a, b) => String(a.name || a.email).localeCompare(String(b.name || b.email)));
+  const teamSorted = [
+    ...(me ? [me] : []),
+    ...members.slice().sort((a, b) => String(a.name || a.email).localeCompare(String(b.name || b.email))),
+  ];
+  const personLabel = (u) => `${u.name || u.email}${u.id === currentUserId ? ' (you)' : ''}`;
   const teamIds = new Set(teamSorted.map((u) => u.id));
   const userName = (id) => {
     const u = LOOKUPS.users.find((x) => x.id === id);
@@ -9153,8 +9162,8 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       if (st.type !== 'All' && i.type !== st.type) return false;
       if (!deptMatches(i)) return false;
       if (teamIds.has(i.itPmId) || pcDevIds(i).some((id) => teamIds.has(id))) return true;
-      // Nobody assigned yet (no IT PM, no IT PIC): show it so it can be dragged to a member.
-      return !i.itPmId && pcDevIds(i).length === 0;
+      // Nobody assigned yet (no IT PM, no IT PIC): show it so a Manager can drag it to a member.
+      return canPlan && !i.itPmId && pcDevIds(i).length === 0;
     });
   }
   function span(i) {
@@ -9266,9 +9275,9 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       cells.forEach((c, k) => { if (c.total > peak) { peak = c.total; peakAt = monthIdx[k]; } });
       return `<div class="pc-score-card">
         <div class="pc-score-head">
-          <span class="pc-avatar">${escapeHtml(initials(u.name || u.email))}</span>
+          <span class="pc-avatar${u.id === currentUserId ? ' pc-avatar-me' : ''}">${escapeHtml(initials(u.name || u.email))}</span>
           <div class="pc-score-who">
-            <div class="pc-score-name">${escapeHtml(u.name || u.email)}</div>
+            <div class="pc-score-name">${escapeHtml(personLabel(u))}</div>
             <div class="muted">This month: <b>${current === null ? '—' : current}</b>${peak ? ` · Peak <b>${peak}</b> (${pcMonthLabel(peakAt)})` : ''}</div>
           </div>
         </div>
@@ -9287,12 +9296,13 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       // Someone who is both gets one card. The last row holds work with nobody from the team.
       const rows = teamSorted.map((u) => ({
         id: u.id,
-        label: u.name || u.email,
+        label: personLabel(u),
+        initials: initials(u.name || u.email),
         items: scheduled
           .filter((i) => i.itPmId === u.id || pcDevIds(i).includes(u.id))
           .map((i) => ({ i, role: i.itPmId === u.id ? 'pm' : 'pic' })),
       }));
-      rows.push({
+      if (canPlan) rows.push({
         id: '',
         label: 'Unassigned',
         note: 'no IT PM / PIC from the team — drag to a member to assign',
@@ -9303,7 +9313,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         const t = trackHtml(row.items, row.id);
         row.items.forEach((e) => shownIds.add((e.i || e).id));
         return `<div class="pc-row${row.id ? '' : ' pc-row-other'}" data-member="${escapeHtml(row.id)}">
-          <div class="pc-label"><span class="pc-avatar pc-avatar-sm">${row.id ? escapeHtml(initials(row.label)) : '–'}</span>
+          <div class="pc-label"><span class="pc-avatar pc-avatar-sm${row.id && row.id === currentUserId ? ' pc-avatar-me' : ''}">${row.id ? escapeHtml(row.initials) : '–'}</span>
             <div><div class="pc-label-name">${escapeHtml(row.label)}</div><div class="muted">${t.count} shown${row.note ? ` · ${row.note}` : ''}</div></div></div>
           ${t.html}
         </div>`;
@@ -9334,7 +9344,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     const hiddenCount = scheduled.length - shown;
 
     container.innerHTML = `
-      <div class="pc${fullPage ? ' pc-fullpage' : ''}">
+      <div class="pc${fullPage ? ' pc-fullpage' : ''}${canPlan ? '' : ' pc-readonly'}">
         <div class="card pc-toolbar">
           <div class="pc-field"><label>Initiative Type</label>
             <div class="pc-seg">${['All', 'Project', 'CR'].map((t) => `<button type="button" data-pc-type="${t}" class="${st.type === t ? 'active' : ''}">${t}</button>`).join('')}</div></div>
@@ -9372,14 +9382,16 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
           </div>
         </div>
 
-        <h3 class="pc-section-title">Team Weighted Score — ${pcMonthLabel(st.start)} to ${pcMonthLabel(st.start + st.months - 1)} (${st.type === 'All' ? 'Projects + CRs' : st.type + 's'}${st.department ? ` · ${escapeHtml(st.department === '__none__' ? 'No department' : st.department)}` : ''})</h3>
+        <h3 class="pc-section-title">${canPlan ? 'Team' : 'My'} Weighted Score — ${pcMonthLabel(st.start)} to ${pcMonthLabel(st.start + st.months - 1)} (${st.type === 'All' ? 'Projects + CRs' : st.type + 's'}${st.department ? ` · ${escapeHtml(st.department === '__none__' ? 'No department' : st.department)}` : ''})</h3>
         <div class="pc-scores">${scoreCards}</div>
 
         <div class="card pc-calendar">
           <div class="pc-cal-head">
             <h3>🗓️ Portfolio Calendar</h3>
             <button type="button" class="pc-fullpage-btn" id="pc-fullpage" title="${fullPage ? 'Exit full page (Esc)' : 'Show the calendar on the whole screen'}">${fullPage ? '✕ Exit full page' : '⤢ Full page'}</button>
-            <span class="muted">${st.yAxis === 'member'
+            <span class="muted">${!canPlan
+              ? 'Your own projects and CRs (as IT PM or IT PIC). Click a card to view it; your Manager plans and assigns work here.'
+              : st.yAxis === 'member'
               ? 'Click a card to view or edit it. Drag it sideways to move its plan dates, drag its edges to change start or end, or drop it on another member to reassign it (IT PM card → IT PM, dashed IT PIC card → IT PIC).'
               : 'Click a card to view or edit it. Drag it sideways to move its plan dates, or drag its edges to change start or end.'}
               ${hiddenCount > 0 ? ` ${hiddenCount} scheduled item(s) fall outside this range.` : ''}</span>
@@ -9399,7 +9411,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
 
         ${unscheduled.length ? `<div class="card pc-unscheduled">
           <h3>No plan dates (${unscheduled.length})</h3>
-          <p class="muted">Not counted in the Weighted Score. Drag one onto a month in the calendar to give it plan dates for that month.</p>
+          <p class="muted">Not counted in the Weighted Score.${canPlan ? ' Drag one onto a month in the calendar to give it plan dates for that month.' : ''}</p>
           <div class="pc-chips">${unscheduled.map((i) => `<span class="pc-chip ${pcStatusClass(i.status)} ${i.type === 'CR' ? 'pc-shape-cr' : 'pc-shape-project'}" data-id="${escapeHtml(i.id)}"
               title="${escapeHtml(`${i.type}: ${i.name}\nIT PM: ${userName(i.itPmId) || '—'}\nClick to open · drag onto a month to plan it`)}">${escapeHtml(i.name)}</span>`).join('')}</div>
         </div>` : ''}
@@ -9620,6 +9632,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     };
 
     const onMove = (ev) => {
+      if (!canPlan) return; // read-only: a press is just a click (opens the detail panel)
       const dx = ev.clientX - x0;
       const dy = ev.clientY - y0;
       if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
@@ -9894,10 +9907,9 @@ async function renderUserDashboard() {
       </div>
     `;
 
-    if (!isManager) {
-      app.innerHTML = overviewHtml;
-    } else {
-      // Managers get a second tab: the team's Portfolio Calendar (remembered per browser).
+    {
+      // Second tab: Portfolio Calendar (remembered per browser). Managers see and plan
+      // their team; everyone else sees their own work, read-only.
       let tab = 'overview';
       try { if (localStorage.getItem('pm_dashboard_tab') === 'calendar') tab = 'calendar'; } catch (_) { /* optional */ }
       app.innerHTML = `
@@ -9920,8 +9932,9 @@ async function renderUserDashboard() {
           calendarLoaded = true;
           hubCall('page', '/#/user-dashboard/portfolio-calendar');
           renderPortfolioCalendar(document.getElementById('dash-calendar'), {
-            team: teamMembers,
+            team: isManager ? teamMembers : [],
             currentUserId: currentUserProfile?.id,
+            canPlan: isManager,
           });
         }
       };
@@ -10799,6 +10812,190 @@ async function renderAdminRoles() {
     console.error('Admin roles error:', error);
     app.innerHTML = `<div class="error">Error loading roles: ${error.message}</div>`;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Department Master (Admin): add / rename / delete departments. Every Department field,
+// filter and dashboard reads departments from /api/lookups, so changes show everywhere.
+// ---------------------------------------------------------------------------
+
+/** Small form dialog with one text field. Resolves with the trimmed value, or null. */
+function textInputDialog({ title, label, value = '', confirmText = 'Save', hint = '' }) {
+  return new Promise((resolve) => {
+    const modal = document.createElement('div');
+    modal.className = 'modal confirm-dialog';
+    modal.innerHTML = `
+      <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="tid-title">
+        <h3 class="confirm-title" id="tid-title">${escapeHtml(title)}</h3>
+        <label class="dm-field"><span>${escapeHtml(label)}</span>
+          <input type="text" maxlength="100" value="${escapeHtml(value)}" autocomplete="off"></label>
+        ${hint ? `<p class="confirm-message" style="margin-top:8px;">${escapeHtml(hint)}</p>` : ''}
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" data-action="cancel">Cancel</button>
+          <button type="button" class="btn-primary" data-action="confirm">${escapeHtml(confirmText)}</button>
+        </div>
+      </div>`;
+    const input = modal.querySelector('input');
+    const finish = (v) => { document.removeEventListener('keydown', onKey); modal.remove(); resolve(v); };
+    const submit = () => { const v = input.value.trim().replace(/\s+/g, ' '); if (v) finish(v); else input.focus(); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') finish(null);
+      if (e.key === 'Enter') submit();
+    };
+    modal.addEventListener('click', (e) => { if (e.target === modal) finish(null); });
+    modal.querySelector('[data-action="cancel"]').onclick = () => finish(null);
+    modal.querySelector('[data-action="confirm"]').onclick = submit;
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(modal);
+    input.focus();
+    input.select();
+  });
+}
+
+async function renderDepartmentMaster() {
+  setActive('#master-departments');
+  await ensureLookups();
+
+  let rows = [];
+  const load = async () => { rows = await fetchJSON('/api/departments'); };
+  try {
+    await load();
+  } catch (e) {
+    if (e instanceof AuthRedirectError) return;
+    app.innerHTML = `<div class="error">Failed to load departments: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  // Department fields everywhere read LOOKUPS; refresh it after every change.
+  const refreshLookups = async () => {
+    try { LOOKUPS = await fetchJSON('/api/lookups'); } catch (_) { /* next page load refreshes it */ }
+  };
+
+  const draw = () => {
+    const totals = rows.reduce((t, r) => ({ p: t.p + r.projects, c: t.c + r.crs, u: t.u + r.users }), { p: 0, c: 0, u: 0 });
+    app.innerHTML = `
+      <div class="card">
+        <div style="display:flex; justify-content: space-between; align-items:center; gap:12px; flex-wrap: wrap;">
+          <h2 style="margin:0;">🏢 Department Master</h2>
+          <button class="primary" id="dm-add">+ Add Department</button>
+        </div>
+        <p class="muted" style="margin-top:8px;">Source of the “Department” field on projects, CRs and users, and of the
+          department filters and dashboards. ${rows.length} departments · used by ${totals.p} projects, ${totals.c} CRs and ${totals.u} users.</p>
+        <div style="margin-top: 16px; overflow:auto;">
+          <table class="dm-table">
+            <thead><tr><th>Department</th><th>Projects</th><th>CRs</th><th>Users</th><th class="dm-actions">Actions</th></tr></thead>
+            <tbody>
+              ${rows.map((r) => `
+                <tr data-id="${escapeHtml(r.id)}">
+                  <td><strong>${escapeHtml(r.shownAs)}</strong>${r.shownAs !== r.name ? ` <span class="muted dm-stored" title="Stored name; PM shows it as “${escapeHtml(r.shownAs)}”">(stored as “${escapeHtml(r.name)}”)</span>` : ''}</td>
+                  <td>${r.projects || '<span class="muted">0</span>'}</td>
+                  <td>${r.crs || '<span class="muted">0</span>'}</td>
+                  <td>${r.users || '<span class="muted">0</span>'}</td>
+                  <td class="dm-actions">
+                    <button type="button" class="dm-edit" data-id="${escapeHtml(r.id)}">Edit</button>
+                    <button type="button" class="dm-delete pm-delete-sm" data-id="${escapeHtml(r.id)}">Delete</button>
+                  </td>
+                </tr>`).join('') || '<tr><td colspan="5" class="muted">No departments yet.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+
+    app.querySelector('#dm-add').onclick = async () => {
+      const name = await textInputDialog({ title: 'Add department', label: 'Department name', confirmText: 'Add' });
+      if (!name) return;
+      try {
+        await fetchJSON('/api/departments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+        notify(`Department added: ${name}`, 'success');
+        await load(); await refreshLookups(); draw();
+      } catch (e) {
+        if (!(e instanceof AuthRedirectError)) notify(e.message, 'error');
+      }
+    };
+
+    app.querySelectorAll('.dm-edit').forEach((btn) => {
+      btn.onclick = async () => {
+        const r = rows.find((x) => x.id === btn.dataset.id);
+        const used = r.projects + r.crs + r.users;
+        const name = await textInputDialog({
+          title: 'Rename department',
+          label: 'Department name',
+          value: r.name,
+          hint: used ? `Used by ${r.projects} projects, ${r.crs} CRs and ${r.users} users — they all show the new name.` : '',
+        });
+        if (!name || name === r.name) return;
+        try {
+          await fetchJSON(`/api/departments/${encodeURIComponent(r.id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+          notify(`Department renamed: ${r.name} → ${name}`, 'success');
+          await load(); await refreshLookups(); draw();
+        } catch (e) {
+          if (!(e instanceof AuthRedirectError)) notify(e.message, 'error');
+        }
+      };
+    });
+
+    app.querySelectorAll('.dm-delete').forEach((btn) => {
+      btn.onclick = async () => {
+        const r = rows.find((x) => x.id === btn.dataset.id);
+        const used = r.projects + r.crs + r.users;
+        let body = {};
+        if (!used) {
+          const ok = await confirmDialog(`Delete department “${r.shownAs}”? It isn't used by any project, CR or user.`,
+            { title: 'Delete department', confirmText: 'Delete', danger: true });
+          if (!ok) return;
+        } else {
+          const target = await chooseReassignment(r);
+          if (target === undefined) return; // cancelled
+          body = { reassignTo: target };
+        }
+        try {
+          await fetchJSON(`/api/departments/${encodeURIComponent(r.id)}`, {
+            method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+          });
+          notify(`Department deleted: ${r.shownAs}`, 'success');
+          await load(); await refreshLookups(); draw();
+        } catch (e) {
+          if (!(e instanceof AuthRedirectError)) notify(e.message, 'error');
+        }
+      };
+    });
+  };
+
+  // In-use department: ask where its projects / CRs / users go. Resolves with a department
+  // id, null (= no department) or undefined (cancelled).
+  function chooseReassignment(r) {
+    return new Promise((resolve) => {
+      const others = rows.filter((x) => x.id !== r.id);
+      const modal = document.createElement('div');
+      modal.className = 'modal confirm-dialog';
+      modal.innerHTML = `
+        <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="dm-del-title">
+          <h3 class="confirm-title" id="dm-del-title">Delete department “${escapeHtml(r.shownAs)}”?</h3>
+          <p class="confirm-message">It is used by ${r.projects} projects, ${r.crs} CRs and ${r.users} users. Move them to:</p>
+          <label class="dm-field"><span>New department</span>
+            <select>
+              ${others.map((x) => `<option value="${escapeHtml(x.id)}">${escapeHtml(x.shownAs)}${x.shownAs !== x.name ? ` (${escapeHtml(x.name)})` : ''}</option>`).join('')}
+              <option value="">— No department —</option>
+            </select></label>
+          <p class="confirm-message" style="margin-top:8px;">Moved projects and CRs get a Change History entry. This cannot be undone.</p>
+          <div class="modal-actions">
+            <button type="button" class="btn-secondary" data-action="cancel">Cancel</button>
+            <button type="button" class="btn-danger" data-action="confirm">Move and delete</button>
+          </div>
+        </div>`;
+      const select = modal.querySelector('select');
+      const finish = (v) => { document.removeEventListener('keydown', onKey); modal.remove(); resolve(v); };
+      const onKey = (e) => { if (e.key === 'Escape') finish(undefined); };
+      modal.addEventListener('click', (e) => { if (e.target === modal) finish(undefined); });
+      modal.querySelector('[data-action="cancel"]').onclick = () => finish(undefined);
+      modal.querySelector('[data-action="confirm"]').onclick = () => finish(select.value || null);
+      document.addEventListener('keydown', onKey);
+      document.body.appendChild(modal);
+      select.focus();
+    });
+  }
+
+  draw();
 }
 
 async function renderMasterDwsApplications() {
@@ -13043,10 +13240,10 @@ function renderAuth() {
 }
 
 // Protected routes that require authentication
-const PROTECTED_ROUTES = ['#list', '#crlist', '#dashboard', '#crdashboard', '#new', '#user-dashboard', '#admin', '#admin-users', '#admin-roles', '#master-dws', '#management-dashboard'];
+const PROTECTED_ROUTES = ['#list', '#crlist', '#dashboard', '#crdashboard', '#new', '#user-dashboard', '#admin', '#admin-users', '#admin-roles', '#master-dws', '#master-departments', '#management-dashboard'];
 // #management-dashboard is NOT admin-only: it is governed by the Access Matrix
 // (canViewManagementDashboard), guarded explicitly in router().
-const ADMIN_ROUTES = ['#admin', '#admin-users', '#admin-roles', '#master-dws'];
+const ADMIN_ROUTES = ['#admin', '#admin-users', '#admin-roles', '#master-dws', '#master-departments'];
 
 async function requireAuth() {
   const token = getToken();
@@ -13167,6 +13364,7 @@ async function updateNavAuth() {
   const adminLinks = document.querySelectorAll('.admin-link');
   const protectedLinks = document.querySelectorAll('.protected-link');
   const navMasterDws = document.getElementById('nav-master-dws');
+  const navMasterDepartments = document.getElementById('nav-master-departments');
   const navManagementDashboard = document.getElementById('nav-management-dashboard');
   
   // Ensure currentUser is populated from token/profile so nav doesn't "disappear" after refresh.
@@ -13242,6 +13440,11 @@ async function updateNavAuth() {
     if (navMasterDws) {
       const role = String(user.role || '').trim().toLowerCase();
       navMasterDws.classList.toggle('hidden', !(user.isAdmin || role === 'admin'));
+    }
+    // Department Master: Admin only (the API is admin-only too)
+    if (navMasterDepartments) {
+      const role = String(user.role || '').trim().toLowerCase();
+      navMasterDepartments.classList.toggle('hidden', !(user.isAdmin || role === 'admin'));
     }
 
     // Management Dashboard: visible to Admin, or anyone granted it via the Access Matrix.
@@ -13325,6 +13528,7 @@ async function router() {
     if (h.startsWith('#admin-users')) return renderAdminUsers();
     if (h.startsWith('#admin-roles')) return renderAdminRoles();
     if (h.startsWith('#master-dws')) return renderMasterDwsApplications();
+    if (h.startsWith('#master-departments')) return renderDepartmentMaster();
     if (h.startsWith('#management-dashboard')) {
       // Governed by the Access Matrix, not admin-only.
       const access = await getUserAccess();
