@@ -8982,7 +8982,7 @@ async function renderDashboard() {
 
 const PC_STATE_KEY = 'pm_portfolio_calendar';
 const PC_COL_W = 120; // px per month column
-const PC_LANE_H = 30; // px per stacked card lane
+const PC_LANE_H = 30; // minimum row height for cards (px)
 
 function pcLoadState() {
   try { return JSON.parse(localStorage.getItem(PC_STATE_KEY)) || {}; } catch (_) { return {}; }
@@ -9029,9 +9029,9 @@ function pcWeight(i, memberId) {
   return isPm && isDev ? 1 : 0.5;
 }
 
-// Monthly load colours: green up to 4, amber above 4 up to 5, red above 5.
-const PC_LOAD_OK_MAX = 4;
-const PC_LOAD_BUSY_MAX = 5;
+// Monthly load colours: green up to 3, yellow above 3 up to 4, red above 4.
+const PC_LOAD_OK_MAX = 3;
+const PC_LOAD_BUSY_MAX = 4;
 
 // Card colour by status: Not Started / On Hold grey, On Track green, At Risk amber,
 // Delayed red, Live blue.
@@ -9047,14 +9047,43 @@ function pcStatusClass(status) {
   }[key] || 'pc-st-idle';
 }
 
-let pcMeasureCtx = null;
-/** Rendered width (px) of a card label, so names can be laid out in full. */
-function pcTextWidth(text) {
-  if (!pcMeasureCtx) {
-    pcMeasureCtx = document.createElement('canvas').getContext('2d');
-    pcMeasureCtx.font = '12px Inter, system-ui, -apple-system, "Segoe UI", sans-serif';
+// PM's page header is sticky and its height varies (the nav wraps on narrow screens);
+// the calendar's scroll area is sized below it so its frozen month row stays visible.
+function pcMeasureHeader() {
+  const header = document.querySelector('body > header');
+  if (header) document.documentElement.style.setProperty('--pm-header-h', `${header.offsetHeight}px`);
+}
+window.addEventListener('resize', pcMeasureHeader);
+
+// Narrowest card: very short plans (a few days) still get room for a word per line.
+const PC_MIN_CARD_W = 64;
+const PC_CARD_GAP = 4;
+
+/**
+ * Stack a row's cards by their rendered height (names wrap, so heights differ):
+ * each card goes to the lowest free spot that doesn't overlap a card it shares
+ * time with. Then the row grows to fit.
+ */
+function pcPackTrack(track) {
+  const bars = [...track.querySelectorAll('.pc-bar')];
+  const items = bars.map((b) => {
+    const l = parseFloat(b.style.left) || 0;
+    return { b, l, r: l + b.offsetWidth, h: b.offsetHeight };
+  });
+  items.sort((a, c) => a.l - c.l);
+  const placed = [];
+  for (const it of items) {
+    const sharing = placed.filter((p) => p.l < it.r - 1 && it.l < p.r - 1);
+    const candidates = [0, ...sharing.map((p) => p.y + p.h + PC_CARD_GAP)].sort((a, c) => a - c);
+    it.y = candidates.find((y) => sharing.every((p) => y >= p.y + p.h + PC_CARD_GAP || y + it.h + PC_CARD_GAP <= p.y));
+    placed.push(it);
   }
-  return Math.ceil(pcMeasureCtx.measureText(String(text || '')).width);
+  let bottom = 0;
+  for (const it of placed) {
+    it.b.style.top = `${it.y + 6}px`;
+    bottom = Math.max(bottom, it.y + it.h);
+  }
+  track.style.height = `${Math.max(PC_LANE_H, bottom) + 12}px`;
 }
 
 function pcLoadClass(score) {
@@ -9161,61 +9190,56 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     return [pm ? `PM: ${pm}` : 'No IT PM', devs.length ? `Dev: ${devs.join(', ')}` : ''].filter(Boolean).join(' · ');
   }
 
-  // A card is at least as wide as its name. `fill` is the real plan period (solid);
-  // anything beyond it only holds the name and is striped, with a tick at the plan end.
-  function barHtml(i, left, fill, need, lane, clipStart, clipEnd) {
-    const width = Math.max(fill, need);
+  // A card is exactly as wide as its plan period (at least PC_MIN_CARD_W so very short
+  // plans can still hold a word); the name wraps and the card grows taller. Cards are
+  // stacked by their measured height after rendering (pcPackTrack).
+  function barHtml(i, left, width, clipStart, clipEnd, role, rowMember) {
     const pm = userName(i.itPmId);
     const devs = pcDevIds(i).map(userName).filter(Boolean);
     const text = escapeHtml(barLabel(i));
     const tip = [
       `${i.type}: ${i.name}`,
       `Plan: ${i.planStartDate?.slice(0, 10)} → ${i.planEndDate?.slice(0, 10)}`,
+      ...(width <= PC_MIN_CARD_W ? ['(short plan — drawn at a minimum width)'] : []),
       `IT PM: ${pm || '—'}`,
       `IT Dev: ${devs.join(', ') || '—'}`,
       `Status: ${i.status || '—'} · ${i.priority || ''}`,
+      ...(role === 'pic' ? [`Shown here as IT PIC — dropping it on another member replaces ${userName(rowMember)} as IT PIC`] : []),
       'Drag to move · drag an edge to change start/end · click to open',
     ].join('\n');
-    return `<div class="pc-bar ${pcStatusClass(i.status)} ${i.type === 'CR' ? 'pc-shape-cr' : 'pc-shape-project'}${width > fill ? ' pc-has-tail' : ''}${clipStart ? ' pc-clip-start' : ''}${clipEnd ? ' pc-clip-end' : ''}"
-        data-id="${escapeHtml(i.id)}" data-fill="${fill}" data-need="${need}"
-        style="left:${left}px;width:${width}px;--fill:${fill}px;top:${lane * PC_LANE_H + 6}px" title="${escapeHtml(tip)}">
+    return `<div class="pc-bar ${pcStatusClass(i.status)} ${i.type === 'CR' ? 'pc-shape-cr' : 'pc-shape-project'}${role === 'pic' ? ' pc-role-pic' : ''}${clipStart ? ' pc-clip-start' : ''}${clipEnd ? ' pc-clip-end' : ''}"
+        data-id="${escapeHtml(i.id)}" data-role="${role || 'pm'}" data-row-member="${escapeHtml(rowMember || '')}"
+        style="left:${left}px;width:${width}px;top:6px" title="${escapeHtml(tip)}">
         ${clipStart ? '' : '<span class="pc-handle pc-handle-start"></span>'}
         <span class="pc-bar-text">${text}</span>
         ${clipEnd ? '' : '<span class="pc-handle pc-handle-end"></span>'}
       </div>`;
   }
 
-  // Lay out items in a track: stack overlapping cards into lanes.
-  function trackHtml(items) {
+  // Cards of one row; vertical positions are set after rendering (pcPackTrack).
+  // items: initiatives, or { i, role } entries (Team Member view: 'pm' | 'pic').
+  function trackHtml(items, rowMember) {
     const width = st.months * PC_COL_W;
     const placed = [];
-    for (const i of items) {
+    for (const entry of items) {
+      const i = entry.i || entry;
+      const role = entry.role || 'pm';
       const sp = span(i);
       if (!sp) continue;
       const l = (pcPos(sp.s, false) - st.start) * PC_COL_W;
       const r = (pcPos(sp.e, true) - st.start) * PC_COL_W;
       if (r <= 0 || l >= width) continue;
-      const p = { i, l: Math.max(0, l), r: Math.min(width, r), clipStart: l < 0, clipEnd: r > width };
-      p.fill = Math.max(10, p.r - p.l);
-      p.need = pcTextWidth(barLabel(i)) + 28; // name + padding + resize handles
-      p.ext = p.l + Math.max(p.fill, p.need) + 4; // lanes keep the whole card (incl. name) clear
-      placed.push(p);
+      const left = Math.max(0, l);
+      const w = Math.max(PC_MIN_CARD_W, Math.min(width, r) - left);
+      placed.push({ i, role, l: Math.min(left, width - w), w, clipStart: l < 0, clipEnd: r > width });
     }
     placed.sort((a, b) => a.l - b.l);
-    const laneEnds = [];
-    for (const p of placed) {
-      let lane = laneEnds.findIndex((end) => end <= p.l + 1);
-      if (lane === -1) { lane = laneEnds.length; laneEnds.push(0); }
-      laneEnds[lane] = p.ext;
-      p.lane = lane;
-    }
-    const lanes = Math.max(1, laneEnds.length);
     const todayLeft = (todayPos - st.start) * PC_COL_W;
     return {
       count: placed.length,
-      html: `<div class="pc-track" style="width:${width}px;height:${lanes * PC_LANE_H + 12}px">
+      html: `<div class="pc-track" style="width:${width}px;height:${PC_LANE_H + 12}px">
         ${todayLeft >= 0 && todayLeft <= width ? `<div class="pc-today" style="left:${todayLeft}px"></div>` : ''}
-        ${placed.map((p) => barHtml(p.i, p.l, p.fill, p.need, p.lane, p.clipStart, p.clipEnd)).join('')}
+        ${placed.map((p) => barHtml(p.i, p.l, p.w, p.clipStart, p.clipEnd, p.role, rowMember)).join('')}
       </div>`,
     };
   }
@@ -9223,6 +9247,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
   function draw() {
     // Keep the calendar's horizontal scroll across redraws (after a drag, save or panel close).
     const prevScrollLeft = container.querySelector('.pc-scroll')?.scrollLeft || 0;
+    const prevScrollTop = container.querySelector('.pc-scroll')?.scrollTop || 0;
     const items = related();
     const scheduled = items.filter(span);
     const unscheduled = items.filter((i) => !span(i));
@@ -9255,17 +9280,33 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     let rowsHtml = '';
     let shown = 0;
     if (st.yAxis === 'member') {
-      const rows = teamSorted.map((u) => ({ id: u.id, label: u.name || u.email, items: scheduled.filter((i) => i.itPmId === u.id) }));
-      rows.push({ id: '', label: 'Unassigned / IT PM outside team', note: 'drag to a member to assign', items: scheduled.filter((i) => !teamIds.has(i.itPmId)) });
+      // A member's row: what they are IT PM of (solid) and IT PIC on (dashed outline).
+      // Someone who is both gets one card. The last row holds work with nobody from the team.
+      const rows = teamSorted.map((u) => ({
+        id: u.id,
+        label: u.name || u.email,
+        items: scheduled
+          .filter((i) => i.itPmId === u.id || pcDevIds(i).includes(u.id))
+          .map((i) => ({ i, role: i.itPmId === u.id ? 'pm' : 'pic' })),
+      }));
+      rows.push({
+        id: '',
+        label: 'Unassigned',
+        note: 'no IT PM / PIC from the team — drag to a member to assign',
+        items: scheduled.filter((i) => !teamIds.has(i.itPmId) && !pcDevIds(i).some((id) => teamIds.has(id))),
+      });
+      const shownIds = new Set();
       rowsHtml = rows.map((row) => {
-        const t = trackHtml(row.items);
-        shown += t.count;
+        const t = trackHtml(row.items, row.id);
+        row.items.forEach((e) => shownIds.add((e.i || e).id));
         return `<div class="pc-row${row.id ? '' : ' pc-row-other'}" data-member="${escapeHtml(row.id)}">
           <div class="pc-label"><span class="pc-avatar pc-avatar-sm">${row.id ? escapeHtml(initials(row.label)) : '–'}</span>
             <div><div class="pc-label-name">${escapeHtml(row.label)}</div><div class="muted">${t.count} shown${row.note ? ` · ${row.note}` : ''}</div></div></div>
           ${t.html}
         </div>`;
       }).join('');
+      // An item can sit in several rows (PM + PIC); count each once for "outside this range".
+      shown = scheduled.filter((i) => shownIds.has(i.id) && trackHtml([i]).count).length;
     } else {
       const byName = (a, b) => String(a.name || '').localeCompare(String(b.name || ''), undefined, { sensitivity: 'base', numeric: true });
       const byStart = (a, b) => pcPos(span(a).s) - pcPos(span(b).s) || byName(a, b);
@@ -9290,7 +9331,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     const hiddenCount = scheduled.length - shown;
 
     container.innerHTML = `
-      <div class="pc">
+      <div class="pc${fullPage ? ' pc-fullpage' : ''}">
         <div class="card pc-toolbar">
           <div class="pc-field"><label>Initiative Type</label>
             <div class="pc-seg">${['All', 'Project', 'CR'].map((t) => `<button type="button" data-pc-type="${t}" class="${st.type === t ? 'active' : ''}">${t}</button>`).join('')}</div></div>
@@ -9301,7 +9342,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
               <option value="__none__" ${st.department === '__none__' ? 'selected' : ''}>(No department)</option>
             </select></div>
           <div class="pc-field"><label>Rows (Y axis)</label>
-            <select id="pc-yaxis"><option value="member" ${st.yAxis === 'member' ? 'selected' : ''}>Team Member (IT PM)</option>
+            <select id="pc-yaxis"><option value="member" ${st.yAxis === 'member' ? 'selected' : ''}>Team Member (IT PM / PIC)</option>
               <option value="initiative" ${st.yAxis === 'initiative' ? 'selected' : ''}>Project / CR</option></select></div>
           ${st.yAxis === 'initiative' ? `<div class="pc-field"><label>Sort rows by</label>
             <select id="pc-sort">${[
@@ -9322,7 +9363,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
             <span class="pc-legend-sep">·</span>
             <span><i class="pc-key pc-st-idle"></i>Not Started / On Hold</span><span><i class="pc-key pc-st-ok"></i>On Track</span>
             <span><i class="pc-key pc-st-risk"></i>At Risk</span><span><i class="pc-key pc-st-late"></i>Delayed</span><span><i class="pc-key pc-st-live"></i>Live</span>
-            <span><i class="pc-key pc-tail-key"></i>beyond plan end (name only)</span>
+            ${st.yAxis === 'member' ? '<span><i class="pc-key pc-pic-key"></i>as IT PIC</span>' : ''}
             <span>Weighted Score: Project PM + Dev = 1, PM or Dev = 0.5 · CR = 0.25</span>
             <span><i class="pc-key pc-load-ok"></i>≤${PC_LOAD_OK_MAX}</span><span><i class="pc-key pc-load-busy"></i>&gt;${PC_LOAD_OK_MAX} to ${PC_LOAD_BUSY_MAX}</span><span><i class="pc-key pc-load-over"></i>&gt;${PC_LOAD_BUSY_MAX}</span>
           </div>
@@ -9334,15 +9375,16 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         <div class="card pc-calendar">
           <div class="pc-cal-head">
             <h3>🗓️ Portfolio Calendar</h3>
+            <button type="button" class="pc-fullpage-btn" id="pc-fullpage" title="${fullPage ? 'Exit full page (Esc)' : 'Show the calendar on the whole screen'}">${fullPage ? '✕ Exit full page' : '⤢ Full page'}</button>
             <span class="muted">${st.yAxis === 'member'
-              ? 'Click a card to view or edit it. Drag it sideways to move its plan dates, drag its edges to change start or end, or drop it on another member to change the IT PM.'
+              ? 'Click a card to view or edit it. Drag it sideways to move its plan dates, drag its edges to change start or end, or drop it on another member to reassign it (IT PM card → IT PM, dashed IT PIC card → IT PIC).'
               : 'Click a card to view or edit it. Drag it sideways to move its plan dates, or drag its edges to change start or end.'}
               ${hiddenCount > 0 ? ` ${hiddenCount} scheduled item(s) fall outside this range.` : ''}</span>
           </div>
           <div class="pc-scroll">
             <div class="pc-table">
               <div class="pc-row pc-head">
-                <div class="pc-label">${st.yAxis === 'member' ? 'Team Member (IT PM)' : 'Project / CR'}</div>
+                <div class="pc-label">${st.yAxis === 'member' ? 'Team Member (IT PM / PIC)' : 'Project / CR'}</div>
                 <div class="pc-months" style="width:${st.months * PC_COL_W}px">
                   ${monthIdx.map((m) => `<div class="pc-month${m === thisMonth ? ' pc-current' : ''}" style="width:${PC_COL_W}px">${pcMonthLabel(m)}</div>`).join('')}
                 </div>
@@ -9360,10 +9402,30 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         </div>` : ''}
       </div>`;
 
+    pcMeasureHeader();
+    // Stack cards by their wrapped height first, then restore the scroll position.
+    container.querySelectorAll('.pc-track').forEach(pcPackTrack);
     const scroller = container.querySelector('.pc-scroll');
-    if (scroller) scroller.scrollLeft = prevScrollLeft;
+    if (scroller) { scroller.scrollLeft = prevScrollLeft; scroller.scrollTop = prevScrollTop; }
     wire();
   }
+
+  // Full page: the whole calendar tab covers the screen (not the browser's fullscreen API,
+  // so the detail panel and dialogs, which open on <body>, still show on top).
+  let fullPage = false;
+  function setFullPage(on) {
+    fullPage = on;
+    document.body.classList.toggle('pc-fullpage-open', on);
+    if (on) document.addEventListener('keydown', onFullPageKey);
+    else document.removeEventListener('keydown', onFullPageKey);
+    draw();
+  }
+  function onFullPageKey(e) {
+    // Esc closes the panel / a dialog first when one is open.
+    if (e.key === 'Escape' && !document.querySelector('.pc-panel-backdrop, .confirm-dialog')) setFullPage(false);
+  }
+  // Leaving the Dashboard (or the calendar tab) must not leave the page locked.
+  window.addEventListener('hashchange', () => { if (fullPage) setFullPage(false); }, { once: true });
 
   function setState(patch) {
     Object.assign(st, patch);
@@ -9394,6 +9456,10 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     if ('planStartDate' in changes) lines.push(`Plan Start: ${item.planStartDate?.slice(0, 10) || '—'} → ${changes.planStartDate}`);
     if ('planEndDate' in changes) lines.push(`Plan End: ${item.planEndDate?.slice(0, 10) || '—'} → ${changes.planEndDate}`);
     if ('itPmId' in changes) lines.push(`IT PM: ${userName(item.itPmId) || '—'} → ${userName(changes.itPmId)}`);
+    if ('itPicIds' in changes) {
+      const names = (ids) => ids.map(userName).filter(Boolean).join(', ') || '—';
+      lines.push(`IT PIC: ${names(pcDevIds(item))} → ${names(changes.itPicIds)}`);
+    }
     return lines.join('\n');
   }
 
@@ -9470,6 +9536,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     container.querySelectorAll('[data-pc-type]').forEach((b) => { b.onclick = () => setState({ type: b.dataset.pcType }); });
     container.querySelector('#pc-dept').onchange = (e) => setState({ department: e.target.value });
     container.querySelector('#pc-yaxis').onchange = (e) => setState({ yAxis: e.target.value });
+    container.querySelector('#pc-fullpage').onclick = () => setFullPage(!fullPage);
     const sortSel = container.querySelector('#pc-sort');
     if (sortSel) sortSel.onchange = (e) => setState({ sort: e.target.value });
     // Row names open the same floating panel as the cards
@@ -9499,14 +9566,19 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       : e.target.classList.contains('pc-handle-start') ? 'start'
         : e.target.classList.contains('pc-handle-end') ? 'end' : 'move';
     const left0 = parseFloat(el.style.left) || 0;
-    const fill0 = parseFloat(el.dataset.fill) || 0;
-    const need = parseFloat(el.dataset.need) || 0;
-    const setFill = (f) => {
-      const fill = Math.max(10, f);
-      el.style.setProperty('--fill', `${fill}px`);
-      el.style.width = `${Math.max(fill, need)}px`;
-      el.classList.toggle('pc-has-tail', need > fill);
+    const fill0 = parseFloat(el.style.width) || 0;
+    // Team Member view: which role this card stands for in its row, and for whom.
+    const role = el.dataset.role === 'pic' ? 'pic' : 'pm';
+    const sourceMember = el.dataset.rowMember || item.itPmId || '';
+    // Dropping on another member: PM card → new IT PM; PIC card → that member replaces
+    // the source member in IT PIC (both the list and the legacy single itPicId field).
+    const reassign = (target) => {
+      if (role !== 'pic') return { itPmId: target };
+      const pics = pcDevIds(item).filter((id) => id !== sourceMember);
+      if (!pics.includes(target)) pics.push(target);
+      return { itPicIds: pics, itPicId: pics[0] || null };
     };
+    const setFill = (f) => { el.style.width = `${Math.max(PC_MIN_CARD_W, f)}px`; };
     const x0 = e.clientX;
     const y0 = e.clientY;
     let delta = 0;
@@ -9575,7 +9647,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
           if (st.yAxis === 'member') {
             el.style.transform = `translateY(${dy}px)`;
             const row = rowAt(ev.clientX, ev.clientY);
-            if (row && row.dataset.member && row.dataset.member !== item.itPmId) {
+            if (row && row.dataset.member && row.dataset.member !== sourceMember) {
               targetRow = row;
               row.classList.add('pc-drop-target');
             }
@@ -9588,7 +9660,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         }
         const p = proposed();
         label = p ? `${pcFormat(p.s)} → ${pcFormat(p.e)}` : 'Start must be before end';
-        if (targetRow) label += `\nIT PM → ${userName(targetRow.dataset.member)}`;
+        if (targetRow) label += `\n${role === 'pic' ? 'IT PIC' : 'IT PM'} → ${userName(targetRow.dataset.member)}`;
       }
       tip.textContent = label;
       tip.style.display = label ? 'block' : 'none';
@@ -9626,7 +9698,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
           if (mode !== 'end') changes.planStartDate = pcFormat(p.s);
           if (mode !== 'start') changes.planEndDate = pcFormat(p.e);
         }
-        if (mode === 'move' && targetRow) changes.itPmId = targetRow.dataset.member;
+        if (mode === 'move' && targetRow) Object.assign(changes, reassign(targetRow.dataset.member));
       }
       if (!Object.keys(changes).length) return draw();
       save(item, changes, describe(item, changes));
