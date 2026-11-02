@@ -10814,6 +10814,190 @@ async function renderAdminRoles() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Department Master (Admin): add / rename / delete departments. Every Department field,
+// filter and dashboard reads departments from /api/lookups, so changes show everywhere.
+// ---------------------------------------------------------------------------
+
+/** Small form dialog with one text field. Resolves with the trimmed value, or null. */
+function textInputDialog({ title, label, value = '', confirmText = 'Save', hint = '' }) {
+  return new Promise((resolve) => {
+    const modal = document.createElement('div');
+    modal.className = 'modal confirm-dialog';
+    modal.innerHTML = `
+      <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="tid-title">
+        <h3 class="confirm-title" id="tid-title">${escapeHtml(title)}</h3>
+        <label class="dm-field"><span>${escapeHtml(label)}</span>
+          <input type="text" maxlength="100" value="${escapeHtml(value)}" autocomplete="off"></label>
+        ${hint ? `<p class="confirm-message" style="margin-top:8px;">${escapeHtml(hint)}</p>` : ''}
+        <div class="modal-actions">
+          <button type="button" class="btn-secondary" data-action="cancel">Cancel</button>
+          <button type="button" class="btn-primary" data-action="confirm">${escapeHtml(confirmText)}</button>
+        </div>
+      </div>`;
+    const input = modal.querySelector('input');
+    const finish = (v) => { document.removeEventListener('keydown', onKey); modal.remove(); resolve(v); };
+    const submit = () => { const v = input.value.trim().replace(/\s+/g, ' '); if (v) finish(v); else input.focus(); };
+    const onKey = (e) => {
+      if (e.key === 'Escape') finish(null);
+      if (e.key === 'Enter') submit();
+    };
+    modal.addEventListener('click', (e) => { if (e.target === modal) finish(null); });
+    modal.querySelector('[data-action="cancel"]').onclick = () => finish(null);
+    modal.querySelector('[data-action="confirm"]').onclick = submit;
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(modal);
+    input.focus();
+    input.select();
+  });
+}
+
+async function renderDepartmentMaster() {
+  setActive('#master-departments');
+  await ensureLookups();
+
+  let rows = [];
+  const load = async () => { rows = await fetchJSON('/api/departments'); };
+  try {
+    await load();
+  } catch (e) {
+    if (e instanceof AuthRedirectError) return;
+    app.innerHTML = `<div class="error">Failed to load departments: ${escapeHtml(e.message)}</div>`;
+    return;
+  }
+
+  // Department fields everywhere read LOOKUPS; refresh it after every change.
+  const refreshLookups = async () => {
+    try { LOOKUPS = await fetchJSON('/api/lookups'); } catch (_) { /* next page load refreshes it */ }
+  };
+
+  const draw = () => {
+    const totals = rows.reduce((t, r) => ({ p: t.p + r.projects, c: t.c + r.crs, u: t.u + r.users }), { p: 0, c: 0, u: 0 });
+    app.innerHTML = `
+      <div class="card">
+        <div style="display:flex; justify-content: space-between; align-items:center; gap:12px; flex-wrap: wrap;">
+          <h2 style="margin:0;">🏢 Department Master</h2>
+          <button class="primary" id="dm-add">+ Add Department</button>
+        </div>
+        <p class="muted" style="margin-top:8px;">Source of the “Department” field on projects, CRs and users, and of the
+          department filters and dashboards. ${rows.length} departments · used by ${totals.p} projects, ${totals.c} CRs and ${totals.u} users.</p>
+        <div style="margin-top: 16px; overflow:auto;">
+          <table class="dm-table">
+            <thead><tr><th>Department</th><th>Projects</th><th>CRs</th><th>Users</th><th class="dm-actions">Actions</th></tr></thead>
+            <tbody>
+              ${rows.map((r) => `
+                <tr data-id="${escapeHtml(r.id)}">
+                  <td><strong>${escapeHtml(r.shownAs)}</strong>${r.shownAs !== r.name ? ` <span class="muted dm-stored" title="Stored name; PM shows it as “${escapeHtml(r.shownAs)}”">(stored as “${escapeHtml(r.name)}”)</span>` : ''}</td>
+                  <td>${r.projects || '<span class="muted">0</span>'}</td>
+                  <td>${r.crs || '<span class="muted">0</span>'}</td>
+                  <td>${r.users || '<span class="muted">0</span>'}</td>
+                  <td class="dm-actions">
+                    <button type="button" class="dm-edit" data-id="${escapeHtml(r.id)}">Edit</button>
+                    <button type="button" class="dm-delete pm-delete-sm" data-id="${escapeHtml(r.id)}">Delete</button>
+                  </td>
+                </tr>`).join('') || '<tr><td colspan="5" class="muted">No departments yet.</td></tr>'}
+            </tbody>
+          </table>
+        </div>
+      </div>`;
+
+    app.querySelector('#dm-add').onclick = async () => {
+      const name = await textInputDialog({ title: 'Add department', label: 'Department name', confirmText: 'Add' });
+      if (!name) return;
+      try {
+        await fetchJSON('/api/departments', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+        notify(`Department added: ${name}`, 'success');
+        await load(); await refreshLookups(); draw();
+      } catch (e) {
+        if (!(e instanceof AuthRedirectError)) notify(e.message, 'error');
+      }
+    };
+
+    app.querySelectorAll('.dm-edit').forEach((btn) => {
+      btn.onclick = async () => {
+        const r = rows.find((x) => x.id === btn.dataset.id);
+        const used = r.projects + r.crs + r.users;
+        const name = await textInputDialog({
+          title: 'Rename department',
+          label: 'Department name',
+          value: r.name,
+          hint: used ? `Used by ${r.projects} projects, ${r.crs} CRs and ${r.users} users — they all show the new name.` : '',
+        });
+        if (!name || name === r.name) return;
+        try {
+          await fetchJSON(`/api/departments/${encodeURIComponent(r.id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+          notify(`Department renamed: ${r.name} → ${name}`, 'success');
+          await load(); await refreshLookups(); draw();
+        } catch (e) {
+          if (!(e instanceof AuthRedirectError)) notify(e.message, 'error');
+        }
+      };
+    });
+
+    app.querySelectorAll('.dm-delete').forEach((btn) => {
+      btn.onclick = async () => {
+        const r = rows.find((x) => x.id === btn.dataset.id);
+        const used = r.projects + r.crs + r.users;
+        let body = {};
+        if (!used) {
+          const ok = await confirmDialog(`Delete department “${r.shownAs}”? It isn't used by any project, CR or user.`,
+            { title: 'Delete department', confirmText: 'Delete', danger: true });
+          if (!ok) return;
+        } else {
+          const target = await chooseReassignment(r);
+          if (target === undefined) return; // cancelled
+          body = { reassignTo: target };
+        }
+        try {
+          await fetchJSON(`/api/departments/${encodeURIComponent(r.id)}`, {
+            method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+          });
+          notify(`Department deleted: ${r.shownAs}`, 'success');
+          await load(); await refreshLookups(); draw();
+        } catch (e) {
+          if (!(e instanceof AuthRedirectError)) notify(e.message, 'error');
+        }
+      };
+    });
+  };
+
+  // In-use department: ask where its projects / CRs / users go. Resolves with a department
+  // id, null (= no department) or undefined (cancelled).
+  function chooseReassignment(r) {
+    return new Promise((resolve) => {
+      const others = rows.filter((x) => x.id !== r.id);
+      const modal = document.createElement('div');
+      modal.className = 'modal confirm-dialog';
+      modal.innerHTML = `
+        <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="dm-del-title">
+          <h3 class="confirm-title" id="dm-del-title">Delete department “${escapeHtml(r.shownAs)}”?</h3>
+          <p class="confirm-message">It is used by ${r.projects} projects, ${r.crs} CRs and ${r.users} users. Move them to:</p>
+          <label class="dm-field"><span>New department</span>
+            <select>
+              ${others.map((x) => `<option value="${escapeHtml(x.id)}">${escapeHtml(x.shownAs)}${x.shownAs !== x.name ? ` (${escapeHtml(x.name)})` : ''}</option>`).join('')}
+              <option value="">— No department —</option>
+            </select></label>
+          <p class="confirm-message" style="margin-top:8px;">Moved projects and CRs get a Change History entry. This cannot be undone.</p>
+          <div class="modal-actions">
+            <button type="button" class="btn-secondary" data-action="cancel">Cancel</button>
+            <button type="button" class="btn-danger" data-action="confirm">Move and delete</button>
+          </div>
+        </div>`;
+      const select = modal.querySelector('select');
+      const finish = (v) => { document.removeEventListener('keydown', onKey); modal.remove(); resolve(v); };
+      const onKey = (e) => { if (e.key === 'Escape') finish(undefined); };
+      modal.addEventListener('click', (e) => { if (e.target === modal) finish(undefined); });
+      modal.querySelector('[data-action="cancel"]').onclick = () => finish(undefined);
+      modal.querySelector('[data-action="confirm"]').onclick = () => finish(select.value || null);
+      document.addEventListener('keydown', onKey);
+      document.body.appendChild(modal);
+      select.focus();
+    });
+  }
+
+  draw();
+}
+
 async function renderMasterDwsApplications() {
   setActive('#master-dws');
   await ensureLookups();
@@ -13056,10 +13240,10 @@ function renderAuth() {
 }
 
 // Protected routes that require authentication
-const PROTECTED_ROUTES = ['#list', '#crlist', '#dashboard', '#crdashboard', '#new', '#user-dashboard', '#admin', '#admin-users', '#admin-roles', '#master-dws', '#management-dashboard'];
+const PROTECTED_ROUTES = ['#list', '#crlist', '#dashboard', '#crdashboard', '#new', '#user-dashboard', '#admin', '#admin-users', '#admin-roles', '#master-dws', '#master-departments', '#management-dashboard'];
 // #management-dashboard is NOT admin-only: it is governed by the Access Matrix
 // (canViewManagementDashboard), guarded explicitly in router().
-const ADMIN_ROUTES = ['#admin', '#admin-users', '#admin-roles', '#master-dws'];
+const ADMIN_ROUTES = ['#admin', '#admin-users', '#admin-roles', '#master-dws', '#master-departments'];
 
 async function requireAuth() {
   const token = getToken();
@@ -13180,6 +13364,7 @@ async function updateNavAuth() {
   const adminLinks = document.querySelectorAll('.admin-link');
   const protectedLinks = document.querySelectorAll('.protected-link');
   const navMasterDws = document.getElementById('nav-master-dws');
+  const navMasterDepartments = document.getElementById('nav-master-departments');
   const navManagementDashboard = document.getElementById('nav-management-dashboard');
   
   // Ensure currentUser is populated from token/profile so nav doesn't "disappear" after refresh.
@@ -13255,6 +13440,11 @@ async function updateNavAuth() {
     if (navMasterDws) {
       const role = String(user.role || '').trim().toLowerCase();
       navMasterDws.classList.toggle('hidden', !(user.isAdmin || role === 'admin'));
+    }
+    // Department Master: Admin only (the API is admin-only too)
+    if (navMasterDepartments) {
+      const role = String(user.role || '').trim().toLowerCase();
+      navMasterDepartments.classList.toggle('hidden', !(user.isAdmin || role === 'admin'));
     }
 
     // Management Dashboard: visible to Admin, or anyone granted it via the Access Matrix.
@@ -13338,6 +13528,7 @@ async function router() {
     if (h.startsWith('#admin-users')) return renderAdminUsers();
     if (h.startsWith('#admin-roles')) return renderAdminRoles();
     if (h.startsWith('#master-dws')) return renderMasterDwsApplications();
+    if (h.startsWith('#master-departments')) return renderDepartmentMaster();
     if (h.startsWith('#management-dashboard')) {
       // Governed by the Access Matrix, not admin-only.
       const access = await getUserAccess();
