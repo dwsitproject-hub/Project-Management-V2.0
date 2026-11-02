@@ -8982,7 +8982,7 @@ async function renderDashboard() {
 
 const PC_STATE_KEY = 'pm_portfolio_calendar';
 const PC_COL_W = 120; // px per month column
-const PC_LANE_H = 30; // px per stacked card lane
+const PC_LANE_H = 30; // minimum row height for cards (px)
 
 function pcLoadState() {
   try { return JSON.parse(localStorage.getItem(PC_STATE_KEY)) || {}; } catch (_) { return {}; }
@@ -9047,16 +9047,6 @@ function pcStatusClass(status) {
   }[key] || 'pc-st-idle';
 }
 
-let pcMeasureCtx = null;
-/** Rendered width (px) of a card label, so names can be laid out in full. */
-function pcTextWidth(text) {
-  if (!pcMeasureCtx) {
-    pcMeasureCtx = document.createElement('canvas').getContext('2d');
-    pcMeasureCtx.font = '12px Inter, system-ui, -apple-system, "Segoe UI", sans-serif';
-  }
-  return Math.ceil(pcMeasureCtx.measureText(String(text || '')).width);
-}
-
 // PM's page header is sticky and its height varies (the nav wraps on narrow screens);
 // the calendar's scroll area is sized below it so its frozen month row stays visible.
 function pcMeasureHeader() {
@@ -9064,6 +9054,37 @@ function pcMeasureHeader() {
   if (header) document.documentElement.style.setProperty('--pm-header-h', `${header.offsetHeight}px`);
 }
 window.addEventListener('resize', pcMeasureHeader);
+
+// Narrowest card: very short plans (a few days) still get room for a word per line.
+const PC_MIN_CARD_W = 64;
+const PC_CARD_GAP = 4;
+
+/**
+ * Stack a row's cards by their rendered height (names wrap, so heights differ):
+ * each card goes to the lowest free spot that doesn't overlap a card it shares
+ * time with. Then the row grows to fit.
+ */
+function pcPackTrack(track) {
+  const bars = [...track.querySelectorAll('.pc-bar')];
+  const items = bars.map((b) => {
+    const l = parseFloat(b.style.left) || 0;
+    return { b, l, r: l + b.offsetWidth, h: b.offsetHeight };
+  });
+  items.sort((a, c) => a.l - c.l);
+  const placed = [];
+  for (const it of items) {
+    const sharing = placed.filter((p) => p.l < it.r - 1 && it.l < p.r - 1);
+    const candidates = [0, ...sharing.map((p) => p.y + p.h + PC_CARD_GAP)].sort((a, c) => a - c);
+    it.y = candidates.find((y) => sharing.every((p) => y >= p.y + p.h + PC_CARD_GAP || y + it.h + PC_CARD_GAP <= p.y));
+    placed.push(it);
+  }
+  let bottom = 0;
+  for (const it of placed) {
+    it.b.style.top = `${it.y + 6}px`;
+    bottom = Math.max(bottom, it.y + it.h);
+  }
+  track.style.height = `${Math.max(PC_LANE_H, bottom) + 12}px`;
+}
 
 function pcLoadClass(score) {
   if (score <= 0) return 'pc-load-none';
@@ -9169,35 +9190,33 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     return [pm ? `PM: ${pm}` : 'No IT PM', devs.length ? `Dev: ${devs.join(', ')}` : ''].filter(Boolean).join(' · ');
   }
 
-  // A card is at least as wide as its name. `fill` is the real plan period (coloured);
-  // anything beyond it only holds the name and is drawn pale, so it never reads as plan
-  // time. The name is drawn twice, clipped at the plan end: light on the colour, dark on
-  // the pale part.
-  function barHtml(i, left, fill, need, lane, clipStart, clipEnd, role, rowMember) {
-    const width = Math.max(fill, need);
+  // A card is exactly as wide as its plan period (at least PC_MIN_CARD_W so very short
+  // plans can still hold a word); the name wraps and the card grows taller. Cards are
+  // stacked by their measured height after rendering (pcPackTrack).
+  function barHtml(i, left, width, clipStart, clipEnd, role, rowMember) {
     const pm = userName(i.itPmId);
     const devs = pcDevIds(i).map(userName).filter(Boolean);
     const text = escapeHtml(barLabel(i));
     const tip = [
       `${i.type}: ${i.name}`,
       `Plan: ${i.planStartDate?.slice(0, 10)} → ${i.planEndDate?.slice(0, 10)}`,
+      ...(width <= PC_MIN_CARD_W ? ['(short plan — drawn at a minimum width)'] : []),
       `IT PM: ${pm || '—'}`,
       `IT Dev: ${devs.join(', ') || '—'}`,
       `Status: ${i.status || '—'} · ${i.priority || ''}`,
       ...(role === 'pic' ? [`Shown here as IT PIC — dropping it on another member replaces ${userName(rowMember)} as IT PIC`] : []),
       'Drag to move · drag an edge to change start/end · click to open',
     ].join('\n');
-    return `<div class="pc-bar ${pcStatusClass(i.status)} ${i.type === 'CR' ? 'pc-shape-cr' : 'pc-shape-project'}${role === 'pic' ? ' pc-role-pic' : ''}${width > fill ? ' pc-has-tail' : ''}${clipStart ? ' pc-clip-start' : ''}${clipEnd ? ' pc-clip-end' : ''}"
-        data-id="${escapeHtml(i.id)}" data-fill="${fill}" data-need="${need}" data-role="${role || 'pm'}" data-row-member="${escapeHtml(rowMember || '')}"
-        style="left:${left}px;width:${width}px;--fill:${fill}px;top:${lane * PC_LANE_H + 6}px" title="${escapeHtml(tip)}">
+    return `<div class="pc-bar ${pcStatusClass(i.status)} ${i.type === 'CR' ? 'pc-shape-cr' : 'pc-shape-project'}${role === 'pic' ? ' pc-role-pic' : ''}${clipStart ? ' pc-clip-start' : ''}${clipEnd ? ' pc-clip-end' : ''}"
+        data-id="${escapeHtml(i.id)}" data-role="${role || 'pm'}" data-row-member="${escapeHtml(rowMember || '')}"
+        style="left:${left}px;width:${width}px;top:6px" title="${escapeHtml(tip)}">
         ${clipStart ? '' : '<span class="pc-handle pc-handle-start"></span>'}
         <span class="pc-bar-text">${text}</span>
-        <span class="pc-bar-text pc-bar-text-tail" aria-hidden="true">${text}</span>
         ${clipEnd ? '' : '<span class="pc-handle pc-handle-end"></span>'}
       </div>`;
   }
 
-  // Lay out items in a track: stack overlapping cards into lanes.
+  // Cards of one row; vertical positions are set after rendering (pcPackTrack).
   // items: initiatives, or { i, role } entries (Team Member view: 'pm' | 'pic').
   function trackHtml(items, rowMember) {
     const width = st.months * PC_COL_W;
@@ -9210,27 +9229,17 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       const l = (pcPos(sp.s, false) - st.start) * PC_COL_W;
       const r = (pcPos(sp.e, true) - st.start) * PC_COL_W;
       if (r <= 0 || l >= width) continue;
-      const p = { i, role, l: Math.max(0, l), r: Math.min(width, r), clipStart: l < 0, clipEnd: r > width };
-      p.fill = Math.max(10, p.r - p.l);
-      p.need = pcTextWidth(barLabel(i)) + 28; // name + padding + resize handles
-      p.ext = p.l + Math.max(p.fill, p.need) + 4; // lanes keep the whole card (incl. name) clear
-      placed.push(p);
+      const left = Math.max(0, l);
+      const w = Math.max(PC_MIN_CARD_W, Math.min(width, r) - left);
+      placed.push({ i, role, l: Math.min(left, width - w), w, clipStart: l < 0, clipEnd: r > width });
     }
     placed.sort((a, b) => a.l - b.l);
-    const laneEnds = [];
-    for (const p of placed) {
-      let lane = laneEnds.findIndex((end) => end <= p.l + 1);
-      if (lane === -1) { lane = laneEnds.length; laneEnds.push(0); }
-      laneEnds[lane] = p.ext;
-      p.lane = lane;
-    }
-    const lanes = Math.max(1, laneEnds.length);
     const todayLeft = (todayPos - st.start) * PC_COL_W;
     return {
       count: placed.length,
-      html: `<div class="pc-track" style="width:${width}px;height:${lanes * PC_LANE_H + 12}px">
+      html: `<div class="pc-track" style="width:${width}px;height:${PC_LANE_H + 12}px">
         ${todayLeft >= 0 && todayLeft <= width ? `<div class="pc-today" style="left:${todayLeft}px"></div>` : ''}
-        ${placed.map((p) => barHtml(p.i, p.l, p.fill, p.need, p.lane, p.clipStart, p.clipEnd, p.role, rowMember)).join('')}
+        ${placed.map((p) => barHtml(p.i, p.l, p.w, p.clipStart, p.clipEnd, p.role, rowMember)).join('')}
       </div>`,
     };
   }
@@ -9354,7 +9363,6 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
             <span class="pc-legend-sep">·</span>
             <span><i class="pc-key pc-st-idle"></i>Not Started / On Hold</span><span><i class="pc-key pc-st-ok"></i>On Track</span>
             <span><i class="pc-key pc-st-risk"></i>At Risk</span><span><i class="pc-key pc-st-late"></i>Delayed</span><span><i class="pc-key pc-st-live"></i>Live</span>
-            <span><i class="pc-key pc-tail-key"></i>pale = name only, not plan time</span>
             ${st.yAxis === 'member' ? '<span><i class="pc-key pc-pic-key"></i>as IT PIC</span>' : ''}
             <span>Weighted Score: Project PM + Dev = 1, PM or Dev = 0.5 · CR = 0.25</span>
             <span><i class="pc-key pc-load-ok"></i>≤${PC_LOAD_OK_MAX}</span><span><i class="pc-key pc-load-busy"></i>&gt;${PC_LOAD_OK_MAX} to ${PC_LOAD_BUSY_MAX}</span><span><i class="pc-key pc-load-over"></i>&gt;${PC_LOAD_BUSY_MAX}</span>
@@ -9394,9 +9402,11 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         </div>` : ''}
       </div>`;
 
+    pcMeasureHeader();
+    // Stack cards by their wrapped height first, then restore the scroll position.
+    container.querySelectorAll('.pc-track').forEach(pcPackTrack);
     const scroller = container.querySelector('.pc-scroll');
     if (scroller) { scroller.scrollLeft = prevScrollLeft; scroller.scrollTop = prevScrollTop; }
-    pcMeasureHeader();
     wire();
   }
 
@@ -9556,7 +9566,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       : e.target.classList.contains('pc-handle-start') ? 'start'
         : e.target.classList.contains('pc-handle-end') ? 'end' : 'move';
     const left0 = parseFloat(el.style.left) || 0;
-    const fill0 = parseFloat(el.dataset.fill) || 0;
+    const fill0 = parseFloat(el.style.width) || 0;
     // Team Member view: which role this card stands for in its row, and for whom.
     const role = el.dataset.role === 'pic' ? 'pic' : 'pm';
     const sourceMember = el.dataset.rowMember || item.itPmId || '';
@@ -9568,13 +9578,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       if (!pics.includes(target)) pics.push(target);
       return { itPicIds: pics, itPicId: pics[0] || null };
     };
-    const need = parseFloat(el.dataset.need) || 0;
-    const setFill = (f) => {
-      const fill = Math.max(10, f);
-      el.style.setProperty('--fill', `${fill}px`);
-      el.style.width = `${Math.max(fill, need)}px`;
-      el.classList.toggle('pc-has-tail', need > fill);
-    };
+    const setFill = (f) => { el.style.width = `${Math.max(PC_MIN_CARD_W, f)}px`; };
     const x0 = e.clientX;
     const y0 = e.clientY;
     let delta = 0;
