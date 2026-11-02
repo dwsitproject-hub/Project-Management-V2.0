@@ -9096,7 +9096,9 @@ function pcLoadClass(score) {
   return 'pc-load-over';
 }
 
-async function renderPortfolioCalendar(container, { team, currentUserId }) {
+async function renderPortfolioCalendar(container, { team, currentUserId, canPlan = true }) {
+  // canPlan = Manager: drag to re-plan / reassign, plus the Unassigned row. Otherwise the
+  // calendar shows the viewer's own work only and cards just open the detail panel.
   // The Manager is shown too (first, marked "you"), with the same scoring and drag rules.
   const me = (LOOKUPS.users || []).find((u) => u.id === currentUserId) || null;
   const members = team.filter((u) => u.id !== currentUserId);
@@ -9160,8 +9162,8 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       if (st.type !== 'All' && i.type !== st.type) return false;
       if (!deptMatches(i)) return false;
       if (teamIds.has(i.itPmId) || pcDevIds(i).some((id) => teamIds.has(id))) return true;
-      // Nobody assigned yet (no IT PM, no IT PIC): show it so it can be dragged to a member.
-      return !i.itPmId && pcDevIds(i).length === 0;
+      // Nobody assigned yet (no IT PM, no IT PIC): show it so a Manager can drag it to a member.
+      return canPlan && !i.itPmId && pcDevIds(i).length === 0;
     });
   }
   function span(i) {
@@ -9300,7 +9302,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
           .filter((i) => i.itPmId === u.id || pcDevIds(i).includes(u.id))
           .map((i) => ({ i, role: i.itPmId === u.id ? 'pm' : 'pic' })),
       }));
-      rows.push({
+      if (canPlan) rows.push({
         id: '',
         label: 'Unassigned',
         note: 'no IT PM / PIC from the team — drag to a member to assign',
@@ -9342,7 +9344,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     const hiddenCount = scheduled.length - shown;
 
     container.innerHTML = `
-      <div class="pc${fullPage ? ' pc-fullpage' : ''}">
+      <div class="pc${fullPage ? ' pc-fullpage' : ''}${canPlan ? '' : ' pc-readonly'}">
         <div class="card pc-toolbar">
           <div class="pc-field"><label>Initiative Type</label>
             <div class="pc-seg">${['All', 'Project', 'CR'].map((t) => `<button type="button" data-pc-type="${t}" class="${st.type === t ? 'active' : ''}">${t}</button>`).join('')}</div></div>
@@ -9380,14 +9382,16 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
           </div>
         </div>
 
-        <h3 class="pc-section-title">Team Weighted Score — ${pcMonthLabel(st.start)} to ${pcMonthLabel(st.start + st.months - 1)} (${st.type === 'All' ? 'Projects + CRs' : st.type + 's'}${st.department ? ` · ${escapeHtml(st.department === '__none__' ? 'No department' : st.department)}` : ''})</h3>
+        <h3 class="pc-section-title">${canPlan ? 'Team' : 'My'} Weighted Score — ${pcMonthLabel(st.start)} to ${pcMonthLabel(st.start + st.months - 1)} (${st.type === 'All' ? 'Projects + CRs' : st.type + 's'}${st.department ? ` · ${escapeHtml(st.department === '__none__' ? 'No department' : st.department)}` : ''})</h3>
         <div class="pc-scores">${scoreCards}</div>
 
         <div class="card pc-calendar">
           <div class="pc-cal-head">
             <h3>🗓️ Portfolio Calendar</h3>
             <button type="button" class="pc-fullpage-btn" id="pc-fullpage" title="${fullPage ? 'Exit full page (Esc)' : 'Show the calendar on the whole screen'}">${fullPage ? '✕ Exit full page' : '⤢ Full page'}</button>
-            <span class="muted">${st.yAxis === 'member'
+            <span class="muted">${!canPlan
+              ? 'Your own projects and CRs (as IT PM or IT PIC). Click a card to view it; your Manager plans and assigns work here.'
+              : st.yAxis === 'member'
               ? 'Click a card to view or edit it. Drag it sideways to move its plan dates, drag its edges to change start or end, or drop it on another member to reassign it (IT PM card → IT PM, dashed IT PIC card → IT PIC).'
               : 'Click a card to view or edit it. Drag it sideways to move its plan dates, or drag its edges to change start or end.'}
               ${hiddenCount > 0 ? ` ${hiddenCount} scheduled item(s) fall outside this range.` : ''}</span>
@@ -9407,7 +9411,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
 
         ${unscheduled.length ? `<div class="card pc-unscheduled">
           <h3>No plan dates (${unscheduled.length})</h3>
-          <p class="muted">Not counted in the Weighted Score. Drag one onto a month in the calendar to give it plan dates for that month.</p>
+          <p class="muted">Not counted in the Weighted Score.${canPlan ? ' Drag one onto a month in the calendar to give it plan dates for that month.' : ''}</p>
           <div class="pc-chips">${unscheduled.map((i) => `<span class="pc-chip ${pcStatusClass(i.status)} ${i.type === 'CR' ? 'pc-shape-cr' : 'pc-shape-project'}" data-id="${escapeHtml(i.id)}"
               title="${escapeHtml(`${i.type}: ${i.name}\nIT PM: ${userName(i.itPmId) || '—'}\nClick to open · drag onto a month to plan it`)}">${escapeHtml(i.name)}</span>`).join('')}</div>
         </div>` : ''}
@@ -9628,6 +9632,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     };
 
     const onMove = (ev) => {
+      if (!canPlan) return; // read-only: a press is just a click (opens the detail panel)
       const dx = ev.clientX - x0;
       const dy = ev.clientY - y0;
       if (Math.abs(dx) > 4 || Math.abs(dy) > 4) moved = true;
@@ -9902,10 +9907,9 @@ async function renderUserDashboard() {
       </div>
     `;
 
-    if (!isManager) {
-      app.innerHTML = overviewHtml;
-    } else {
-      // Managers get a second tab: the team's Portfolio Calendar (remembered per browser).
+    {
+      // Second tab: Portfolio Calendar (remembered per browser). Managers see and plan
+      // their team; everyone else sees their own work, read-only.
       let tab = 'overview';
       try { if (localStorage.getItem('pm_dashboard_tab') === 'calendar') tab = 'calendar'; } catch (_) { /* optional */ }
       app.innerHTML = `
@@ -9928,8 +9932,9 @@ async function renderUserDashboard() {
           calendarLoaded = true;
           hubCall('page', '/#/user-dashboard/portfolio-calendar');
           renderPortfolioCalendar(document.getElementById('dash-calendar'), {
-            team: teamMembers,
+            team: isManager ? teamMembers : [],
             currentUserId: currentUserProfile?.id,
+            canPlan: isManager,
           });
         }
       };
