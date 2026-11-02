@@ -9097,7 +9097,10 @@ function pcLoadClass(score) {
 }
 
 async function renderPortfolioCalendar(container, { team, currentUserId }) {
-  if (!team.length) {
+  // The Manager is shown too (first, marked "you"), with the same scoring and drag rules.
+  const me = (LOOKUPS.users || []).find((u) => u.id === currentUserId) || null;
+  const members = team.filter((u) => u.id !== currentUserId);
+  if (!members.length && !me) {
     container.innerHTML = `<div class="card pc-empty">
       <h3>🗓️ Portfolio Calendar</h3>
       <p class="muted">Add your team members in <a href="#profile">My Profile</a> to see their projects and workload here.</p>
@@ -9128,7 +9131,11 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     department: typeof saved.department === 'string' ? saved.department : '',
     start: thisMonth - 1,
   };
-  const teamSorted = team.slice().sort((a, b) => String(a.name || a.email).localeCompare(String(b.name || b.email)));
+  const teamSorted = [
+    ...(me ? [me] : []),
+    ...members.slice().sort((a, b) => String(a.name || a.email).localeCompare(String(b.name || b.email))),
+  ];
+  const personLabel = (u) => `${u.name || u.email}${u.id === currentUserId ? ' (you)' : ''}`;
   const teamIds = new Set(teamSorted.map((u) => u.id));
   const userName = (id) => {
     const u = LOOKUPS.users.find((x) => x.id === id);
@@ -9266,9 +9273,9 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       cells.forEach((c, k) => { if (c.total > peak) { peak = c.total; peakAt = monthIdx[k]; } });
       return `<div class="pc-score-card">
         <div class="pc-score-head">
-          <span class="pc-avatar">${escapeHtml(initials(u.name || u.email))}</span>
+          <span class="pc-avatar${u.id === currentUserId ? ' pc-avatar-me' : ''}">${escapeHtml(initials(u.name || u.email))}</span>
           <div class="pc-score-who">
-            <div class="pc-score-name">${escapeHtml(u.name || u.email)}</div>
+            <div class="pc-score-name">${escapeHtml(personLabel(u))}</div>
             <div class="muted">This month: <b>${current === null ? '—' : current}</b>${peak ? ` · Peak <b>${peak}</b> (${pcMonthLabel(peakAt)})` : ''}</div>
           </div>
         </div>
@@ -9287,7 +9294,8 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
       // Someone who is both gets one card. The last row holds work with nobody from the team.
       const rows = teamSorted.map((u) => ({
         id: u.id,
-        label: u.name || u.email,
+        label: personLabel(u),
+        initials: initials(u.name || u.email),
         items: scheduled
           .filter((i) => i.itPmId === u.id || pcDevIds(i).includes(u.id))
           .map((i) => ({ i, role: i.itPmId === u.id ? 'pm' : 'pic' })),
@@ -9303,7 +9311,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         const t = trackHtml(row.items, row.id);
         row.items.forEach((e) => shownIds.add((e.i || e).id));
         return `<div class="pc-row${row.id ? '' : ' pc-row-other'}" data-member="${escapeHtml(row.id)}">
-          <div class="pc-label"><span class="pc-avatar pc-avatar-sm">${row.id ? escapeHtml(initials(row.label)) : '–'}</span>
+          <div class="pc-label"><span class="pc-avatar pc-avatar-sm${row.id && row.id === currentUserId ? ' pc-avatar-me' : ''}">${row.id ? escapeHtml(row.initials) : '–'}</span>
             <div><div class="pc-label-name">${escapeHtml(row.label)}</div><div class="muted">${t.count} shown${row.note ? ` · ${row.note}` : ''}</div></div></div>
           ${t.html}
         </div>`;
