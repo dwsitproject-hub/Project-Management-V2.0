@@ -362,7 +362,7 @@ router.post('/commit', express.json({ limit: '2mb' }), async (req, res) => {
           planEndDate: r.planEndDate,
           status,
           ...(pmIds[0] ? { itPmId: pmIds[0] } : {}),
-          ...(picIds.length ? { itPicIds: picIds } : {}),
+          ...(picIds.length ? { itPicIds: picIds, itPicId: picIds[0] } : {}),
           ...(rowDeptId ? { departmentId: rowDeptId } : {}),
           ...(rowOwnerId ? { businessOwnerId: rowOwnerId } : {}),
           ...(PRIORITIES.includes(r.priority) ? { priority: r.priority } : {}),

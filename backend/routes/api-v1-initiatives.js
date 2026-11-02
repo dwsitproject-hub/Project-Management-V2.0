@@ -262,6 +262,7 @@ async function updateInitiative(req, res, type) {
         stored[k] = v;
       }
     }
+    if ('itPicIds' in body) stored.itPicId = (stored.itPicIds || [])[0] || null; // keep legacy field in sync
     stored.updatedAt = new Date().toISOString();
 
     if (rules.requiresEndDate(stored.status, stored.milestone) && (!stored.endDate || String(stored.endDate).trim() === '')) {

@@ -9011,10 +9011,13 @@ function pcAddMonths(p, n) {
 // Position on the month axis: month index + elapsed fraction of that month.
 const pcPos = (p, isEnd) => pcMonthIndex(p) + (isEnd ? p.d : p.d - 1) / pcDaysIn(p.y, p.m);
 
+// IT PIC (= IT Dev) of an initiative: the itPicIds list; the legacy single itPicId only
+// when the list is empty (same rule as the store). Never merge the two: a stale itPicId
+// would count someone who was replaced.
 function pcDevIds(i) {
   const raw = Array.isArray(i.itPicIds) ? i.itPicIds : String(i.itPicIds || '').split(',');
   const ids = raw.map((s) => String(s).trim()).filter(Boolean);
-  if (i.itPicId && !ids.includes(i.itPicId)) ids.push(i.itPicId);
+  if (!ids.length && i.itPicId) ids.push(i.itPicId);
   return ids;
 }
 

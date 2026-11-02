@@ -572,6 +572,15 @@ router.put('/:id', async (req, res) => {
   
   initiative.updatedAt = updatedAt;
 
+  // Keep the legacy single IT PIC field in sync with the IT PIC list (the edit form only
+  // sends itPicIds; a stale itPicId kept showing the previous person elsewhere).
+  if ('itPicIds' in req.body) {
+    const picIds = Array.isArray(initiative.itPicIds)
+      ? initiative.itPicIds
+      : String(initiative.itPicIds || '').split(',').map((v) => v.trim()).filter(Boolean);
+    initiative.itPicId = picIds[0] || null;
+  }
+
   // Enforce business rule on update as well:
   // Actual End Date required when CR Status=Live and Milestone=Fully Live
   if (

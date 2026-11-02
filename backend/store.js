@@ -600,6 +600,13 @@ async function readFromDb() {
           createdAt: row.createdAt || row.createdat || null,
           updatedAt: row.updatedAt || row.updatedat || null
         }));
+        // itPicId is the legacy single IT PIC. Edits only update the itPicIds list, so it
+        // could still name someone who is no longer IT PIC (e.g. a replaced "New Hire"),
+        // and every reader of itPicId (filters, dashboards, CR task assignee, the
+        // calendar) saw the wrong person. Keep it equal to a member of the list.
+        for (const i of data[table]) {
+          if (i.itPicIds.length && !i.itPicIds.includes(i.itPicId)) i.itPicId = i.itPicIds[0];
+        }
       } else if (table === 'notifications') {
         // Transform notifications
         data[table] = res.rows.map(row => ({
