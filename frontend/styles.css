@@ -5740,7 +5740,8 @@ a.pc-label-name:hover { text-decoration: underline; }
 
 .pc-bar { position: absolute; height: 24px; font-size: 12px; color: #fff; cursor: grab; box-shadow: var(--elevation-sm); touch-action: none; overflow: hidden; }
 .pc-bar.pc-dragging { cursor: grabbing; z-index: 10; opacity: 0.9; box-shadow: var(--elevation-lg); }
-.pc-bar-text { position: relative; z-index: 1; display: block; line-height: 24px; padding: 0 14px; white-space: nowrap; }
+.pc-bar-text { position: absolute; inset: 0; z-index: 1; line-height: 24px; padding: 0 14px; white-space: nowrap; overflow: hidden; clip-path: inset(0 calc(100% - var(--fill)) 0 0); }
+.pc-bar .pc-bar-text.pc-bar-text-tail { color: #2d3748; text-shadow: none; clip-path: inset(0 0 0 var(--fill)); }
 .pc-handle { position: absolute; top: 0; bottom: 0; width: 8px; z-index: 2; cursor: ew-resize; background: rgba(255, 255, 255, 0.25); }
 .pc-handle-start { left: 0; }
 .pc-handle-end { left: calc(var(--fill) - 8px); }
@@ -5839,13 +5840,13 @@ body.pc-panel-open { overflow: hidden; }
 .pc-st-late { background-color: #c53030; color: #fff; }
 .pc-st-live { background-color: #2b6cb0; color: #fff; }
 /* Name always inside the card: past the plan end the card is striped, with a tick at the end */
-.pc-bar.pc-has-tail { background-image: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.2) 0 6px, transparent 6px 12px); background-size: calc(100% - var(--fill)) 100%; background-position: var(--fill) 0; background-repeat: no-repeat; }
-.pc-bar.pc-has-tail::after { content: ''; position: absolute; top: 3px; bottom: 3px; left: calc(var(--fill) - 1px); width: 2px; background: rgba(255, 255, 255, 0.95); }
+/* Past the plan end the card is pale (name only), so it can't be mistaken for plan time */
+.pc-bar.pc-has-tail::before { content: ''; position: absolute; top: 0; bottom: 0; left: var(--fill); right: 0; background: #f7fafc; border: 1px dashed #a0aec0; border-left: 0; border-top-right-radius: inherit; border-bottom-right-radius: inherit; }
 /* Shape tells the type: Project = squarer card, CR = pill */
 .pc-shape-project { border-radius: 3px; }
 .pc-shape-cr { border-radius: 999px; }
 .pc-shape-key { display: inline-block; flex: 0 0 auto; width: 20px; height: 11px; background: #718096; margin-right: 5px; vertical-align: -1px; }
-.pc-tail-key { background: #a0aec0 repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.55) 0 3px, transparent 3px 6px); }
+.pc-tail-key { background: #f7fafc; border: 1px dashed #a0aec0; }
 .pc-legend-sep { opacity: 0.5; }
 .pc-st-ok .pc-bar-text, .pc-st-late .pc-bar-text, .pc-st-live .pc-bar-text { text-shadow: 0 1px 1px rgba(0, 0, 0, 0.35); }
 

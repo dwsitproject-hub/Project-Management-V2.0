@@ -9169,8 +9169,10 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
     return [pm ? `PM: ${pm}` : 'No IT PM', devs.length ? `Dev: ${devs.join(', ')}` : ''].filter(Boolean).join(' · ');
   }
 
-  // A card is at least as wide as its name. `fill` is the real plan period (solid);
-  // anything beyond it only holds the name and is striped, with a tick at the plan end.
+  // A card is at least as wide as its name. `fill` is the real plan period (coloured);
+  // anything beyond it only holds the name and is drawn pale, so it never reads as plan
+  // time. The name is drawn twice, clipped at the plan end: light on the colour, dark on
+  // the pale part.
   function barHtml(i, left, fill, need, lane, clipStart, clipEnd, role, rowMember) {
     const width = Math.max(fill, need);
     const pm = userName(i.itPmId);
@@ -9190,6 +9192,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
         style="left:${left}px;width:${width}px;--fill:${fill}px;top:${lane * PC_LANE_H + 6}px" title="${escapeHtml(tip)}">
         ${clipStart ? '' : '<span class="pc-handle pc-handle-start"></span>'}
         <span class="pc-bar-text">${text}</span>
+        <span class="pc-bar-text pc-bar-text-tail" aria-hidden="true">${text}</span>
         ${clipEnd ? '' : '<span class="pc-handle pc-handle-end"></span>'}
       </div>`;
   }
@@ -9351,7 +9354,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId }) {
             <span class="pc-legend-sep">·</span>
             <span><i class="pc-key pc-st-idle"></i>Not Started / On Hold</span><span><i class="pc-key pc-st-ok"></i>On Track</span>
             <span><i class="pc-key pc-st-risk"></i>At Risk</span><span><i class="pc-key pc-st-late"></i>Delayed</span><span><i class="pc-key pc-st-live"></i>Live</span>
-            <span><i class="pc-key pc-tail-key"></i>beyond plan end (name only)</span>
+            <span><i class="pc-key pc-tail-key"></i>pale = name only, not plan time</span>
             ${st.yAxis === 'member' ? '<span><i class="pc-key pc-pic-key"></i>as IT PIC</span>' : ''}
             <span>Weighted Score: Project PM + Dev = 1, PM or Dev = 0.5 · CR = 0.25</span>
             <span><i class="pc-key pc-load-ok"></i>≤${PC_LOAD_OK_MAX}</span><span><i class="pc-key pc-load-busy"></i>&gt;${PC_LOAD_OK_MAX} to ${PC_LOAD_BUSY_MAX}</span><span><i class="pc-key pc-load-over"></i>&gt;${PC_LOAD_BUSY_MAX}</span>
