@@ -588,6 +588,38 @@ function applyClientDateAndManagerFilters(data, filter) {
   return rows;
 }
 
+// Long lists: the first rows are rendered with the page and the rest are appended in
+// batches right after the first paint. Laying out ~5,500 cells at once took ~0.5 s before
+// anything showed; now the visible part appears at once. A newer render of the same table
+// (navigation, filter, search, sort) stops an unfinished one.
+const LIST_FIRST_ROWS = 40;
+const LIST_ROW_BATCH = 80;
+
+function appendListRowsProgressively(viewType, tableId, rows, rowHtml) {
+  const table = document.getElementById(tableId);
+  const tbody = table && table.querySelector('tbody');
+  if (!tbody) return;
+  const token = String(Date.now() + Math.random());
+  tbody.dataset.renderToken = token;
+  if (!rows.length) return;
+  let next = 0;
+  const step = () => {
+    if (!tbody.isConnected || tbody.dataset.renderToken !== token) return;
+    const batch = rows.slice(next, next + LIST_ROW_BATCH);
+    next += batch.length;
+    tbody.insertAdjacentHTML('beforeend', batch.map(rowHtml).join(''));
+    if (next < rows.length) {
+      setTimeout(step, 0);
+    } else {
+      applyColumnWidths(viewType, `#${tableId}`);
+      wireListTableRowActions(viewType);
+    }
+  };
+  // Give the browser a moment to paint the first rows. (Not requestAnimationFrame: it is
+  // paused while the tab is in the background, which would leave the list cut short.)
+  setTimeout(step, 30);
+}
+
 function wireListTableRowActions(viewType) {
   const isCR = viewType === 'crlist';
   const refresh = () => (isCR
@@ -796,14 +828,21 @@ async function softRefreshListTable(viewType = 'list', options = {}) {
     const colVisibility = resolveColumnVisibility(viewType);
     const tbody = table.querySelector('tbody');
     const colSpan = countVisibleTableColumns(table);
+    tbody.dataset.renderToken = ''; // stop an unfinished progressive render of the old rows
+    let restRows = [];
+    let restRowHtml = null;
     if (!data.length) {
       tbody.innerHTML = listEmptyStateRow(colSpan, q, isCR ? 'CRs' : 'projects');
     } else if (isCR) {
       const dataWithCR = data.map((initiative) => ({ initiative, crData: initiative.cr }));
       window.__crListExport = { rows: dataWithCR, colVisibility };
-      tbody.innerHTML = dataWithCR.map((item) => initiativeRow(item.initiative, item.crData, colVisibility)).join('');
+      restRowHtml = (item) => initiativeRow(item.initiative, item.crData, colVisibility);
+      tbody.innerHTML = dataWithCR.slice(0, LIST_FIRST_ROWS).map(restRowHtml).join('');
+      restRows = dataWithCR.slice(LIST_FIRST_ROWS);
     } else {
-      tbody.innerHTML = data.map((i) => initiativeRow(i, null, colVisibility)).join('');
+      restRowHtml = (i) => initiativeRow(i, null, colVisibility);
+      tbody.innerHTML = data.slice(0, LIST_FIRST_ROWS).map(restRowHtml).join('');
+      restRows = data.slice(LIST_FIRST_ROWS);
     }
 
     updateListResultsMeta(data.length, q, noun);
@@ -811,6 +850,7 @@ async function softRefreshListTable(viewType = 'list', options = {}) {
     syncSearchClearButton();
     wireListTableRowActions(viewType);
     applyColumnWidths(viewType, `#${tableId}`);
+    if (restRowHtml) appendListRowsProgressively(viewType, tableId, restRows, restRowHtml);
 
     // Refresh scroll affordances without rebinding listeners (avoid stacking on soft refresh)
     if (scrollPair) {
@@ -998,8 +1038,16 @@ loadHubSdk();
 
 let currentUser = null;
 
+let currentUserLoading = null; // shared by concurrent callers so /api/profile is fetched once
+
 async function getCurrentUser() {
   if (currentUser) return currentUser;
+  if (currentUserLoading) return currentUserLoading;
+  currentUserLoading = loadCurrentUser().finally(() => { currentUserLoading = null; });
+  return currentUserLoading;
+}
+
+async function loadCurrentUser() {
   const token = getToken();
   if (!token) return null;
   try {
@@ -1334,6 +1382,21 @@ function saveColumnWidths(viewType, widths) {
   localStorage.setItem(key, JSON.stringify(widths));
 }
 
+// Lists set an explicit width on every column, so the browser can use the fixed table
+// layout algorithm instead of measuring every cell's content (the CR List spent ~0.5 s
+// laying out 265 rows x 25 columns that way). The table's width = sum of visible columns.
+function syncFixedTableWidth(table) {
+  let total = 0;
+  table.querySelectorAll('thead th').forEach((th) => {
+    if (th.style.display === 'none') return;
+    total += parseFloat(th.style.width) || 0;
+  });
+  if (total > 0) {
+    table.style.tableLayout = 'fixed';
+    table.style.width = `${Math.round(total)}px`;
+  }
+}
+
 function applyColumnWidths(viewType, tableSelector) {
   const table = document.querySelector(tableSelector);
   if (!table) return;
@@ -1357,6 +1420,7 @@ function applyColumnWidths(viewType, tableSelector) {
       td.style.maxWidth = `${w}px`;
     });
   });
+  syncFixedTableWidth(table);
 }
 
 function getDefaultColumns(viewType) {
@@ -2070,13 +2134,15 @@ async function compressImage(file, maxSizeKB = 300) {
 }
 
 let LOOKUPS = { users: [], departments: [], dwsApplications: [] };
+let lookupsLoading = null; // shared by concurrent callers so /api/lookups is fetched once
 async function ensureLookups() {
-  console.log('ensureLookups called, current LOOKUPS:', LOOKUPS);
   if (LOOKUPS.users.length && LOOKUPS.departments.length) return LOOKUPS;
-  console.log('Fetching lookups from API...');
-  LOOKUPS = await fetchJSON('/api/lookups');
-  console.log('Lookups fetched:', LOOKUPS);
-  return LOOKUPS;
+  if (!lookupsLoading) {
+    lookupsLoading = fetchJSON('/api/lookups')
+      .then((data) => { LOOKUPS = data; return LOOKUPS; })
+      .finally(() => { lookupsLoading = null; });
+  }
+  return lookupsLoading;
 }
 
 function nameById(arr, id) {
@@ -3401,7 +3467,7 @@ async function renderList() {
           </thead>
           <tbody>${
             data.length
-              ? data.map(i => initiativeRow(i, null, colVisibility)).join('')
+              ? data.slice(0, LIST_FIRST_ROWS).map(i => initiativeRow(i, null, colVisibility)).join('')
               : listEmptyStateRow(columns.filter(c => colVisibility[c.class] !== false).length, q, 'projects')
           }</tbody>
         </table>
@@ -3432,6 +3498,10 @@ async function renderList() {
     ${recentActivityFabMarkup('Project')}
   `;
 
+  // Column widths first: with them the table uses the fast fixed layout, before anything
+  // below reads sizes (which would otherwise force the slow automatic layout).
+  applyColumnWidths('list', '#initiatives-table');
+  appendListRowsProgressively('list', 'initiatives-table', data.slice(LIST_FIRST_ROWS), (i) => initiativeRow(i, null, colVisibility));
   // Initialize horizontal scroll affordance for the main initiatives table.
   initScrollableTables();
   initTableScrollPairs();
@@ -3636,6 +3706,7 @@ async function renderList() {
           td.style.minWidth = newW + 'px';
           td.style.maxWidth = newW + 'px';
         });
+        syncFixedTableWidth(table);
       };
 
       const onUp = () => {
@@ -3653,8 +3724,7 @@ async function renderList() {
     };
   });
 
-  // Apply persisted column widths for Project List table
-  applyColumnWidths('list', '#initiatives-table');
+  // (Column widths are applied right after the table is inserted — see above.)
 
     // Expand/collapse handler for Description/Remark cells (event delegation)
     const initiativesTable = document.getElementById('initiatives-table');
@@ -4292,9 +4362,14 @@ async function renderNew(defaultType = 'Project') {
 }
 
 async function renderView(id) {
-  await ensureLookups();
-  await getCurrentUser();
-  const i = await fetchJSON('/api/initiatives/' + id);
+  // Fetch everything the page needs at once rather than one request after another.
+  const relatedP = Promise.all([
+    fetchJSON(`/api/comments/initiative/${id}`),
+    fetchJSON(`/api/tasks/initiative/${id}`),
+    fetchJSON(`/api/meeting-notes/initiative/${id}`),
+  ]);
+  relatedP.catch(() => {}); // handled below; don't report it as unhandled meanwhile
+  const [, , i] = await Promise.all([ensureLookups(), getCurrentUser(), fetchJSON('/api/initiatives/' + id)]);
   
   // Set active nav based on initiative type
   setActive(i.type === 'CR' ? '#crlist' : '#list');
@@ -4311,11 +4386,7 @@ async function renderView(id) {
   let tasks = [];
   let meetingNotes = [];
   try {
-    const [commentRows, taskRows, meetingRows] = await Promise.all([
-      fetchJSON(`/api/comments/initiative/${id}`),
-      fetchJSON(`/api/tasks/initiative/${id}`),
-      fetchJSON(`/api/meeting-notes/initiative/${id}`),
-    ]);
+    const [commentRows, taskRows, meetingRows] = await relatedP;
     comments = commentRows;
     tasks = taskRows;
     meetingNotes = meetingRows;
@@ -6392,8 +6463,7 @@ function showTaskUploadModal(initiativeId) {
 }
 
 async function renderEdit(id) {
-  await ensureLookups();
-  const i = await fetchJSON('/api/initiatives/' + id);
+  const [, i] = await Promise.all([ensureLookups(), fetchJSON('/api/initiatives/' + id)]);
   
   // Set active nav based on initiative type
   setActive(i.type === 'CR' ? '#crlist' : '#list');
@@ -7033,7 +7103,7 @@ async function renderCRList() {
           </thead>
           <tbody>${
             dataWithCR.length
-              ? dataWithCR.map(item => initiativeRow(item.initiative, item.crData, colVisibility)).join('')
+              ? dataWithCR.slice(0, LIST_FIRST_ROWS).map(item => initiativeRow(item.initiative, item.crData, colVisibility)).join('')
               : listEmptyStateRow(columns.filter(c => colVisibility[c.class] !== false).length, q, 'CRs')
           }</tbody>
         </table>
@@ -7064,6 +7134,9 @@ async function renderCRList() {
     ${recentActivityFabMarkup('CR')}
   `;
 
+  // Column widths first so the table uses the fast fixed layout (see syncFixedTableWidth).
+  applyColumnWidths('crlist', '#cr-table');
+  appendListRowsProgressively('crlist', 'cr-table', dataWithCR.slice(LIST_FIRST_ROWS), (item) => initiativeRow(item.initiative, item.crData, colVisibility));
   initScrollableTables();
   initTableScrollPairs();
   wireRecentActivityFab();
@@ -7253,6 +7326,7 @@ async function renderCRList() {
           td.style.minWidth = newW + 'px';
           td.style.maxWidth = newW + 'px';
         });
+        syncFixedTableWidth(table);
       };
 
       const onUp = () => {
@@ -7270,8 +7344,7 @@ async function renderCRList() {
     };
   });
 
-  // Apply persisted column widths for CR List table
-  applyColumnWidths('crlist', '#cr-table');
+  // (Column widths are applied right after the table is inserted — see above.)
 
   // Expand/collapse handler for Description/Remark cells (event delegation)
   const crTable = document.getElementById('cr-table');
@@ -13708,6 +13781,6 @@ async function renderResetPassword(token) {
       }
     };
   }
-  
-  router();
+  // No router() here: it already ran at load (see "Run router on page load"); a second
+  // call rendered the first page twice.
 })();
