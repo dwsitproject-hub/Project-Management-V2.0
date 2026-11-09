@@ -471,18 +471,26 @@ async function initializeSchema() {
 // plus ~1.4 MB over the wire. We cache the last read and drop it on every write(),
 // so reads in this process are never staler than the last write. The short TTL only
 // bounds staleness from writers OUTSIDE this process (e.g. `node backend/seed_admin.js`
-// run via docker exec) — keep it short, because store.write() rewrites everything and
-// would otherwise persist a stale snapshot over such an external change.
+// run via docker exec). store.write() only writes the rows a request changed, so a
+// stale snapshot can't overwrite such an external change; it just shows up later.
 // Set STORE_READ_CACHE_TTL_MS=0 to disable.
-const READ_CACHE_TTL_MS = Number(process.env.STORE_READ_CACHE_TTL_MS ?? 5000);
+const READ_CACHE_TTL_MS = Number(process.env.STORE_READ_CACHE_TTL_MS ?? 30000);
 let readCache = null; // { data, at }
 let cacheGeneration = 0; // bumped on invalidate so an in-flight read can't cache stale data
 let inflightRead = null; // coalesces concurrent cache misses into a single DB read
 
 function loadShared() {
-  if (READ_CACHE_TTL_MS > 0 && readCache && Date.now() - readCache.at < READ_CACHE_TTL_MS) {
+  if (READ_CACHE_TTL_MS > 0 && readCache) {
+    // Expired: answer from the cache and refresh it in the background. The cache is
+    // dropped on every write in this process, so this is only ever behind writers
+    // outside it, and by at most one refresh.
+    if (Date.now() - readCache.at >= READ_CACHE_TTL_MS) startDbRead().catch((e) => console.error('[STORE] Background refresh failed:', e.message));
     return Promise.resolve(readCache.data);
   }
+  return startDbRead();
+}
+
+function startDbRead() {
   if (!inflightRead) {
     const gen = cacheGeneration;
     const p = readFromDb()
@@ -504,9 +512,37 @@ function invalidateReadCache() {
   inflightRead = null; // requests arriving after a write must not join a pre-write read
 }
 
-/** Returns a private deep copy — callers may mutate it and pass it to write(). */
+const cloneOrigin = new WeakMap(); // read() copy -> the shared snapshot it was copied from
+const LAZY_TABLE = Symbol('lazyTable');
+
+/**
+ * Returns a private deep copy — callers may mutate it and pass it to write().
+ *
+ * Each table is copied the first time it is touched (most requests use 2–3 of the
+ * ~22 tables, and copying everything cost ~60 ms per request). Assigning a table
+ * replaces it as usual. write() skips tables that were never touched.
+ */
 async function read() {
-  return structuredClone(await loadShared());
+  const shared = await loadShared();
+  const copy = {};
+  for (const key of Object.keys(shared)) {
+    const set = (value) => Object.defineProperty(copy, key, { value, writable: true, enumerable: true, configurable: true });
+    const get = () => {
+      const value = structuredClone(shared[key]);
+      set(value);
+      return value;
+    };
+    get[LAZY_TABLE] = true;
+    Object.defineProperty(copy, key, { get, set, enumerable: true, configurable: true });
+  }
+  cloneOrigin.set(copy, shared);
+  return copy;
+}
+
+/** True while a read() copy's table has never been read or assigned. */
+function isUntouched(data, table) {
+  const desc = Object.getOwnPropertyDescriptor(data, table);
+  return !!(desc && desc.get && desc.get[LAZY_TABLE]);
 }
 
 /**
@@ -520,247 +556,244 @@ async function readShared() {
 
 async function readFromDb() {
   await initializeSchema();
-  const client = await pool.connect();
-  try {
-    const data = {};
-    const tables = [
-      'departments',
-      'users',
-      'initiatives',
-      'changeRequests',
-      'tags',
-      'initiativeTags',
-      'statusHistory',
-      'milestoneHistory',
-      'comments',
-      'tasks',
-      'documents',
-      'notifications',
-      'accessRules',
-      'apiClients',
-      'dwsApplications',
-      'managementDashboard',
-      'meetingNotes',
-      'meetingNoteParticipants',
-      'meetingNoteActionItems',
-      'meetingNoteEmailLog',
-      'meetingNoteHistory',
-    ];
-    for (const table of tables) {
-      const res = await client.query(`SELECT * FROM "${table}"`);
-      // Transform PostgreSQL column names to camelCase for users table
-      // Note: PostgreSQL preserves case for quoted identifiers, so "isAdmin" returns as isAdmin
-      if (table === 'users') {
-        data[table] = res.rows.map(row => ({
-          id: row.id,
-          name: row.name,
-          email: row.email,
-          role: row.role,
-          departmentId: row.departmentId || row.departmentid,
-          active: row.active,
-          passwordHash: row.passwordHash || row.passwordhash,
-          isAdmin: !!(row.isAdmin !== undefined ? row.isAdmin : row.isadmin), // Handle both cases
-          emailActivated: row.emailActivated !== undefined ? row.emailActivated : (row.emailactivated !== undefined ? row.emailactivated : false),
-          activationToken: row.activationToken || row.activationtoken || null,
-          activationTokenExpiry: row.activationTokenExpiry || row.activationtokenexpiry || null,
-          resetToken: row.resetToken || row.resettoken || null,
-          resetTokenExpiry: row.resetTokenExpiry || row.resettokenexpiry || null,
-          type: row.type || null,
-          teamMemberIds: row.teamMemberIds || row.teammemberids ? (row.teamMemberIds || row.teammemberids).split(',').filter(Boolean) : [],
-          createdAt: row.createdAt || row.createdat || null,
-          hubUserId: row.hubUserId || row.hubuserid || null,
-        }));
-      } else if (table === 'initiatives') {
-        // Transform initiatives and parse comma-separated arrays
-        data[table] = res.rows.map(row => ({
-          id: row.id,
-          type: row.type,
-          name: row.name,
-          ticket: row.ticket || null,
-          description: row.description || null,
-          businessImpact: row.businessImpact || row.businessimpact || null,
-          priority: row.priority || null,
-          businessOwnerId: row.businessOwnerId || row.businessownerid || null,
-          businessUserIds: row.businessUserIds || row.businessuserids ? (row.businessUserIds || row.businessuserids).split(',').filter(Boolean) : [],
-          departmentId: row.departmentId || row.departmentid || null,
-          itPicId: row.itPicId || row.itpicid || null, // Keep for backward compatibility
-          itPicIds: row.itPicIds || row.itpicids ? (row.itPicIds || row.itpicids).split(',').filter(Boolean) : (row.itPicId || row.itpicid ? [row.itPicId || row.itpicid] : []),
-          itPmId: row.itPmId || row.itpmid || null,
-          itManagerIds: row.itManagerIds || row.itmanagerids ? (row.itManagerIds || row.itmanagerids).split(',').filter(Boolean) : [],
-          systemImpactedIds: row.systemImpactedIds || row.systemimpactedids ? (row.systemImpactedIds || row.systemimpactedids).split(',').filter(Boolean) : [],
-          status: row.status || null,
-          milestone: row.milestone || null,
-          crMilestonePhase: row.crMilestonePhase || row.crmilestonephase || null,
-          startDate: row.startDate || row.startdate || null,
-          endDate: row.endDate || row.enddate || null,
-          planStartDate: row.planStartDate || row.planstartdate || null,
-          planEndDate: row.planEndDate || row.planenddate || null,
-          remark: row.remark || null,
-          documentationLink: row.documentationLink || row.documentationlink || null,
-          createdAt: row.createdAt || row.createdat || null,
-          updatedAt: row.updatedAt || row.updatedat || null
-        }));
-        // itPicId is the legacy single IT PIC. Edits only update the itPicIds list, so it
-        // could still name someone who is no longer IT PIC (e.g. a replaced "New Hire"),
-        // and every reader of itPicId (filters, dashboards, CR task assignee, the
-        // calendar) saw the wrong person. Keep it equal to a member of the list.
-        for (const i of data[table]) {
-          if (i.itPicIds.length && !i.itPicIds.includes(i.itPicId)) i.itPicId = i.itPicIds[0];
-        }
-      } else if (table === 'notifications') {
-        // Transform notifications
-        data[table] = res.rows.map(row => ({
-          id: row.id,
-          userId: row.userId || row.userid,
-          type: row.type,
-          title: row.title,
-          message: row.message,
-          initiativeId: row.initiativeId || row.initiativeid || null,
-          commentId: row.commentId || row.commentid || null,
-          read: row.read !== undefined ? !!row.read : false,
-          createdAt: row.createdAt || row.createdat
-        }));
-      } else if (table === 'accessRules') {
-        data[table] = res.rows;
-      } else if (table === 'apiClients') {
-        data[table] = res.rows.map((row) => ({
-          id: row.id,
-          name: row.name,
-          clientId: row.clientId || row.clientid,
-          clientSecretHash: row.clientSecretHash || row.clientsecrethash,
-          scopes: row.scopes || null,
-          active: row.active !== undefined ? !!row.active : true,
-          createdAt: row.createdAt || row.createdat,
-        }));
-      } else if (table === 'dwsApplications') {
-        data[table] = res.rows.map((row) => ({
-          id: row.id,
-          systemName: row.systemName || row.systemname,
-          productionUrl: row.productionUrl || row.productionurl || null,
-          stagingUrl: row.stagingUrl || row.stagingurl || null,
-          githubUrl: row.githubUrl || row.githuburl || null,
-          deploymentSteps: row.deploymentSteps || row.deploymentsteps || null,
-          createdAt: row.createdAt || row.createdat,
-          updatedAt: row.updatedAt || row.updatedat,
-        }));
-      } else if (table === 'managementDashboard') {
-        data[table] = res.rows.map((row) => ({
-          id: row.id,
-          portfolioStatus: row.portfolioStatus || row.portfoliostatus || null,
-          highlights: row.highlights || null,
-          criticalAlerts: row.criticalAlerts || row.criticalalerts || null,
-          updatedBy: row.updatedBy || row.updatedby || null,
-          updatedAt: row.updatedAt || row.updatedat,
-        }));
-      } else if (table === 'meetingNotes') {
-        data[table] = res.rows.map(row => ({
-          id: row.id,
-          initiativeId: row.initiativeId || row.initiativeid,
-          title: row.title,
-          meetingType: row.meetingType || row.meetingtype,
-          meetingDate: row.meetingDate || row.meetingdate,
-          location: row.location || null,
-          meetingLink: row.meetingLink || row.meetinglink || null,
-          facilitatorId: row.facilitatorId || row.facilitatorid,
-          noteTakerId: row.noteTakerId || row.notetakerid,
-          agenda: row.agenda || null,
-          discussion: row.discussion || null,
-          decisions: row.decisions || null,
-          risks: row.risks || null,
-          nextMeetingAt: row.nextMeetingAt || row.nextmeetingat || null,
-          status: row.status,
-          version: row.version ? Number(row.version) : 1,
-          createdBy: row.createdBy || row.createdby,
-          createdAt: row.createdAt || row.createdat,
-          updatedAt: row.updatedAt || row.updatedat,
-          deletedAt: row.deletedAt || row.deletedat || null,
-        }));
-      } else if (table === 'meetingNoteParticipants') {
-        data[table] = res.rows.map(row => ({
-          id: row.id,
-          meetingNoteId: row.meetingNoteId || row.meetingnoteid,
-          userId: row.userId || row.userid || null,
-          email: row.email || null,
-          name: row.name || null,
-          role: row.role || null,
-        }));
-      } else if (table === 'meetingNoteActionItems') {
-        data[table] = res.rows.map(row => ({
-          id: row.id,
-          meetingNoteId: row.meetingNoteId || row.meetingnoteid,
-          description: row.description,
-          ownerId: row.ownerId || row.ownerid || null,
-          ownerName: row.ownerName || row.ownername || null,
-          dueDate: row.dueDate || row.duedate || null,
-          priority: row.priority || null,
-          status: row.status,
-          orderIndex: row.orderIndex !== undefined ? Number(row.orderIndex) : Number(row.orderindex || 0),
-        }));
-      } else if (table === 'meetingNoteEmailLog') {
-        data[table] = res.rows.map(row => ({
-          id: row.id,
-          meetingNoteId: row.meetingNoteId || row.meetingnoteid,
-          subject: row.subject,
-          toEmails: row.toEmails || row.toemails || null,
-          ccEmails: row.ccEmails || row.ccemails || null,
-          bodySnapshot: row.bodySnapshot || row.bodysnapshot || null,
-          sentBy: row.sentBy || row.sentby || null,
-          sentAt: row.sentAt || row.sentat || null,
-          deliveryStatus: row.deliveryStatus || row.deliverystatus || null,
-          providerMessageId: row.providerMessageId || row.providermessageid || null,
-          errorMessage: row.errorMessage || row.errormessage || null,
-        }));
-      } else if (table === 'meetingNoteHistory') {
-        data[table] = res.rows.map(row => ({
-          id: row.id,
-          meetingNoteId: row.meetingNoteId || row.meetingnoteid,
-          version: row.version !== undefined ? Number(row.version) : 1,
-          field: row.field,
-          oldValue: row.oldValue ?? row.oldvalue ?? null,
-          newValue: row.newValue ?? row.newvalue ?? null,
-          changedBy: row.changedBy || row.changedby || null,
-          changedAt: row.changedAt || row.changedat || null,
-        }));
-      } else {
-        data[table] = res.rows;
+  const data = {};
+  const tables = [
+    'departments',
+    'users',
+    'initiatives',
+    'changeRequests',
+    'tags',
+    'initiativeTags',
+    'statusHistory',
+    'milestoneHistory',
+    'comments',
+    'tasks',
+    'documents',
+    'notifications',
+    'accessRules',
+    'apiClients',
+    'dwsApplications',
+    'managementDashboard',
+    'meetingNotes',
+    'meetingNoteParticipants',
+    'meetingNoteActionItems',
+    'meetingNoteEmailLog',
+    'meetingNoteHistory',
+  ];
+  // Query all tables at once (each on its own pooled connection): against a remote DB
+  // the ~23 sequential round-trips were most of a cold read.
+  const [historyRes, itemsRes, ...tableResults] = await Promise.all(
+    ['changeHistory', 'changeHistoryItem', ...tables].map((t) => pool.query(`SELECT * FROM "${t}"`)),
+  );
+  for (const [index, table] of tables.entries()) {
+    const res = tableResults[index];
+    // Transform PostgreSQL column names to camelCase for users table
+    // Note: PostgreSQL preserves case for quoted identifiers, so "isAdmin" returns as isAdmin
+    if (table === 'users') {
+      data[table] = res.rows.map(row => ({
+        id: row.id,
+        name: row.name,
+        email: row.email,
+        role: row.role,
+        departmentId: row.departmentId || row.departmentid,
+        active: row.active,
+        passwordHash: row.passwordHash || row.passwordhash,
+        isAdmin: !!(row.isAdmin !== undefined ? row.isAdmin : row.isadmin), // Handle both cases
+        emailActivated: row.emailActivated !== undefined ? row.emailActivated : (row.emailactivated !== undefined ? row.emailactivated : false),
+        activationToken: row.activationToken || row.activationtoken || null,
+        activationTokenExpiry: row.activationTokenExpiry || row.activationtokenexpiry || null,
+        resetToken: row.resetToken || row.resettoken || null,
+        resetTokenExpiry: row.resetTokenExpiry || row.resettokenexpiry || null,
+        type: row.type || null,
+        teamMemberIds: row.teamMemberIds || row.teammemberids ? (row.teamMemberIds || row.teammemberids).split(',').filter(Boolean) : [],
+        createdAt: row.createdAt || row.createdat || null,
+        hubUserId: row.hubUserId || row.hubuserid || null,
+      }));
+    } else if (table === 'initiatives') {
+      // Transform initiatives and parse comma-separated arrays
+      data[table] = res.rows.map(row => ({
+        id: row.id,
+        type: row.type,
+        name: row.name,
+        ticket: row.ticket || null,
+        description: row.description || null,
+        businessImpact: row.businessImpact || row.businessimpact || null,
+        priority: row.priority || null,
+        businessOwnerId: row.businessOwnerId || row.businessownerid || null,
+        businessUserIds: row.businessUserIds || row.businessuserids ? (row.businessUserIds || row.businessuserids).split(',').filter(Boolean) : [],
+        departmentId: row.departmentId || row.departmentid || null,
+        itPicId: row.itPicId || row.itpicid || null, // Keep for backward compatibility
+        itPicIds: row.itPicIds || row.itpicids ? (row.itPicIds || row.itpicids).split(',').filter(Boolean) : (row.itPicId || row.itpicid ? [row.itPicId || row.itpicid] : []),
+        itPmId: row.itPmId || row.itpmid || null,
+        itManagerIds: row.itManagerIds || row.itmanagerids ? (row.itManagerIds || row.itmanagerids).split(',').filter(Boolean) : [],
+        systemImpactedIds: row.systemImpactedIds || row.systemimpactedids ? (row.systemImpactedIds || row.systemimpactedids).split(',').filter(Boolean) : [],
+        status: row.status || null,
+        milestone: row.milestone || null,
+        crMilestonePhase: row.crMilestonePhase || row.crmilestonephase || null,
+        startDate: row.startDate || row.startdate || null,
+        endDate: row.endDate || row.enddate || null,
+        planStartDate: row.planStartDate || row.planstartdate || null,
+        planEndDate: row.planEndDate || row.planenddate || null,
+        remark: row.remark || null,
+        documentationLink: row.documentationLink || row.documentationlink || null,
+        createdAt: row.createdAt || row.createdat || null,
+        updatedAt: row.updatedAt || row.updatedat || null
+      }));
+      // itPicId is the legacy single IT PIC. Edits only update the itPicIds list, so it
+      // could still name someone who is no longer IT PIC (e.g. a replaced "New Hire"),
+      // and every reader of itPicId (filters, dashboards, CR task assignee, the
+      // calendar) saw the wrong person. Keep it equal to a member of the list.
+      for (const i of data[table]) {
+        if (i.itPicIds.length && !i.itPicIds.includes(i.itPicId)) i.itPicId = i.itPicIds[0];
       }
-    }
-
-    const historyRes = await client.query('SELECT * FROM "changeHistory"');
-    const itemsRes = await client.query('SELECT * FROM "changeHistoryItem"');
-
-    // Normalize column names from Postgres (quoted camelCase columns are returned with exact case)
-    const itemsByChangeId = itemsRes.rows.reduce((acc, row) => {
-      const changeHistoryId = row.changeHistoryId || row.changehistoryid;
-      if (!changeHistoryId) return acc;
-      if (!acc[changeHistoryId]) acc[changeHistoryId] = [];
-      acc[changeHistoryId].push({
+    } else if (table === 'notifications') {
+      // Transform notifications
+      data[table] = res.rows.map(row => ({
+        id: row.id,
+        userId: row.userId || row.userid,
+        type: row.type,
+        title: row.title,
+        message: row.message,
+        initiativeId: row.initiativeId || row.initiativeid || null,
+        commentId: row.commentId || row.commentid || null,
+        read: row.read !== undefined ? !!row.read : false,
+        createdAt: row.createdAt || row.createdat
+      }));
+    } else if (table === 'accessRules') {
+      data[table] = res.rows;
+    } else if (table === 'apiClients') {
+      data[table] = res.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        clientId: row.clientId || row.clientid,
+        clientSecretHash: row.clientSecretHash || row.clientsecrethash,
+        scopes: row.scopes || null,
+        active: row.active !== undefined ? !!row.active : true,
+        createdAt: row.createdAt || row.createdat,
+      }));
+    } else if (table === 'dwsApplications') {
+      data[table] = res.rows.map((row) => ({
+        id: row.id,
+        systemName: row.systemName || row.systemname,
+        productionUrl: row.productionUrl || row.productionurl || null,
+        stagingUrl: row.stagingUrl || row.stagingurl || null,
+        githubUrl: row.githubUrl || row.githuburl || null,
+        deploymentSteps: row.deploymentSteps || row.deploymentsteps || null,
+        createdAt: row.createdAt || row.createdat,
+        updatedAt: row.updatedAt || row.updatedat,
+      }));
+    } else if (table === 'managementDashboard') {
+      data[table] = res.rows.map((row) => ({
+        id: row.id,
+        portfolioStatus: row.portfolioStatus || row.portfoliostatus || null,
+        highlights: row.highlights || null,
+        criticalAlerts: row.criticalAlerts || row.criticalalerts || null,
+        updatedBy: row.updatedBy || row.updatedby || null,
+        updatedAt: row.updatedAt || row.updatedat,
+      }));
+    } else if (table === 'meetingNotes') {
+      data[table] = res.rows.map(row => ({
+        id: row.id,
+        initiativeId: row.initiativeId || row.initiativeid,
+        title: row.title,
+        meetingType: row.meetingType || row.meetingtype,
+        meetingDate: row.meetingDate || row.meetingdate,
+        location: row.location || null,
+        meetingLink: row.meetingLink || row.meetinglink || null,
+        facilitatorId: row.facilitatorId || row.facilitatorid,
+        noteTakerId: row.noteTakerId || row.notetakerid,
+        agenda: row.agenda || null,
+        discussion: row.discussion || null,
+        decisions: row.decisions || null,
+        risks: row.risks || null,
+        nextMeetingAt: row.nextMeetingAt || row.nextmeetingat || null,
+        status: row.status,
+        version: row.version ? Number(row.version) : 1,
+        createdBy: row.createdBy || row.createdby,
+        createdAt: row.createdAt || row.createdat,
+        updatedAt: row.updatedAt || row.updatedat,
+        deletedAt: row.deletedAt || row.deletedat || null,
+      }));
+    } else if (table === 'meetingNoteParticipants') {
+      data[table] = res.rows.map(row => ({
+        id: row.id,
+        meetingNoteId: row.meetingNoteId || row.meetingnoteid,
+        userId: row.userId || row.userid || null,
+        email: row.email || null,
+        name: row.name || null,
+        role: row.role || null,
+      }));
+    } else if (table === 'meetingNoteActionItems') {
+      data[table] = res.rows.map(row => ({
+        id: row.id,
+        meetingNoteId: row.meetingNoteId || row.meetingnoteid,
+        description: row.description,
+        ownerId: row.ownerId || row.ownerid || null,
+        ownerName: row.ownerName || row.ownername || null,
+        dueDate: row.dueDate || row.duedate || null,
+        priority: row.priority || null,
+        status: row.status,
+        orderIndex: row.orderIndex !== undefined ? Number(row.orderIndex) : Number(row.orderindex || 0),
+      }));
+    } else if (table === 'meetingNoteEmailLog') {
+      data[table] = res.rows.map(row => ({
+        id: row.id,
+        meetingNoteId: row.meetingNoteId || row.meetingnoteid,
+        subject: row.subject,
+        toEmails: row.toEmails || row.toemails || null,
+        ccEmails: row.ccEmails || row.ccemails || null,
+        bodySnapshot: row.bodySnapshot || row.bodysnapshot || null,
+        sentBy: row.sentBy || row.sentby || null,
+        sentAt: row.sentAt || row.sentat || null,
+        deliveryStatus: row.deliveryStatus || row.deliverystatus || null,
+        providerMessageId: row.providerMessageId || row.providermessageid || null,
+        errorMessage: row.errorMessage || row.errormessage || null,
+      }));
+    } else if (table === 'meetingNoteHistory') {
+      data[table] = res.rows.map(row => ({
+        id: row.id,
+        meetingNoteId: row.meetingNoteId || row.meetingnoteid,
+        version: row.version !== undefined ? Number(row.version) : 1,
         field: row.field,
-        oldValue: row.oldValue ?? row.oldvalue,
-        newValue: row.newValue ?? row.newvalue,
-        changedAt: row.changedAt ?? row.changedat,
-      });
-      return acc;
-    }, {});
-
-    data.changeHistory = historyRes.rows
-      .map((h) => ({
-        id: h.id,
-        initiativeId: h.initiativeId ?? h.initiativeid,
-        timestamp: h.timestamp,
-        changedBy: h.changedBy ?? h.changedby,
-        changes: itemsByChangeId[h.id] || [],
-      }))
-      // Filter out entries without initiativeId to avoid breaking lookups
-      .filter((h) => !!h.initiativeId);
-
-    return data;
-  } finally {
-    client.release();
+        oldValue: row.oldValue ?? row.oldvalue ?? null,
+        newValue: row.newValue ?? row.newvalue ?? null,
+        changedBy: row.changedBy || row.changedby || null,
+        changedAt: row.changedAt || row.changedat || null,
+      }));
+    } else {
+      data[table] = res.rows;
+    }
   }
+
+  // Normalize column names from Postgres (quoted camelCase columns are returned with exact case)
+  const itemsByChangeId = itemsRes.rows.reduce((acc, row) => {
+    const changeHistoryId = row.changeHistoryId || row.changehistoryid;
+    if (!changeHistoryId) return acc;
+    if (!acc[changeHistoryId]) acc[changeHistoryId] = [];
+    acc[changeHistoryId].push({
+      field: row.field,
+      oldValue: row.oldValue ?? row.oldvalue,
+      newValue: row.newValue ?? row.newvalue,
+      changedAt: row.changedAt ?? row.changedat,
+    });
+    return acc;
+  }, {});
+
+  data.changeHistory = historyRes.rows
+    .map((h) => ({
+      id: h.id,
+      initiativeId: h.initiativeId ?? h.initiativeid,
+      timestamp: h.timestamp,
+      changedBy: h.changedBy ?? h.changedby,
+      changes: itemsByChangeId[h.id] || [],
+    }))
+    // Filter out entries without initiativeId to avoid breaking lookups
+    .filter((h) => !!h.initiativeId);
+
+  return data;
 }
 
-/** Serialize full-store writes to avoid concurrent DELETE+INSERT races (502 / duplicate key). */
+/** Serialize writes (one transaction at a time) to avoid races (502 / duplicate key). */
 let writeQueue = Promise.resolve();
 
 async function write(data) {
@@ -771,435 +804,254 @@ async function write(data) {
       // Drop the cache (don't seed it from `data`): the next read reloads exactly what
       // was persisted, including column coercions and dropped non-column fields.
       invalidateReadCache();
+      // ...and start that reload now, so the request that follows a save (the page the
+      // user lands on) doesn't wait for it. Later reads join this in-flight read.
+      loadShared().catch((e) => console.error('[STORE] Reload after write failed:', e.message));
     }
   });
   writeQueue = run.catch(() => {});
   return run;
 }
 
+// ---- Write -------------------------------------------------------------------
+// One spec per table: its key column, the columns write() owns, and how to turn
+// `data[source]` into one parameter array per row (same coercions as before).
+const arr = (v) => (Array.isArray(v) ? v.join(',') : (v || null));
+const TABLE_SPECS = [
+  { table: 'departments', cols: ['id', 'name'], row: (d) => [d.id, d.name] },
+  {
+    table: 'users',
+    cols: ['id', 'name', 'email', 'role', 'type', 'departmentId', 'active', 'passwordHash', 'isAdmin', 'emailActivated', 'activationToken', 'activationTokenExpiry', 'resetToken', 'resetTokenExpiry', 'teamMemberIds', 'hubUserId'],
+    row: (u) => [
+      u.id, u.name, u.email, u.role, u.type || null, u.departmentId, !!u.active, u.passwordHash || null, !!u.isAdmin,
+      u.emailActivated !== undefined ? !!u.emailActivated : false,
+      u.activationToken || null, u.activationTokenExpiry || null, u.resetToken || null, u.resetTokenExpiry || null,
+      arr(u.teamMemberIds),
+      u.hubUserId || null, // Downstream Hub user UUID (OIDC sub), set at SSO sign-in
+    ],
+  },
+  {
+    table: 'initiatives',
+    cols: ['id', 'type', 'name', 'ticket', 'description', 'businessImpact', 'priority', 'businessOwnerId', 'businessUserIds', 'departmentId', 'itPicId', 'itPicIds', 'itPmId', 'itManagerIds', 'systemImpactedIds', 'status', 'milestone', 'crMilestonePhase', 'startDate', 'endDate', 'planStartDate', 'planEndDate', 'remark', 'documentationLink', 'createdAt', 'updatedAt'],
+    row: (i) => [
+      i.id, i.type, i.name, i.ticket || null, i.description || null, i.businessImpact || null, i.priority || null,
+      i.businessOwnerId || null, arr(i.businessUserIds), i.departmentId || null,
+      i.itPicId || null, // legacy single IT PIC, kept for backward compatibility
+      arr(i.itPicIds), i.itPmId || null, arr(i.itManagerIds), arr(i.systemImpactedIds),
+      i.status || null, i.milestone || null, i.crMilestonePhase || null, i.startDate || null, i.endDate || null,
+      i.planStartDate || null, i.planEndDate || null, i.remark || null, i.documentationLink || null,
+      i.createdAt || null, i.updatedAt || null,
+    ],
+  },
+  {
+    table: 'changeRequests',
+    key: 'initiativeId',
+    cols: ['initiativeId', 'crSubmissionStart', 'crSubmissionEnd', 'developmentStart', 'developmentEnd', 'sitStart', 'sitEnd', 'uatStart', 'uatEnd', 'liveDate', 'crSection1Start', 'crSection1End', 'crSection2Start', 'crSection2End', 'crSection3Start', 'crSection3End', 'liveStart', 'liveEnd'],
+    row: (cr) => [cr.initiativeId, ...['crSubmissionStart', 'crSubmissionEnd', 'developmentStart', 'developmentEnd', 'sitStart', 'sitEnd', 'uatStart', 'uatEnd', 'liveDate', 'crSection1Start', 'crSection1End', 'crSection2Start', 'crSection2End', 'crSection3Start', 'crSection3End', 'liveStart', 'liveEnd'].map((k) => cr[k] || null)],
+  },
+  { table: 'tags', cols: ['id', 'name'], row: (t) => [t.id, t.name] },
+  { table: 'initiativeTags', cols: ['id', 'initiativeId', 'tagId'], row: (t) => [t.id, t.initiativeId, t.tagId] },
+  { table: 'statusHistory', cols: ['id', 'initiativeId', 'status', 'changedAt', 'changedBy'], row: (s) => [s.id, s.initiativeId, s.status, s.changedAt, s.changedBy || null] },
+  { table: 'milestoneHistory', cols: ['id', 'initiativeId', 'milestone', 'changedAt', 'changedBy'], row: (m) => [m.id, m.initiativeId, m.milestone, m.changedAt, m.changedBy || null] },
+  {
+    // Items live in "changeHistoryItem" (see CHANGE_ITEM_COLS); they are written with their parent.
+    table: 'changeHistory',
+    cols: ['id', 'initiativeId', 'timestamp', 'changedBy'],
+    skip: (ch) => !ch.initiativeId, // entries without an initiative would break lookups
+    row: (ch) => [ch.id, ch.initiativeId, ch.timestamp, ch.changedBy || null],
+    children: (ch) => (ch.changes || []).map((item) => [
+      item.id || `${ch.id}:${item.field}:${item.changedAt}`, ch.id, item.field, item.oldValue || null, item.newValue || null, item.changedAt,
+    ]),
+  },
+  { table: 'comments', cols: ['id', 'initiativeId', 'authorId', 'body', 'createdAt', 'updatedAt'], row: (c) => [c.id, c.initiativeId, c.authorId, c.body, c.createdAt, c.updatedAt || null] },
+  {
+    table: 'tasks',
+    cols: ['id', 'initiativeId', 'name', 'description', 'startDate', 'endDate', 'assigneeId', 'status', 'milestone', 'createdAt', 'updatedAt'],
+    row: (t) => [t.id, t.initiativeId, t.name, t.description || null, t.startDate || null, t.endDate || null, t.assigneeId || null, t.status || null, t.milestone || null, t.createdAt, t.updatedAt || null],
+  },
+  {
+    table: 'documents',
+    cols: ['id', 'initiativeId', 'fileName', 'filePath', 'sizeBytes', 'uploadedBy', 'uploadedAt'],
+    row: (d) => [d.id, d.initiativeId, d.fileName, d.filePath, d.sizeBytes, d.uploadedBy, d.uploadedAt],
+  },
+  {
+    table: 'notifications',
+    cols: ['id', 'userId', 'type', 'title', 'message', 'initiativeId', 'commentId', 'read', 'createdAt'],
+    row: (n) => [n.id, n.userId, n.type, n.title, n.message, n.initiativeId || null, n.commentId || null, !!n.read, n.createdAt],
+  },
+  {
+    table: 'apiClients',
+    cols: ['id', 'name', 'clientId', 'clientSecretHash', 'scopes', 'active', 'createdAt'],
+    row: (c) => [c.id, c.name, c.clientId, c.clientSecretHash, c.scopes || null, c.active !== undefined ? !!c.active : true, c.createdAt],
+  },
+  {
+    table: 'dwsApplications',
+    cols: ['id', 'systemName', 'productionUrl', 'stagingUrl', 'githubUrl', 'deploymentSteps', 'createdAt', 'updatedAt'],
+    row: (a) => [a.id, a.systemName, a.productionUrl || null, a.stagingUrl || null, a.githubUrl || null, a.deploymentSteps || null, a.createdAt, a.updatedAt],
+  },
+  {
+    table: 'accessRules',
+    cols: ['id', 'role', 'type', 'emailDomain', 'canViewProjectDashboard', 'canViewProjectList', 'canCreateProject', 'canEditAnyProject', 'restrictProjectVisibilityToOwnTeamOnly', 'restrictProjectEditToOwnTeamOnly', 'canViewCRDashboard', 'canViewCRList', 'canCreateCR', 'canEditCR', 'canViewMasterDwsApplication', 'canViewManagementDashboard'],
+    row: (r) => [
+      r.id, r.role || null, r.type || null, r.emailDomain || null,
+      ...['canViewProjectDashboard', 'canViewProjectList', 'canCreateProject', 'canEditAnyProject', 'restrictProjectVisibilityToOwnTeamOnly', 'restrictProjectEditToOwnTeamOnly', 'canViewCRDashboard', 'canViewCRList', 'canCreateCR', 'canEditCR', 'canViewMasterDwsApplication', 'canViewManagementDashboard'].map((k) => !!r[k]),
+    ],
+  },
+  {
+    table: 'managementDashboard',
+    cols: ['id', 'portfolioStatus', 'highlights', 'criticalAlerts', 'updatedBy', 'updatedAt'],
+    row: (d) => [d.id, d.portfolioStatus || null, d.highlights || null, d.criticalAlerts || null, d.updatedBy || null, d.updatedAt],
+  },
+  {
+    table: 'meetingNotes',
+    cols: ['id', 'initiativeId', 'title', 'meetingType', 'meetingDate', 'location', 'meetingLink', 'facilitatorId', 'noteTakerId', 'agenda', 'discussion', 'decisions', 'risks', 'nextMeetingAt', 'status', 'version', 'createdBy', 'createdAt', 'updatedAt', 'deletedAt'],
+    row: (n) => [
+      n.id, n.initiativeId, n.title, n.meetingType, n.meetingDate, n.location || null, n.meetingLink || null, n.facilitatorId, n.noteTakerId,
+      n.agenda || null, n.discussion || null, n.decisions || null, n.risks || null, n.nextMeetingAt || null, n.status || 'Draft', n.version || 1,
+      n.createdBy, n.createdAt, n.updatedAt || n.createdAt, n.deletedAt || null,
+    ],
+  },
+  {
+    table: 'meetingNoteParticipants',
+    cols: ['id', 'meetingNoteId', 'userId', 'email', 'name', 'role'],
+    row: (p) => [p.id, p.meetingNoteId, p.userId || null, p.email || null, p.name || null, p.role || 'Attendee'],
+  },
+  {
+    table: 'meetingNoteActionItems',
+    cols: ['id', 'meetingNoteId', 'description', 'ownerId', 'ownerName', 'dueDate', 'priority', 'status', 'orderIndex'],
+    row: (a) => [a.id, a.meetingNoteId, a.description, a.ownerId || null, a.ownerName || null, a.dueDate || null, a.priority || null, a.status || 'Not Started', a.orderIndex || 0],
+  },
+  {
+    table: 'meetingNoteEmailLog',
+    cols: ['id', 'meetingNoteId', 'subject', 'toEmails', 'ccEmails', 'bodySnapshot', 'sentBy', 'sentAt', 'deliveryStatus', 'providerMessageId', 'errorMessage'],
+    row: (l) => [l.id, l.meetingNoteId, l.subject, l.toEmails || '', l.ccEmails || null, l.bodySnapshot || '', l.sentBy, l.sentAt, l.deliveryStatus || 'Sent', l.providerMessageId || null, l.errorMessage || null],
+  },
+  {
+    table: 'meetingNoteHistory',
+    cols: ['id', 'meetingNoteId', 'version', 'field', 'oldValue', 'newValue', 'changedBy', 'changedAt'],
+    row: (h) => [h.id, h.meetingNoteId, h.version || 1, h.field, h.oldValue || null, h.newValue || null, h.changedBy || 'Unknown', h.changedAt],
+  },
+];
+const CHANGE_ITEM_COLS = ['id', 'changeHistoryId', 'field', 'oldValue', 'newValue', 'changedAt'];
+
+/**
+ * Rows of one table as Map(key -> { params, sig, children }). Duplicate keys keep the
+ * first row (the old writer did that for departments / accessRules and failed on the
+ * others); rows without a key are skipped.
+ */
+function tableRows(spec, list) {
+  const keyIdx = spec.cols.indexOf(spec.key || 'id');
+  const out = new Map();
+  for (const item of list || []) {
+    if (!item || (spec.skip && spec.skip(item))) continue;
+    const params = spec.row(item);
+    const key = params[keyIdx];
+    if (key === null || key === undefined || key === '' || out.has(key)) continue;
+    const children = spec.children ? spec.children(item) : null;
+    out.set(key, { params, children, sig: JSON.stringify(children ? [params, children] : params) });
+  }
+  return out;
+}
+
+const quote = (c) => `"${c}"`;
+const MAX_BIND_PARAMS = 30000; // Postgres allows 65535 bind parameters per statement
+
+/** Multi-row INSERT ... ON CONFLICT DO UPDATE, chunked under the bind-parameter limit. */
+async function upsertRows(client, table, cols, key, rows) {
+  if (!rows.length) return;
+  const perChunk = Math.max(1, Math.floor(MAX_BIND_PARAMS / cols.length));
+  const updates = cols.filter((c) => c !== key).map((c) => `${quote(c)} = EXCLUDED.${quote(c)}`).join(', ');
+  for (let start = 0; start < rows.length; start += perChunk) {
+    const chunk = rows.slice(start, start + perChunk);
+    const values = [];
+    const tuples = chunk.map((params, r) => {
+      values.push(...params);
+      return `(${params.map((_, c) => `$${r * cols.length + c + 1}`).join(',')})`;
+    });
+    await client.query(
+      `INSERT INTO ${quote(table)}(${cols.map(quote).join(', ')}) VALUES ${tuples.join(',')} ` +
+      `ON CONFLICT (${quote(key)}) DO ${updates ? `UPDATE SET ${updates}` : 'NOTHING'}`,
+      values,
+    );
+  }
+}
+
+async function deleteKeys(client, table, column, keys) {
+  if (keys.length) await client.query(`DELETE FROM ${quote(table)} WHERE ${quote(column)} = ANY($1)`, [keys]);
+}
+
+/** Dedupes child rows (changeHistoryItem) by id across all changed parents. */
+function uniqueChildRows(entries) {
+  const seen = new Set();
+  const rows = [];
+  for (const e of entries) {
+    for (const params of e.children || []) {
+      if (seen.has(params[0])) continue;
+      seen.add(params[0]);
+      rows.push(params);
+    }
+  }
+  return rows;
+}
+
+/**
+ * Writes `data` to the DB.
+ *
+ * When `data` came from read() we know the snapshot it was copied from, so we only
+ * write what the caller actually changed: tables it never touched are skipped
+ * entirely, and in touched tables only inserted / changed rows are upserted and
+ * removed rows deleted. (Rewriting all ~9k rows took seconds per save.) It also means
+ * two requests that read the same snapshot no longer undo each other's changes —
+ * each one only writes its own rows.
+ *
+ * Any other object falls back to replacing every table with its contents.
+ */
 async function writeImpl(data) {
   await initializeSchema();
+  const origin = cloneOrigin.get(data); // the shared snapshot `data` was copied from
+  const started = Date.now();
   const client = await pool.connect();
+  let written = 0;
   try {
     await client.query('BEGIN');
+    for (const spec of TABLE_SPECS) {
+      const key = spec.key || 'id';
+      if (origin && isUntouched(data, spec.table)) continue;
+      const next = tableRows(spec, data[spec.table]);
 
-    await client.query('DELETE FROM "departments"');
-    await client.query('DELETE FROM "users"');
-    await client.query('DELETE FROM "initiatives"');
-    await client.query('DELETE FROM "changeRequests"');
-    await client.query('DELETE FROM "tags"');
-    await client.query('DELETE FROM "initiativeTags"');
-    await client.query('DELETE FROM "statusHistory"');
-    await client.query('DELETE FROM "milestoneHistory"');
-    await client.query('DELETE FROM "changeHistoryItem"');
-    await client.query('DELETE FROM "changeHistory"');
-    await client.query('DELETE FROM "comments"');
-    await client.query('DELETE FROM "tasks"');
-    await client.query('DELETE FROM "documents"');
-    await client.query('DELETE FROM "notifications"');
-    await client.query('DELETE FROM "apiClients"');
-    await client.query('DELETE FROM "dwsApplications"');
-    await client.query('DELETE FROM "accessRules"');
-    await client.query('DELETE FROM "managementDashboard"');
-    await client.query('DELETE FROM "meetingNoteParticipants"');
-    await client.query('DELETE FROM "meetingNoteActionItems"');
-    await client.query('DELETE FROM "meetingNoteEmailLog"');
-    await client.query('DELETE FROM "meetingNoteHistory"');
-    await client.query('DELETE FROM "meetingNotes"');
-
-    const insertDept = 'INSERT INTO "departments"("id", "name") VALUES ($1, $2)';
-    const seenDeptIds = new Set();
-    for (const d of data.departments || []) {
-      if (!d?.id || seenDeptIds.has(d.id)) continue;
-      seenDeptIds.add(d.id);
-      await client.query(insertDept, [d.id, d.name]);
-    }
-
-    const insertUser =
-      'INSERT INTO "users"("id", "name", "email", "role", "type", "departmentId", "active", "passwordHash", "isAdmin", "emailActivated", "activationToken", "activationTokenExpiry", "resetToken", "resetTokenExpiry", "teamMemberIds", "hubUserId") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)';
-    for (const u of data.users || []) {
-      // Convert teamMemberIds array to comma-separated string
-      const teamMemberIds = Array.isArray(u.teamMemberIds) ? u.teamMemberIds.join(',') : (u.teamMemberIds || null);
-      await client.query(insertUser, [
-        u.id,
-        u.name,
-        u.email,
-        u.role,
-        u.type || null,
-        u.departmentId,
-        !!u.active,
-        u.passwordHash || null,
-        !!u.isAdmin,
-        u.emailActivated !== undefined ? !!u.emailActivated : false,
-        u.activationToken || null,
-        u.activationTokenExpiry || null,
-        u.resetToken || null,
-        u.resetTokenExpiry || null,
-        teamMemberIds,
-        u.hubUserId || null, // Downstream Hub user UUID (OIDC sub), set at SSO sign-in
-      ]);
-    }
-
-    const insertInit = `INSERT INTO "initiatives"(
-      "id", "type", "name", "ticket", "description", "businessImpact", "priority",
-      "businessOwnerId", "businessUserIds", "departmentId", "itPicId", "itPicIds", "itPmId", "itManagerIds",
-      "systemImpactedIds",
-      "status", "milestone", "crMilestonePhase", "startDate", "endDate", "planStartDate", "planEndDate", "remark", "documentationLink", "createdAt", "updatedAt"
-    ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,
-      $8,$9,$10,$11,$12,$13,$14,
-      $15,
-      $16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26
-    )`;
-    for (const i of data.initiatives || []) {
-      // Convert arrays to comma-separated strings for storage
-      const businessUserIds = Array.isArray(i.businessUserIds) ? i.businessUserIds.join(',') : (i.businessUserIds || null);
-      const itPicIds = Array.isArray(i.itPicIds) ? i.itPicIds.join(',') : (i.itPicIds || null);
-      const itManagerIds = Array.isArray(i.itManagerIds) ? i.itManagerIds.join(',') : (i.itManagerIds || null);
-      const systemImpactedIds = Array.isArray(i.systemImpactedIds) ? i.systemImpactedIds.join(',') : (i.systemImpactedIds || null);
-      
-      await client.query(insertInit, [
-        i.id,
-        i.type,
-        i.name,
-        i.ticket || null,
-        i.description || null,
-        i.businessImpact || null,
-        i.priority || null,
-        i.businessOwnerId || null,
-        businessUserIds,
-        i.departmentId || null,
-        i.itPicId || null, // Keep for backward compatibility
-        itPicIds,
-        i.itPmId || null,
-        itManagerIds,
-        systemImpactedIds,
-        i.status || null,
-        i.milestone || null,
-        i.crMilestonePhase || null,
-        i.startDate || null,
-        i.endDate || null,
-        i.planStartDate || null,
-        i.planEndDate || null,
-        i.remark || null,
-        i.documentationLink || null,
-        i.createdAt || null,
-        i.updatedAt || null,
-      ]);
-    }
-
-    const insertCR = `INSERT INTO "changeRequests"(
-      "initiativeId", "crSubmissionStart", "crSubmissionEnd", "developmentStart",
-      "developmentEnd", "sitStart", "sitEnd", "uatStart", "uatEnd", "liveDate",
-      "crSection1Start", "crSection1End", "crSection2Start", "crSection2End",
-      "crSection3Start", "crSection3End", "liveStart", "liveEnd"
-    ) VALUES (
-      $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,
-      $11,$12,$13,$14,$15,$16,$17,$18
-    )`;
-    for (const cr of data.changeRequests || []) {
-      await client.query(insertCR, [
-        cr.initiativeId,
-        cr.crSubmissionStart || null,
-        cr.crSubmissionEnd || null,
-        cr.developmentStart || null,
-        cr.developmentEnd || null,
-        cr.sitStart || null,
-        cr.sitEnd || null,
-        cr.uatStart || null,
-        cr.uatEnd || null,
-        cr.liveDate || null,
-        cr.crSection1Start || null,
-        cr.crSection1End || null,
-        cr.crSection2Start || null,
-        cr.crSection2End || null,
-        cr.crSection3Start || null,
-        cr.crSection3End || null,
-        cr.liveStart || null,
-        cr.liveEnd || null,
-      ]);
-    }
-
-    const insertTag = 'INSERT INTO "tags"("id", "name") VALUES ($1, $2)';
-    for (const t of data.tags || []) {
-      await client.query(insertTag, [t.id, t.name]);
-    }
-
-    const insertInitTag =
-      'INSERT INTO "initiativeTags"("id", "initiativeId", "tagId") VALUES ($1,$2,$3)';
-    for (const it of data.initiativeTags || []) {
-      await client.query(insertInitTag, [it.id, it.initiativeId, it.tagId]);
-    }
-
-    const insertStatus =
-      'INSERT INTO "statusHistory"("id", "initiativeId", "status", "changedAt", "changedBy") VALUES ($1,$2,$3,$4,$5)';
-    for (const s of data.statusHistory || []) {
-      await client.query(insertStatus, [
-        s.id,
-        s.initiativeId,
-        s.status,
-        s.changedAt,
-        s.changedBy || null,
-      ]);
-    }
-
-    const insertMilestone =
-      'INSERT INTO "milestoneHistory"("id", "initiativeId", "milestone", "changedAt", "changedBy") VALUES ($1,$2,$3,$4,$5)';
-    for (const m of data.milestoneHistory || []) {
-      await client.query(insertMilestone, [
-        m.id,
-        m.initiativeId,
-        m.milestone,
-        m.changedAt,
-        m.changedBy || null,
-      ]);
-    }
-
-    const insertChangeHistory =
-      'INSERT INTO "changeHistory"("id", "initiativeId", "timestamp", "changedBy") VALUES ($1,$2,$3,$4)';
-    const insertChangeItem =
-      'INSERT INTO "changeHistoryItem"("id", "changeHistoryId", "field", "oldValue", "newValue", "changedAt") VALUES ($1,$2,$3,$4,$5,$6)';
-    for (const ch of data.changeHistory || []) {
-      // Skip entries with null or missing initiativeId
-      if (!ch.id || !ch.initiativeId) {
+      if (!origin) {
+        // Full replace.
+        if (spec.children) await client.query('DELETE FROM "changeHistoryItem"');
+        await client.query(`DELETE FROM ${quote(spec.table)}`);
+        const entries = [...next.values()];
+        await upsertRows(client, spec.table, spec.cols, key, entries.map((e) => e.params));
+        if (spec.children) await upsertRows(client, 'changeHistoryItem', CHANGE_ITEM_COLS, 'id', uniqueChildRows(entries));
+        written += entries.length;
         continue;
       }
-      await client.query(insertChangeHistory, [
-        ch.id,
-        ch.initiativeId,
-        ch.timestamp,
-        ch.changedBy || null,
-      ]);
-      for (const item of ch.changes || []) {
-        const itemId = item.id || `${ch.id}:${item.field}:${item.changedAt}`;
-        await client.query(insertChangeItem, [
-          itemId,
-          ch.id,
-          item.field,
-          item.oldValue || null,
-          item.newValue || null,
-          item.changedAt,
-        ]);
+
+      const prev = originRows(origin, spec);
+      const changed = [];
+      for (const [k, e] of next) {
+        const before = prev.get(k);
+        if (!before || before.sig !== e.sig) changed.push(e);
       }
-    }
+      const removed = [];
+      for (const k of prev.keys()) if (!next.has(k)) removed.push(k);
+      if (!changed.length && !removed.length) continue;
 
-    const insertComment = 'INSERT INTO "comments"("id", "initiativeId", "authorId", "body", "createdAt", "updatedAt") VALUES ($1,$2,$3,$4,$5,$6)';
-    for (const c of data.comments || []) {
-      await client.query(insertComment, [
-        c.id,
-        c.initiativeId,
-        c.authorId,
-        c.body,
-        c.createdAt,
-        c.updatedAt || null,
-      ]);
+      if (spec.children) {
+        // Replace the items of every changed / removed parent (item ids are derived, so
+        // match them by parent instead of by id).
+        await deleteKeys(client, 'changeHistoryItem', 'changeHistoryId', [...removed, ...changed.map((e) => e.params[0])]);
+      }
+      await deleteKeys(client, spec.table, key, removed);
+      await upsertRows(client, spec.table, spec.cols, key, changed.map((e) => e.params));
+      if (spec.children) await upsertRows(client, 'changeHistoryItem', CHANGE_ITEM_COLS, 'id', uniqueChildRows(changed));
+      written += changed.length + removed.length;
     }
-
-    const insertTask = 'INSERT INTO "tasks"("id", "initiativeId", "name", "description", "startDate", "endDate", "assigneeId", "status", "milestone", "createdAt", "updatedAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)';
-    for (const t of data.tasks || []) {
-      await client.query(insertTask, [
-        t.id,
-        t.initiativeId,
-        t.name,
-        t.description || null,
-        t.startDate || null,
-        t.endDate || null,
-        t.assigneeId || null,
-        t.status || null,
-        t.milestone || null,
-        t.createdAt,
-        t.updatedAt || null,
-      ]);
-    }
-
-    const insertDocument = 'INSERT INTO "documents"("id", "initiativeId", "fileName", "filePath", "sizeBytes", "uploadedBy", "uploadedAt") VALUES ($1,$2,$3,$4,$5,$6,$7)';
-    for (const d of data.documents || []) {
-      await client.query(insertDocument, [
-        d.id,
-        d.initiativeId,
-        d.fileName,
-        d.filePath,
-        d.sizeBytes,
-        d.uploadedBy,
-        d.uploadedAt,
-      ]);
-    }
-
-    const insertNotification =
-      'INSERT INTO "notifications"("id", "userId", "type", "title", "message", "initiativeId", "commentId", "read", "createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)';
-    for (const n of data.notifications || []) {
-      await client.query(insertNotification, [
-        n.id,
-        n.userId,
-        n.type,
-        n.title,
-        n.message,
-        n.initiativeId || null,
-        n.commentId || null,
-        !!n.read,
-        n.createdAt,
-      ]);
-    }
-
-    const insertApiClient =
-      'INSERT INTO "apiClients"("id","name","clientId","clientSecretHash","scopes","active","createdAt") VALUES ($1,$2,$3,$4,$5,$6,$7)';
-    for (const c of data.apiClients || []) {
-      await client.query(insertApiClient, [
-        c.id,
-        c.name,
-        c.clientId,
-        c.clientSecretHash,
-        c.scopes || null,
-        c.active !== undefined ? !!c.active : true,
-        c.createdAt,
-      ]);
-    }
-
-    const insertDwsApp =
-      'INSERT INTO "dwsApplications"("id","systemName","productionUrl","stagingUrl","githubUrl","deploymentSteps","createdAt","updatedAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8)';
-    for (const a of data.dwsApplications || []) {
-      await client.query(insertDwsApp, [
-        a.id,
-        a.systemName,
-        a.productionUrl || null,
-        a.stagingUrl || null,
-        a.githubUrl || null,
-        a.deploymentSteps || null,
-        a.createdAt,
-        a.updatedAt,
-      ]);
-    }
-
-    const insertAccessRule =
-      'INSERT INTO "accessRules"("id","role","type","emailDomain","canViewProjectDashboard","canViewProjectList","canCreateProject","canEditAnyProject","restrictProjectVisibilityToOwnTeamOnly","restrictProjectEditToOwnTeamOnly","canViewCRDashboard","canViewCRList","canCreateCR","canEditCR","canViewMasterDwsApplication","canViewManagementDashboard") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)';
-    const seenRuleIds = new Set();
-    for (const r of data.accessRules || []) {
-      if (!r?.id || seenRuleIds.has(r.id)) continue;
-      seenRuleIds.add(r.id);
-      await client.query(insertAccessRule, [
-        r.id,
-        r.role || null,
-        r.type || null,
-        r.emailDomain || null,
-        !!r.canViewProjectDashboard,
-        !!r.canViewProjectList,
-        !!r.canCreateProject,
-        !!r.canEditAnyProject,
-        !!r.restrictProjectVisibilityToOwnTeamOnly,
-        !!r.restrictProjectEditToOwnTeamOnly,
-        !!r.canViewCRDashboard,
-        !!r.canViewCRList,
-        !!r.canCreateCR,
-        !!r.canEditCR,
-        !!r.canViewMasterDwsApplication,
-        !!r.canViewManagementDashboard,
-      ]);
-    }
-
-    const insertMgmtDashboard =
-      'INSERT INTO "managementDashboard"("id","portfolioStatus","highlights","criticalAlerts","updatedBy","updatedAt") VALUES ($1,$2,$3,$4,$5,$6)';
-    for (const d of data.managementDashboard || []) {
-      await client.query(insertMgmtDashboard, [
-        d.id,
-        d.portfolioStatus || null,
-        d.highlights || null,
-        d.criticalAlerts || null,
-        d.updatedBy || null,
-        d.updatedAt,
-      ]);
-    }
-
-    const insertMeetingNote =
-      'INSERT INTO "meetingNotes"("id", "initiativeId", "title", "meetingType", "meetingDate", "location", "meetingLink", "facilitatorId", "noteTakerId", "agenda", "discussion", "decisions", "risks", "nextMeetingAt", "status", "version", "createdBy", "createdAt", "updatedAt", "deletedAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)';
-    for (const note of data.meetingNotes || []) {
-      await client.query(insertMeetingNote, [
-        note.id,
-        note.initiativeId,
-        note.title,
-        note.meetingType,
-        note.meetingDate,
-        note.location || null,
-        note.meetingLink || null,
-        note.facilitatorId,
-        note.noteTakerId,
-        note.agenda || null,
-        note.discussion || null,
-        note.decisions || null,
-        note.risks || null,
-        note.nextMeetingAt || null,
-        note.status || 'Draft',
-        note.version || 1,
-        note.createdBy,
-        note.createdAt,
-        note.updatedAt || note.createdAt,
-        note.deletedAt || null,
-      ]);
-    }
-
-    const insertMeetingParticipant =
-      'INSERT INTO "meetingNoteParticipants"("id", "meetingNoteId", "userId", "email", "name", "role") VALUES ($1,$2,$3,$4,$5,$6)';
-    for (const participant of data.meetingNoteParticipants || []) {
-      await client.query(insertMeetingParticipant, [
-        participant.id,
-        participant.meetingNoteId,
-        participant.userId || null,
-        participant.email || null,
-        participant.name || null,
-        participant.role || 'Attendee',
-      ]);
-    }
-
-    const insertMeetingActionItem =
-      'INSERT INTO "meetingNoteActionItems"("id", "meetingNoteId", "description", "ownerId", "ownerName", "dueDate", "priority", "status", "orderIndex") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)';
-    for (const item of data.meetingNoteActionItems || []) {
-      await client.query(insertMeetingActionItem, [
-        item.id,
-        item.meetingNoteId,
-        item.description,
-        item.ownerId || null,
-        item.ownerName || null,
-        item.dueDate || null,
-        item.priority || null,
-        item.status || 'Not Started',
-        item.orderIndex || 0,
-      ]);
-    }
-
-    const insertMeetingEmailLog =
-      'INSERT INTO "meetingNoteEmailLog"("id", "meetingNoteId", "subject", "toEmails", "ccEmails", "bodySnapshot", "sentBy", "sentAt", "deliveryStatus", "providerMessageId", "errorMessage") VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)';
-    for (const log of data.meetingNoteEmailLog || []) {
-      await client.query(insertMeetingEmailLog, [
-        log.id,
-        log.meetingNoteId,
-        log.subject,
-        log.toEmails || '',
-        log.ccEmails || null,
-        log.bodySnapshot || '',
-        log.sentBy,
-        log.sentAt,
-        log.deliveryStatus || 'Sent',
-        log.providerMessageId || null,
-        log.errorMessage || null,
-      ]);
-    }
-
-    const insertMeetingHistory =
-      'INSERT INTO "meetingNoteHistory"("id", "meetingNoteId", "version", "field", "oldValue", "newValue", "changedBy", "changedAt") VALUES ($1,$2,$3,$4,$5,$6,$7,$8)';
-    for (const history of data.meetingNoteHistory || []) {
-      await client.query(insertMeetingHistory, [
-        history.id,
-        history.meetingNoteId,
-        history.version || 1,
-        history.field,
-        history.oldValue || null,
-        history.newValue || null,
-        history.changedBy || 'Unknown',
-        history.changedAt,
-      ]);
-    }
-
     await client.query('COMMIT');
-    console.log(`[STORE] Write completed successfully - Users: ${(data.users || []).length}, Initiatives: ${(data.initiatives || []).length}`);
+    console.log(`[STORE] Write completed (${origin ? 'changes only' : 'full'}) - ${written} rows in ${Date.now() - started}ms`);
   } catch (e) {
     console.error(`[STORE] Write error:`, e.message);
     console.error(`[STORE] Error stack:`, e.stack);
@@ -1208,6 +1060,15 @@ async function writeImpl(data) {
   } finally {
     client.release();
   }
+}
+
+/** Row maps of a shared snapshot, computed once per snapshot and table. */
+const originRowCache = new WeakMap(); // snapshot -> Map(table -> rows)
+function originRows(origin, spec) {
+  let perTable = originRowCache.get(origin);
+  if (!perTable) originRowCache.set(origin, (perTable = new Map()));
+  if (!perTable.has(spec.table)) perTable.set(spec.table, tableRows(spec, origin[spec.table]));
+  return perTable.get(spec.table);
 }
 
 export default { read, readShared, write, invalidateReadCache, pool, databaseUrl };
