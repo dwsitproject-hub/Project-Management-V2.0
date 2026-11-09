@@ -13,6 +13,24 @@ const app = document.getElementById('app');
 const PM_EMBED = window.parent !== window && new URLSearchParams(location.search).has('embed');
 if (PM_EMBED) document.documentElement.classList.add('pm-embed');
 
+// DWS Hub sign-in lands on #sso?token=<new app token>. Adopt that token NOW, before any
+// start-up code runs: if an older token is still stored (e.g. yesterday's, expired), the
+// router and the boot code would first check THAT one, get a 401, clear the session and
+// send the user to the login page — wiping the new token before #sso was even handled.
+// renderSso() still does the rest (cleans the URL, goes to the landing page).
+(() => {
+  const h = location.hash || '';
+  if (!/^#sso\?/.test(h)) return;
+  const params = new URLSearchParams(h.slice(h.indexOf('?') + 1));
+  const token = params.get('token');
+  try {
+    if (token) localStorage.setItem('pm_token', token);
+    // A failed Hub sign-in: drop the old token too, so the error is shown instead of
+    // the same 401 bounce to the login page.
+    else if (params.get('error')) localStorage.removeItem('pm_token');
+  } catch (_) { /* storage unavailable — renderSso() reports the failure */ }
+})();
+
 console.log('=== Frontend main.js loaded ===');
 console.log('App element:', app);
 console.log('Current hash:', location.hash);
