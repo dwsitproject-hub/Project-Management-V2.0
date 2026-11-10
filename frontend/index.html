@@ -6,8 +6,8 @@
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
     <meta http-equiv="Pragma" content="no-cache" />
     <meta http-equiv="Expires" content="0" />
-    <title>Project & CR Management v2.0</title>
-    
+    <title>PM Tools · Project & CR Management</title>
+
     <!-- Favicon -->
     <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png?v=20260112" />
     <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16x16.png?v=20260112" />
@@ -16,59 +16,127 @@
     <link rel="icon" type="image/png" sizes="512x512" href="/android-chrome-512x512.png?v=20260112" />
     <link rel="manifest" href="/site.webmanifest?v=20260112" />
     <link rel="shortcut icon" href="/favicon.ico?v=20260112" />
-    
-    <link rel="stylesheet" href="/styles.css?v=20261102000600" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@500&display=swap" />
+    <link rel="stylesheet" href="/styles.css?v=20261110090000" />
+    <link rel="stylesheet" href="/theme.css?v=20261110090000" />
   </head>
-  <body>
-    <header>
-      <div class="header-content">
-        <h1>Project & Change Request Management</h1>
-        <img src="/docs/KPN Corp .png" alt="KPN Corp" class="company-logo" onerror="this.style.display='none'">
+  <body class="signed-out">
+    <a class="skip-link" href="#app">Skip to content</a>
+    <div class="app-shell">
+      <aside class="sidebar" id="sidebar" aria-label="Main navigation">
+        <a class="sidebar-brand" href="#user-dashboard">
+          <span class="sidebar-logo" aria-hidden="true">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19V5l7 7 7-7v14"/></svg>
+          </span>
+          <span class="sidebar-brand-text">
+            <span class="sidebar-brand-name">PM Tools</span>
+            <span class="sidebar-brand-sub">Project &amp; CR Management</span>
+          </span>
+        </a>
+
+        <nav class="sidebar-nav">
+          <div class="nav-group" data-group="Workspace">
+            <span class="nav-group-label">Workspace</span>
+            <a href="#user-dashboard" id="nav-user-dashboard" class="protected-link hidden" data-title="Home">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg><span>Home</span>
+            </a>
+            <a href="#list" id="nav-list" class="protected-link hidden" data-title="Projects">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v10"/></svg><span>Projects</span>
+            </a>
+            <a href="#crlist" id="nav-crlist" class="protected-link hidden" data-title="Change Requests">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M9 14h6M12 11v6"/></svg><span>Change Requests</span>
+            </a>
+          </div>
+          <div class="nav-group" data-group="Insights">
+            <span class="nav-group-label">Insights</span>
+            <a href="#dashboard" id="nav-dashboard" class="protected-link hidden" data-title="Project Dashboard">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 20V11M11 20V5M17 20v-6M3 20h18"/></svg><span>Project Dashboard</span>
+            </a>
+            <a href="#crdashboard" id="nav-crdashboard" class="protected-link hidden" data-title="CR Dashboard">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg><span>CR Dashboard</span>
+            </a>
+            <a href="#management-dashboard" id="nav-management-dashboard" class="admin-link hidden" data-title="Management Dashboard">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m15.5 8.5-2 5-5 2 2-5z"/></svg><span>Management</span>
+            </a>
+          </div>
+          <div class="nav-group" data-group="Admin">
+            <span class="nav-group-label">Admin</span>
+            <a href="#admin-users" id="nav-admin-users" class="admin-link hidden" data-title="Users">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M16 4.5a4 4 0 0 1 0 7M22 21a7 7 0 0 0-4-6.3"/></svg><span>Users</span>
+            </a>
+            <a href="#admin-roles" id="nav-admin-roles" class="admin-link hidden" data-title="Access Roles">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/><path d="m9 12 2 2 4-4"/></svg><span>Access Roles</span>
+            </a>
+            <a href="#master-departments" id="nav-master-departments" class="admin-link hidden" data-title="Departments">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="1.5"/><path d="M9 7h1M14 7h1M9 11h1M14 11h1M9 15h1M14 15h1M10 21v-3h4v3"/></svg><span>Departments</span>
+            </a>
+            <a href="#master-dws" id="nav-master-dws" class="admin-link hidden" data-title="DWS Applications">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg><span>DWS Applications</span>
+            </a>
+          </div>
+        </nav>
+
+        <div class="sidebar-footer">
+          <a href="#profile" class="sidebar-user" id="sidebar-user">
+            <span class="avatar" id="sidebar-user-initials" aria-hidden="true"></span>
+            <span class="sidebar-user-text">
+              <span class="sidebar-user-name" id="sidebar-user-name"></span>
+              <span class="sidebar-user-role" id="sidebar-user-role"></span>
+            </span>
+          </a>
+        </div>
+      </aside>
+      <div class="sidebar-scrim" id="sidebar-scrim" hidden></div>
+
+      <div class="app-main">
+        <header class="topbar">
+          <button type="button" class="icon-btn topbar-menu" id="sidebar-toggle" aria-label="Open menu" aria-controls="sidebar" aria-expanded="false">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>
+          </button>
+          <div class="topbar-title">
+            <span class="topbar-crumb" id="topbar-crumb"></span>
+            <svg class="topbar-sep" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+            <span class="topbar-page" id="topbar-page"></span>
+          </div>
+          <div class="topbar-actions">
+            <div id="nav-notifications" class="notifications-menu hidden">
+              <button id="notifications-btn" class="icon-btn notifications-btn" type="button" aria-label="Notifications">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></svg>
+                <span id="notifications-badge" class="notifications-badge hidden">0</span>
+              </button>
+              <div id="notifications-dropdown" class="notifications-dropdown hidden">
+                <div class="notifications-header">
+                  <h3>Notifications</h3>
+                  <button id="mark-all-read-btn" class="mark-all-read-btn" type="button">Mark all as read</button>
+                </div>
+                <div id="notifications-list" class="notifications-list">
+                  <p class="muted notifications-empty">Loading notifications…</p>
+                </div>
+              </div>
+            </div>
+            <div id="nav-profile-menu" class="profile-menu hidden">
+              <button id="profile-menu-btn" class="profile-menu-btn" type="button" aria-haspopup="menu">
+                <span class="avatar avatar-sm" id="profile-menu-initials" aria-hidden="true"></span>
+                <span id="profile-menu-name"></span>
+                <svg class="chev" viewBox="0 0 24 24" aria-hidden="true"><path d="m6 9 6 6 6-6"/></svg>
+              </button>
+              <div id="profile-dropdown" class="profile-dropdown hidden" role="menu">
+                <a href="#profile" role="menuitem">My profile</a>
+                <a href="#" class="hub-bug-report hidden" role="menuitem" onclick="openHubBugReport(); return false;">Report a bug</a>
+                <a href="#" role="menuitem" class="danger" onclick="logout(); return false;">Sign out</a>
+              </div>
+            </div>
+            <a href="#auth" id="nav-auth" class="auth-link">Sign in</a>
+          </div>
+        </header>
+        <div id="toast-root" class="toast-root" aria-live="polite" aria-relevant="additions"></div>
+        <main id="app" tabindex="-1"></main>
       </div>
-      <nav>
-        <div class="nav-left">
-          <a href="#user-dashboard" id="nav-user-dashboard" class="protected-link hidden">🏠 Dashboard</a>
-          <a href="#list" id="nav-list" class="protected-link hidden">📋 Project List</a>
-          <a href="#crlist" id="nav-crlist" class="protected-link hidden">📝 CR List</a>
-          <a href="#dashboard" id="nav-dashboard" class="protected-link hidden">📊 Project Dashboard</a>
-          <a href="#crdashboard" id="nav-crdashboard" class="protected-link hidden">📈 CR Dashboard</a>
-          <a href="#admin-users" id="nav-admin-users" class="admin-link hidden">👥 Users</a>
-          <a href="#admin-roles" id="nav-admin-roles" class="admin-link hidden">🔐 Roles</a>
-          <a href="#master-dws" id="nav-master-dws" class="admin-link hidden">🗂️ Master DWS Application</a>
-          <a href="#master-departments" id="nav-master-departments" class="admin-link hidden">🏢 Department Master</a>
-          <a href="#management-dashboard" id="nav-management-dashboard" class="admin-link hidden">🧭 Management Dashboard</a>
-        </div>
-        <div class="nav-right">
-          <div id="nav-notifications" class="notifications-menu hidden">
-            <button id="notifications-btn" class="notifications-btn" title="Notifications">
-              🔔
-              <span id="notifications-badge" class="notifications-badge hidden">0</span>
-            </button>
-            <div id="notifications-dropdown" class="notifications-dropdown hidden">
-              <div class="notifications-header">
-                <h3>Notifications</h3>
-                <button id="mark-all-read-btn" class="mark-all-read-btn">Mark all as read</button>
-              </div>
-              <div id="notifications-list" class="notifications-list">
-                <p class="muted" style="text-align: center; padding: 20px;">Loading notifications...</p>
-              </div>
-            </div>
-          </div>
-          <div id="nav-profile-menu" class="profile-menu hidden">
-            <button id="profile-menu-btn" class="profile-menu-btn">👤 <span id="profile-menu-name"></span> ▼</button>
-            <div id="profile-dropdown" class="profile-dropdown hidden">
-              <a href="#profile">📝 My Profile</a>
-              <a href="#" class="hub-bug-report hidden" onclick="openHubBugReport(); return false;">🐞 Report a bug</a>
-              <a href="#" onclick="logout(); return false;">🚪 Logout</a>
-            </div>
-          </div>
-          <a href="#auth" id="nav-auth" class="auth-link">🔐 Login</a>
-        </div>
-      </nav>
-    </header>
-    <div id="toast-root" class="toast-root" aria-live="polite" aria-relevant="additions"></div>
-    <main id="app"></main>
+    </div>
     <script src="https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js"></script>
-    <script src="/main.js?v=20261109000500" type="module"></script>
+    <script src="/main.js?v=20261110090000" type="module"></script>
   </body>
 </html>

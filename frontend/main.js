@@ -151,11 +151,143 @@ const calculateWorkingDays = (startDate, endDate) => {
   return workingDays;
 };
 
+// Pages that have no sidebar link of their own still get a title in the top bar.
+const TOPBAR_TITLES = {
+  new: ['Workspace', 'New initiative'],
+  profile: ['Account', 'My profile'],
+  auth: ['', ''],
+};
+
 function setActive(hash) {
-  document.querySelectorAll('nav a').forEach(a => a.classList.remove('active'));
+  document.querySelectorAll('.sidebar-nav a').forEach(a => {
+    a.classList.remove('active');
+    a.removeAttribute('aria-current');
+  });
   const id = hash.replace('#','').split('/')[0] || 'list';
   const el = document.getElementById('nav-' + id);
-  if (el) el.classList.add('active');
+  let crumb = '';
+  let page = '';
+  if (el) {
+    el.classList.add('active');
+    el.setAttribute('aria-current', 'page');
+    crumb = el.closest('.nav-group')?.dataset.group || '';
+    page = el.dataset.title || el.textContent.trim();
+  } else if (TOPBAR_TITLES[id]) {
+    [crumb, page] = TOPBAR_TITLES[id];
+  }
+  const crumbEl = document.getElementById('topbar-crumb');
+  const pageEl = document.getElementById('topbar-page');
+  if (crumbEl) crumbEl.textContent = crumb;
+  if (pageEl) pageEl.textContent = page;
+  document.querySelector('.topbar-title')?.classList.toggle('no-crumb', !crumb);
+  document.body.classList.toggle('auth-screen', id === 'auth');
+  setSidebarOpen(false);
+}
+
+function setSidebarOpen(open) {
+  document.body.classList.toggle('nav-open', open);
+  const scrim = document.getElementById('sidebar-scrim');
+  if (scrim) scrim.hidden = !open;
+  document.getElementById('sidebar-toggle')?.setAttribute('aria-expanded', String(open));
+}
+
+function pageHeader(title, sub = '', actions = '') {
+  return `
+    <div class="page-header">
+      <div class="page-header-text">
+        <h1>${escapeHtml(title)}</h1>
+        ${sub ? `<p>${sub}</p>` : ''}
+      </div>
+      ${actions ? `<div class="page-actions">${actions}</div>` : ''}
+    </div>`;
+}
+
+// Dashboards: a sticky row of section buttons + one-card distribution switch.
+function mountDashboardNav(defs) {
+  const found = [];
+  const heads = [...app.querySelectorAll('h3')];
+  defs.forEach(([label, re, id]) => {
+    const h = heads.find((x) => re.test(x.textContent.trim()));
+    const card = h && (h.closest('.dist-switch') || h.closest('.card'));
+    if (card && !found.some((f) => f.card === card)) {
+      card.id = card.id || id;
+      card.classList.add('dash-section');
+      found.push({ label, card });
+    }
+  });
+  if (found.length < 2) return;
+  const nav = document.createElement('nav');
+  nav.className = 'dash-nav';
+  nav.setAttribute('aria-label', 'Dashboard sections');
+  nav.innerHTML = found.map((f, i) => `<button type="button" data-jump="${f.card.id}" class="${i === 0 ? 'active' : ''}">${f.label}</button>`).join('');
+  const headerEl = app.querySelector('.page-header');
+  headerEl ? headerEl.insertAdjacentElement('afterend', nav) : app.prepend(nav);
+  nav.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-jump]');
+    if (!b) return;
+    document.getElementById(b.dataset.jump)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
+  if ('IntersectionObserver' in window) {
+    const io = new IntersectionObserver((entries) => {
+      entries.forEach((en) => {
+        if (!en.isIntersecting) return;
+        nav.querySelectorAll('button').forEach((b) => b.classList.toggle('active', b.dataset.jump === en.target.id));
+      });
+    }, { rootMargin: '-140px 0px -60% 0px' });
+    found.forEach((f) => io.observe(f.card));
+  }
+}
+
+function distributionSwitchHtml(charts) {
+  return `
+    <section class="card dist-switch" data-active="0">
+      <div class="dist-head">
+        <h3>Distribution</h3>
+        <div class="tabs" role="tablist" aria-label="Group by">
+          ${['Status', 'Priority', 'Milestone'].map((l, i) => `<button type="button" class="tab ${i === 0 ? 'active' : ''}" role="tab" aria-selected="${i === 0}" data-dist="${i}">${l}</button>`).join('')}
+        </div>
+      </div>
+      <div class="dist-body">${charts.join('')}</div>
+    </section>`;
+}
+
+document.addEventListener('click', (e) => {
+  const b = e.target.closest('[data-dist]');
+  if (!b) return;
+  const box = b.closest('.dist-switch');
+  if (!box) return;
+  box.dataset.active = b.dataset.dist;
+  box.querySelectorAll('[data-dist]').forEach((x) => {
+    const on = x === b;
+    x.classList.toggle('active', on);
+    x.setAttribute('aria-selected', String(on));
+  });
+});
+
+const PROJECT_DASH_SECTIONS = [
+  ['Summary', /^Project Summary$/, 'sec-summary'],
+  ['Distribution', /^Distribution$/, 'sec-distribution'],
+  ['Aging', /^Project Aging/, 'sec-aging'],
+  ['Go-live rate', /^Go Live Rate/, 'sec-golive'],
+  ['Burndown', /Burndown/, 'sec-burndown'],
+  ['Forecast', /Forecasting$/, 'sec-forecast'],
+  ['Departments', /^Department Distribution$/, 'sec-departments'],
+  ['Calendar', /^Project Calendar$/, 'sec-calendar'],
+];
+const CR_DASH_SECTIONS = [
+  ['Distribution', /^Distribution$/, 'sec-distribution'],
+  ['Aging', /^CR Aging/, 'sec-aging'],
+  ['Go-live rate', /^Go Live Rate/, 'sec-golive'],
+  ['Burndown', /Burndown/, 'sec-burndown'],
+  ['Forecast', /Forecasting$/, 'sec-forecast'],
+  ['Departments', /^Department Distribution$/, 'sec-departments'],
+  ['Weekly trend', /Weekly Trend$/, 'sec-weekly'],
+];
+
+function initialsOf(name) {
+  const parts = String(name || '').trim().split(/\s+/).filter(Boolean);
+  if (!parts.length) return '';
+  return ((parts[0][0] || '') + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
 }
 
 function showToast(message, type = 'info', options = {}) {
@@ -455,6 +587,152 @@ function wireMilestoneGraphToggle() {
 }
 
 const __listSoftRefreshSeq = { list: 0, crlist: 0 };
+
+
+// ===== List pages (Projects / CRs): pipeline, quick views, live summary =====
+const CR_PHASES = [
+  ['Initiation', ['User Initiate', 'CR Created', 'CR Signed sec 2', 'CR Signed Sec 3']],
+  ['Design', ['FSD']],
+  ['Build', ['Development', 'Changes', 'Signed Changes', 'Development - Extended']],
+  ['Test', ['SIT', 'UAT']],
+  ['Live', ['Live (Warranty Period)', 'Fully Live']],
+];
+const LIST_QUICK_VIEWS = [
+  ['All', []],
+  ['Active', ['On Track', 'At Risk', 'Delayed']],
+  ['Needs attention', ['At Risk', 'Delayed']],
+  ['Not started', ['Not Started']],
+  ['Live', ['Live']],
+];
+
+function milestoneRailHtml(milestone, list, status) {
+  const m = milestone === 'Live' ? 'Live (Warranty Period)' : milestone;
+  const idx = list.indexOf(m);
+  if (idx < 0) return '';
+  const st = String(status || '').trim().toLowerCase().replace(/\s+/g, '-');
+  return `<span class="ms-rail" data-status="${escapeHtml(st)}" aria-hidden="true">${list.map((_, i) => `<span class="${i < idx ? 'done' : i === idx ? 'current' : ''}"></span>`).join('')}</span>`;
+}
+
+function listMilestoneCounts(kind, rows) {
+  const list = kind === 'cr' ? CR_MILESTONE_UI_OPTIONS : PROJECT_MILESTONES;
+  const counts = Object.fromEntries(list.map((m) => [m, 0]));
+  rows.forEach((i) => {
+    const raw = i?.milestone || '';
+    const m = kind === 'cr' ? (raw === 'Live' ? 'Live (Warranty Period)' : raw) : normalizeProjectMilestoneForDisplay(raw);
+    if (m && counts[m] !== undefined) counts[m] += 1;
+  });
+  return counts;
+}
+
+function listSummaryText(kind, rows) {
+  const by = (s) => rows.filter((i) => String(i.status || '').toLowerCase() === s).length;
+  const live = by('live');
+  const cancelled = by('cancelled');
+  const noun = kind === 'cr' ? (rows.length === 1 ? 'CR' : 'CRs') : (rows.length === 1 ? 'project' : 'projects');
+  return `${rows.length} ${noun} · ${rows.length - live - cancelled} open · ${live} live${cancelled ? ` · ${cancelled} cancelled` : ''}`;
+}
+
+function listPipelineHtml(kind, counts, active) {
+  const tile = (m, label, max, cls) => {
+    const c = counts[m] || 0;
+    const on = active.includes(m);
+    // While a stage is picked, the others are filtered out — show "–", not a misleading 0.
+    const filteredOut = active.length > 0 && !on;
+    return `<button type="button" class="${cls} ${on ? 'active' : ''} ${filteredOut ? 'dim' : ''}" data-ms="${escapeHtml(m)}" aria-pressed="${on}" title="${on ? 'Click again to show all stages' : ''}">
+      <span class="ms-count">${filteredOut ? '–' : c}</span><span class="ms-label">${escapeHtml(label)}</span>
+      ${cls === 'ms-tile' ? `<span class="ms-bar" style="width:${Math.max(4, Math.round(c / max * 100))}%"></span>` : ''}
+    </button>`;
+  };
+  if (kind === 'project') {
+    const max = Math.max(1, ...PROJECT_MILESTONES.map((m) => counts[m] || 0));
+    return `
+      <section class="ms-pipeline" aria-label="Milestone pipeline">
+        <div class="ms-pipeline-head"><span>Milestone pipeline</span><span class="muted">Click a stage to filter</span></div>
+        <div class="ms-pipeline-grid">${PROJECT_MILESTONES.map((m) => tile(m, m === 'Live (Warranty Period)' ? 'Live (Warranty)' : m, max, 'ms-tile')).join('')}</div>
+      </section>`;
+  }
+  return `
+    <section class="ms-phases" aria-label="CR pipeline">
+      ${CR_PHASES.map(([label, stages]) => `
+        <div class="ms-phase">
+          <div class="ms-phase-head"><span>${label}</span><span class="ms-phase-total">${stages.reduce((a, m) => a + (counts[m] || 0), 0)}</span></div>
+          ${stages.map((m) => tile(m, m, 1, 'ms-stage')).join('')}
+        </div>`).join('')}
+    </section>`;
+}
+
+function listViewsHtml(activeStatuses) {
+  const key = [...activeStatuses].sort().join('|');
+  return `
+    <div class="tabs list-views" role="tablist" aria-label="Quick views">
+      ${LIST_QUICK_VIEWS.map(([label, statuses]) => {
+        const on = [...statuses].sort().join('|') === key;
+        return `<button type="button" class="tab ${on ? 'active' : ''}" role="tab" aria-selected="${on}" data-view-statuses="${escapeHtml(statuses.join(','))}">${label}</button>`;
+      }).join('')}
+    </div>`;
+}
+
+/** Pipeline tiles, quick views and instant filters for a list page. */
+function wireListRedesign(prefix, rerender) {
+  const setParam = (key, values) => {
+    const url = new URL(location.href);
+    if (values.length) url.searchParams.set(key, values.join(','));
+    else url.searchParams.delete(key);
+    history.pushState({}, '', url);
+    rerender();
+  };
+  app.querySelectorAll('[data-ms]').forEach((btn) => {
+    btn.onclick = () => {
+      const current = (new URL(location.href).searchParams.get(`${prefix}_milestone`) || '').split(',').filter(Boolean);
+      const m = btn.dataset.ms;
+      setParam(`${prefix}_milestone`, current.length === 1 && current[0] === m ? [] : [m]);
+    };
+  });
+  app.querySelectorAll('[data-view-statuses]').forEach((btn) => {
+    btn.onclick = () => setParam(`${prefix}_status`, btn.dataset.viewStatuses.split(',').filter(Boolean));
+  });
+  // Filters apply as soon as they change; the Apply button is gone.
+  const apply = prefix === 'cr' ? () => window.applyFiltersCR?.() : () => window.applyFilters?.();
+  let t = null;
+  const later = () => { clearTimeout(t); t = setTimeout(apply, 350); };
+  app.querySelectorAll('.toolbar .multi-select-dropdown input[type="checkbox"]').forEach((cb) => cb.addEventListener('change', later));
+  app.querySelectorAll('.toolbar .date-filter-dropdown select, .toolbar .date-filter-dropdown input').forEach((el) => el.addEventListener('change', later));
+}
+
+/** After a soft refresh: keep the pipeline counts, quick views and summary in step. */
+function refreshListRedesign(viewType, rows) {
+  const kind = viewType === 'crlist' ? 'cr' : 'project';
+  const prefix = kind;
+  const counts = listMilestoneCounts(kind, rows);
+  const url = new URL(location.href);
+  const activeMs = (url.searchParams.get(`${prefix}_milestone`) || '').split(',').filter(Boolean);
+  const max = Math.max(1, ...Object.values(counts));
+  app.querySelectorAll('[data-ms]').forEach((btn) => {
+    const m = btn.dataset.ms;
+    const c = counts[m] || 0;
+    const on = activeMs.includes(m);
+    const filteredOut = activeMs.length > 0 && !on;
+    btn.querySelector('.ms-count').textContent = filteredOut ? '–' : c;
+    const bar = btn.querySelector('.ms-bar');
+    if (bar) bar.style.width = `${Math.max(4, Math.round(c / max * 100))}%`;
+    btn.classList.toggle('dim', filteredOut);
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-pressed', String(on));
+  });
+  app.querySelectorAll('.ms-phase').forEach((ph) => {
+    const total = [...ph.querySelectorAll('[data-ms]')].reduce((a, b) => a + (counts[b.dataset.ms] || 0), 0);
+    const el = ph.querySelector('.ms-phase-total');
+    if (el) el.textContent = total;
+  });
+  const statusKey = (url.searchParams.get(`${prefix}_status`) || '').split(',').filter(Boolean).sort().join('|');
+  app.querySelectorAll('[data-view-statuses]').forEach((btn) => {
+    const on = btn.dataset.viewStatuses.split(',').filter(Boolean).sort().join('|') === statusKey;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', String(on));
+  });
+  const sum = document.getElementById('list-summary');
+  if (sum) sum.textContent = listSummaryText(kind, rows);
+}
 
 function listSearchFieldHtml(q = '') {
   const value = escapeHtml(q || '');
@@ -864,6 +1142,7 @@ async function softRefreshListTable(viewType = 'list', options = {}) {
     }
 
     updateListResultsMeta(data.length, q, noun);
+    refreshListRedesign(viewType, data);
     updateListFilterChipsHost(filter, q, prefix);
     syncSearchClearButton();
     wireListTableRowActions(viewType);
@@ -1442,54 +1721,31 @@ function applyColumnWidths(viewType, tableSelector) {
 }
 
 function getDefaultColumns(viewType) {
-  if (viewType === 'crlist') {
-    return {
-      'col-ticket': true,
-      'col-name': true,
-      'col-priority': true,
-      'col-status': true,
-      'col-milestone': true,
-      'col-department': true,
-      'col-owner': true,
-      'col-pic': true,
-      'col-system-impacted': true,
-      'col-start-date': true,
-      'col-create-date': true,
-      'col-end-date': true,
-      'col-plan-start-date': false,
-      'col-plan-end-date': false,
-      'col-age-created-to-start': false,
-      'col-cycle-time': false,
-      'col-description': false,
-      'col-impact': true,
-      'col-remark': true,
-      'col-doc': true,
-      'col-actions': true
-    };
-  }
-  return {
+  // Lean defaults: the columns people scan. Everything else is one click away in Columns.
+  const base = {
     'col-ticket': true,
     'col-name': true,
     'col-priority': true,
     'col-status': true,
     'col-milestone': true,
     'col-department': true,
-    'col-owner': true,
+    'col-owner': false,
     'col-pic': true,
-    'col-system-impacted': false,
-    'col-start-date': true,
-    'col-create-date': true,
-    'col-end-date': true,
+    'col-system-impacted': viewType === 'crlist',
+    'col-start-date': false,
+    'col-create-date': false,
+    'col-end-date': false,
     'col-plan-start-date': false,
-    'col-plan-end-date': false,
+    'col-plan-end-date': true,
     'col-age-created-to-start': false,
     'col-cycle-time': false,
     'col-description': false,
-    'col-impact': true,
-    'col-remark': true,
-    'col-doc': true,
+    'col-impact': false,
+    'col-remark': false,
+    'col-doc': false,
     'col-actions': true
   };
+  return base;
 }
 
 /** Merge saved column visibility with defaults so new columns get sane defaults. */
@@ -2456,7 +2712,7 @@ function initiativeRow(i, crData = null, colVisibility = null) {
     <td class="col-name" style="display: ${colVisibility['col-name'] !== false ? 'table-cell' : 'none'}"><strong><a href="#view/${i.id}">${i.name}</a></strong></td>
     <td class="col-priority" style="display: ${colVisibility['col-priority'] !== false ? 'table-cell' : 'none'}"><span class="priority-badge priority-${priorityClass}">${i.priority}</span></td>
     <td class="col-status" style="display: ${colVisibility['col-status'] !== false ? 'table-cell' : 'none'}"><span class="status-badge status-${statusClass}">${i.status}</span></td>
-    <td class="col-milestone" style="display: ${colVisibility['col-milestone'] !== false ? 'table-cell' : 'none'}">${escapeHtml(normalizeCrMilestoneForDisplay(i))}</td>
+    <td class="col-milestone" style="display: ${colVisibility['col-milestone'] !== false ? 'table-cell' : 'none'}"><span class="ms-cell"><span>${escapeHtml(normalizeCrMilestoneForDisplay(i))}</span>${milestoneRailHtml(normalizeCrMilestoneForDisplay(i), i.type === 'CR' ? CR_MILESTONE_UI_OPTIONS : PROJECT_MILESTONES, i.status)}</span></td>
     <td class="col-department" style="display: ${colVisibility['col-department'] !== false ? 'table-cell' : 'none'}">${dep}</td>
     <td class="col-system-impacted" style="display: ${colVisibility['col-system-impacted'] !== false ? 'table-cell' : 'none'}" title="${escapeHtml(dwsSystemNamesFromInitiative(i))}">${escapeHtml(dwsSystemNamesFromInitiative(i))}</td>
     <td class="col-owner" style="display: ${colVisibility['col-owner'] !== false ? 'table-cell' : 'none'}">${bo}</td>
@@ -3048,10 +3304,10 @@ async function renderList() {
     'Preparation': '#8b5cf6', // Purple
     'Business Requirement': '#0ea5e9', // Sky
     'Tech Assessment': '#06b6d4', // Cyan
-    'Planning': '#6366f1', // Indigo
-    'Development': '#f59e0b', // Amber
-    'Testing': '#ef4444', // Red
-    'Live (Warranty Period)': '#22c55e', // Green
+    'Planning': '#D7263D', // Indigo
+    'Development': '#E08A00', // Amber
+    'Testing': '#D9362B', // Red
+    'Live (Warranty Period)': '#22A05A', // Green
     'Fully Live': '#16a34a', // Dark green
   };
 
@@ -3271,31 +3527,11 @@ async function renderList() {
 
   const advancedOpen = hasAdvancedListFilters(filter);
   app.innerHTML = `
-    <div class="milestone-graph collapsed-by-default">
-      <button type="button" class="milestone-graph-toggle" id="milestone-graph-toggle" aria-expanded="false">
-        <span class="milestone-graph-toggle-label">Show milestone distribution</span>
-      </button>
-      <div class="milestone-graph-body hidden" id="milestone-graph-body">
-        <h3>Milestone Distribution</h3>
-        <div class="milestone-flow">
-          ${uiMilestones.map((m, index) => {
-            const count = milestoneCounts[m] || 0;
-            const isLast = index === uiMilestones.length - 1;
-            const displayName = milestoneDisplayNames[m] || m;
-            const color = milestoneColors[m] || 'var(--brand)';
-            return `
-              <div class="milestone-step">
-                <div class="milestone-circle ${count > 0 ? 'active' : ''}" style="${count > 0 ? `border-color: ${color}; background: linear-gradient(135deg, ${color}15 0%, ${color}25 100%);` : ''}">
-                  <div class="milestone-name">${displayName}</div>
-                  <div class="milestone-count-badge" style="background: ${count > 0 ? color : 'var(--muted)'}">${count}</div>
-                </div>
-                ${!isLast ? '<div class="milestone-arrow">→</div>' : ''}
-              </div>
-            `;
-          }).join('')}
-        </div>
-      </div>
-    </div>
+    ${pageHeader('Projects', `<span id="list-summary">${listSummaryText('project', data)}</span>`, `
+      ${access.isAdmin ? '<button type="button" class="btn" onclick="openProjectImport()" title="Create projects from the Excel planning template (admin)"><svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 15V3M7 8l5-5 5 5M5 21h14"/></svg>Upload</button>' : ''}
+      ${access.canCreateProject || access.isAdmin ? '<a href="#new/Project" class="btn primary"><svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New project</a>' : ''}`)}
+    ${listPipelineHtml('project', listMilestoneCounts('project', data), filter.milestone)}
+    ${listViewsHtml(filter.status)}
     <div class="toolbar">
       <div class="toolbar-primary">
         ${listSearchFieldHtml(q)}
@@ -3342,10 +3578,8 @@ async function renderList() {
           <button type="button" class="filters-toggle-btn" id="filters-toggle-btn" aria-expanded="${advancedOpen ? 'true' : 'false'}">${advancedOpen ? 'Hide filters' : 'More filters'}</button>
         </div>
         <div class="action-group">
-          <button id="btn-columns" onclick="showColumnSettings('list')" title="Column Settings" class="icon-btn">⚙️</button>
-          <button id="apply-filters-btn" class="primary" onclick="applyFilters()">Apply Filters</button>
-          ${access.canCreateProject || access.isAdmin ? '<a href="#new/Project" class="btn primary">+ New Initiative</a>' : ''}
-          ${access.isAdmin ? '<button type="button" class="btn" onclick="openProjectImport()" title="Create projects from the Excel planning template (admin)">⬆ Upload Projects</button>' : ''}
+          <button id="btn-columns" onclick="showColumnSettings('list')" title="Choose columns" aria-label="Choose columns" class="icon-btn"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/></svg></button>
+          <button id="apply-filters-btn" class="primary hidden" onclick="applyFilters()">Apply Filters</button>
         </div>
       </div>
       <div class="toolbar-advanced ${advancedOpen ? 'open' : ''}" id="toolbar-advanced">
@@ -3525,7 +3759,7 @@ async function renderList() {
   initTableScrollPairs();
   wireRecentActivityFab();
   wireFiltersToggle();
-  wireMilestoneGraphToggle();
+  wireListRedesign('project', () => renderList());
   wireListFilterChips('project', () => renderList());
   wireMultiSelectBulkActions();
   wireListSearchControls('list');
@@ -4809,9 +5043,9 @@ async function renderView(id) {
                           <div style="margin: 8px 0; padding: 10px; background: #f8fafc; border-radius: 6px; border-left: 3px solid var(--brand);">
                             <div style="font-weight: 600; color: var(--text); margin-bottom: 6px;">${escapeHtml(fieldLabel)}</div>
                             <div style="font-size: 13px; line-height: 1.6;">
-                              <span style="color: #ef4444; text-decoration: line-through; padding: 2px 6px; background: #fee2e2; border-radius: 3px;">${escapeHtml(oldFormatted)}</span>
+                              <span style="color: #D9362B; text-decoration: line-through; padding: 2px 6px; background: #fee2e2; border-radius: 3px;">${escapeHtml(oldFormatted)}</span>
                               <span style="margin: 0 8px; color: var(--muted);">→</span>
-                              <span style="color: #10b981; padding: 2px 6px; background: #d1fae5; border-radius: 3px;">${escapeHtml(newFormatted)}</span>
+                              <span style="color: #22A05A; padding: 2px 6px; background: #d1fae5; border-radius: 3px;">${escapeHtml(newFormatted)}</span>
                             </div>
                           </div>
                         `;
@@ -5154,7 +5388,7 @@ async function renderView(id) {
         
         <!-- Project Team Section -->
         <div style="margin-top: 24px; padding: 20px; background: var(--gray-50); border-radius: 8px;">
-          <h3 style="margin: 0 0 16px 0; color: var(--text);">👥 Project Team</h3>
+          <h3 style="margin: 0 0 16px 0; color: var(--text);">Project Team</h3>
           ${formRow('IT PM', createSearchableSelect('itPmId', itPmUsers, i.itPmId || '', 'Select...', true))}
           ${formRow('IT PIC', createMultiSelect('itPicIds', itPicUsers, itPicIds))}
           ${formRow('IT Manager', createMultiSelect('itManagerIds', itManagerUsers, i.itManagerIds || []))}
@@ -6129,20 +6363,20 @@ function renderGanttChart(tasks, initiativeId) {
   const statusColors = {
     // New enum values (lowercase)
     'not started': '#94a3b8',
-    'in progress': '#10b981',
-    'at risk': '#ef4444',
+    'in progress': '#22A05A',
+    'at risk': '#D9362B',
     'cancel': '#6b7280',
-    'done': '#3b82f6',
+    'done': '#2F6FE0',
     // Legacy values for backward compatibility
     'Not Started': '#94a3b8',
-    'On Hold': '#f59e0b',
-    'On Track': '#10b981',
-    'At Risk': '#ef4444',
+    'On Hold': '#E08A00',
+    'On Track': '#22A05A',
+    'At Risk': '#D9362B',
     'Delayed': '#dc2626',
-    'Live': '#3b82f6',
+    'Live': '#2F6FE0',
     'Cancelled': '#6b7280',
-    'In Progress': '#10b981',
-    'Done': '#3b82f6'
+    'In Progress': '#22A05A',
+    'Done': '#2F6FE0'
   };
   
   const getStatusColor = (status) => {
@@ -6851,9 +7085,9 @@ async function renderCRList() {
   const milestoneColors = {
     'User Initiate': '#8b5cf6', // Purple
     'FSD': '#06b6d4', // Cyan
-    'Development': '#f59e0b', // Amber
-    'SIT': '#ef4444', // Red
-    'Live': '#22c55e' // Green
+    'Development': '#E08A00', // Amber
+    'SIT': '#D9362B', // Red
+    'Live': '#22A05A' // Green
   };
 
   data.forEach(i => {
@@ -6907,31 +7141,11 @@ async function renderCRList() {
   const advancedOpenCR = hasAdvancedListFilters(filter);
 
   app.innerHTML = `
-    <div class="milestone-graph collapsed-by-default">
-      <button type="button" class="milestone-graph-toggle" id="milestone-graph-toggle" aria-expanded="false">
-        <span class="milestone-graph-toggle-label">Show milestone distribution</span>
-      </button>
-      <div class="milestone-graph-body hidden" id="milestone-graph-body">
-        <h3>Milestone Distribution</h3>
-        <div class="milestone-flow">
-          ${uiMilestones.map((m, index) => {
-            const count = milestoneCounts[m] || 0;
-            const isLast = index === uiMilestones.length - 1;
-            const displayName = milestoneDisplayNames[m] || m;
-            const color = milestoneColors[m] || 'var(--brand)';
-            return `
-              <div class="milestone-step">
-                <div class="milestone-circle ${count > 0 ? 'active' : ''}" style="${count > 0 ? `border-color: ${color}; background: linear-gradient(135deg, ${color}15 0%, ${color}25 100%);` : ''}">
-                  <div class="milestone-name">${displayName}</div>
-                  <div class="milestone-count-badge" style="background: ${count > 0 ? color : 'var(--muted)'}">${count}</div>
-                </div>
-                ${!isLast ? '<div class="milestone-arrow">→</div>' : ''}
-              </div>
-            `;
-          }).join('')}
-        </div>
-      </div>
-    </div>
+    ${pageHeader('Change requests', `<span id="list-summary">${listSummaryText('cr', data)}</span>`, `
+      <button type="button" class="btn" onclick="exportCRListToExcel()" title="Download filtered rows as CSV (opens in Microsoft Excel)"><svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12M7 10l5 5 5-5M5 21h14"/></svg>Export Excel</button>
+      ${canCreateCR ? '<a href="#new/CR" class="btn primary"><svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>New CR</a>' : ''}`)}
+    ${listPipelineHtml('cr', listMilestoneCounts('cr', data), filter.milestone)}
+    ${listViewsHtml(filter.status)}
     <div class="toolbar">
       <div class="toolbar-primary">
         ${listSearchFieldHtml(q)}
@@ -6978,10 +7192,8 @@ async function renderCRList() {
           <button type="button" class="filters-toggle-btn" id="filters-toggle-btn" aria-expanded="${advancedOpenCR ? 'true' : 'false'}">${advancedOpenCR ? 'Hide filters' : 'More filters'}</button>
         </div>
         <div class="action-group">
-          <button id="btn-columns" onclick="showColumnSettings('crlist')" title="Column Settings" class="icon-btn">⚙️</button>
-          <button type="button" class="btn-secondary" onclick="exportCRListToExcel()" title="Download filtered rows as CSV (opens in Microsoft Excel)">Export Excel</button>
-          <button id="apply-filters-btn" class="primary" onclick="applyFiltersCR()">Apply Filters</button>
-          ${canCreateCR ? '<a href="#new/CR" class="btn primary">+ New CR</a>' : ''}
+          <button id="btn-columns" onclick="showColumnSettings('crlist')" title="Choose columns" aria-label="Choose columns" class="icon-btn"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/></svg></button>
+          <button id="apply-filters-btn" class="primary hidden" onclick="applyFiltersCR()">Apply Filters</button>
         </div>
       </div>
       <div class="toolbar-advanced ${advancedOpenCR ? 'open' : ''}" id="toolbar-advanced">
@@ -7159,7 +7371,7 @@ async function renderCRList() {
   initTableScrollPairs();
   wireRecentActivityFab();
   wireFiltersToggle();
-  wireMilestoneGraphToggle();
+  wireListRedesign('cr', () => renderCRList());
   wireListFilterChips('cr', () => renderCRList());
   wireMultiSelectBulkActions();
   wireListSearchControls('crlist');
@@ -7794,7 +8006,7 @@ async function renderDashboard() {
                 <div style="width: 120px; font-size: 12px; color: var(--muted);">${item[labelKey]}</div>
                 <div style="flex: 1; margin: 0 12px;">
                   <div style="background: #f1f5f9; height: 20px; border-radius: 10px; overflow: hidden;">
-                    <div style="background: ${statusClass.includes('live') ? '#3b82f6' : statusClass.includes('at-risk') ? '#f59e0b' : statusClass.includes('delayed') ? '#ef4444' : '#6366f1'}; height: 100%; width: ${percentage}%; transition: width 0.3s;"></div>
+                    <div style="background: ${statusClass.includes('live') ? '#2F6FE0' : statusClass.includes('at-risk') ? '#E08A00' : statusClass.includes('delayed') ? '#D9362B' : '#D7263D'}; height: 100%; width: ${percentage}%; transition: width 0.3s;"></div>
                   </div>
                 </div>
                 <div style="width: 40px; text-align: right; font-weight: 600; font-size: 14px;">${item[valueKey]}</div>
@@ -7839,9 +8051,9 @@ async function renderDashboard() {
                 if (totalBreakdown > 0) {
                   breakdownHtml = `
                     <div style="margin-top: 6px; padding-left: 132px; font-size: 11px; color: var(--muted); display: flex; gap: 12px;">
-                      ${p0 > 0 ? `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #ef4444; border-radius: 2px;"></span>P0: ${p0}</span>` : ''}
-                      ${p1 > 0 ? `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #f59e0b; border-radius: 2px;"></span>P1: ${p1}</span>` : ''}
-                      ${p2 > 0 ? `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #10b981; border-radius: 2px;"></span>P2: ${p2}</span>` : ''}
+                      ${p0 > 0 ? `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #D9362B; border-radius: 2px;"></span>P0: ${p0}</span>` : ''}
+                      ${p1 > 0 ? `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #E08A00; border-radius: 2px;"></span>P1: ${p1}</span>` : ''}
+                      ${p2 > 0 ? `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #22A05A; border-radius: 2px;"></span>P2: ${p2}</span>` : ''}
                     </div>
                   `;
                 }
@@ -7854,7 +8066,7 @@ async function renderDashboard() {
                         const count = breakdown[status] || 0;
                         if (count <= 0) return '';
                         const statusClass = String(status).toLowerCase().replace(/\s+/g, '-');
-                        const color = statusClass.includes('live') ? '#3b82f6' : statusClass.includes('at-risk') ? '#f59e0b' : statusClass.includes('delayed') ? '#ef4444' : '#6366f1';
+                        const color = statusClass.includes('live') ? '#2F6FE0' : statusClass.includes('at-risk') ? '#E08A00' : statusClass.includes('delayed') ? '#D9362B' : '#D7263D';
                         return `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: ${color}; border-radius: 2px;"></span>${escapeHtml(status)}: ${count}</span>`;
                       }).join('')}
                     </div>
@@ -7868,7 +8080,7 @@ async function renderDashboard() {
                 <div style="width: 120px; font-size: 12px; color: var(--muted);">${escapeHtml(item[labelKey] || 'N/A')}</div>
                 <div style="flex: 1; margin: 0 12px;">
                   <div style="background: #f1f5f9; height: 20px; border-radius: 10px; overflow: hidden;">
-                    <div style="background: ${statusClass.includes('live') ? '#3b82f6' : statusClass.includes('at-risk') ? '#f59e0b' : statusClass.includes('delayed') ? '#ef4444' : '#6366f1'}; height: 100%; width: ${percentage}%; transition: width 0.3s;"></div>
+                    <div style="background: ${statusClass.includes('live') ? '#2F6FE0' : statusClass.includes('at-risk') ? '#E08A00' : statusClass.includes('delayed') ? '#D9362B' : '#D7263D'}; height: 100%; width: ${percentage}%; transition: width 0.3s;"></div>
                   </div>
                 </div>
                 <div style="width: 40px; text-align: right; font-weight: 600; font-size: 14px;">${item[valueKey] || 0}</div>
@@ -7977,7 +8189,8 @@ async function renderDashboard() {
   const combinedByStatus = Object.values(combinedStatusMap);
 
   app.innerHTML = `
-    <div class="card" style="margin-bottom: 24px; padding: 20px;">
+    ${pageHeader('Project Dashboard', 'Cancelled projects are left out of totals. Click any number to see the projects behind it.')}
+    <div class="card filter-bar" style="margin-bottom: 16px;">
       <div style="display: flex; gap: 24px; align-items: flex-end; flex-wrap: wrap;">
         ${createFilterDropdown('filter-department', 'Department', departmentOptions, selectedDepartmentId, 'updateDashboardFilters()')}
         ${createFilterDropdown('filter-itpm', 'IT PM', itPmOptions, selectedItPmId, 'updateDashboardFilters()')}
@@ -7993,7 +8206,7 @@ async function renderDashboard() {
       <div style="display:flex; justify-content: space-between; align-items: flex-start; gap: 16px; flex-wrap: wrap;">
         <div>
           <div style="display:flex; align-items:center; gap: 10px;">
-            <div style="width: 10px; height: 10px; border-radius: 50%; background: var(--brand);"></div>
+            <span class="section-dot" aria-hidden="true"></span>
             <h3 style="margin: 0;">Project Summary</h3>
           </div>
           <div class="muted" style="font-size: 12px; margin-top: 6px;">
@@ -8001,40 +8214,31 @@ async function renderDashboard() {
           </div>
         </div>
         <div style="display:flex; gap: 10px; align-items:center; flex-wrap: wrap;">
-          <div style="padding: 8px 12px; border: 1px solid var(--border); border-radius: 999px; background: #f8fafc; font-size: 12px; color: var(--muted);">
-            Excludes <strong style="color: var(--text);">CANCELLED</strong> from Total
-          </div>
+          <span class="chip">Cancelled not counted in Total</span>
         </div>
       </div>
 
       <div style="margin-top: 16px; display:grid; grid-template-columns: 1.6fr 1fr; gap: 16px; align-items: stretch;">
         <div style="display:grid; grid-template-columns: repeat(5, minmax(120px, 1fr)); gap: 12px;">
           ${(() => {
-            const tile = ({ label, value, color, bg, border, filterType, filterValue, title }) => `
-              <div class="clickable-card"
+            const tile = ({ label, value, color, filterType, filterValue, title }) => `
+              <button type="button" class="clickable-card kpi-tile"
                    data-filter-type="${filterType}"
                    data-filter-value="${filterValue || ''}"
                    data-title="${escapeHtml(title)}"
                    data-initiative-type="Project"
-                   style="cursor:pointer; border: 1px solid ${border}; background: ${bg}; border-radius: 12px; padding: 14px 14px 12px; transition: transform .12s ease, box-shadow .12s ease; display:flex; flex-direction:column; min-height: 170px;">
-                <div style="display:flex; justify-content: space-between; align-items: center; gap: 10px;">
-                  <div class="muted" style="font-size: 12px; font-weight: 700; letter-spacing: .2px;">${label}</div>
-                  <div style="width: 10px; height: 10px; border-radius: 3px; background: ${color};"></div>
-                </div>
-                <div style="margin-top: 10px; margin-bottom: 8px; font-size: 30px; font-weight: 900; color: ${color}; line-height: 1;">${value}</div>
-                <div class="muted" style="margin-top:auto; font-size: 11px; line-height: 1.3;">
-                  Click to drill down
-                </div>
-              </div>
+                   style="--kpi-accent:${color}">
+                <span class="kpi-label">${label}<span class="kpi-dot" style="background:${color}"></span></span>
+                <span class="kpi-value">${value}</span>
+                <span class="kpi-sub">See the projects</span>
+              </button>
             `;
 
             return [
               tile({
                 label: 'Total',
                 value: totalProjectsExCancelled,
-                color: 'var(--brand)',
-                bg: '#eff6ff',
-                border: '#bfdbfe',
+                color: 'var(--pm-accent)',
                 filterType: 'allExCancelled',
                 filterValue: '',
                 title: 'All Projects (Excl. Cancelled)',
@@ -8042,9 +8246,7 @@ async function renderDashboard() {
               tile({
                 label: 'Live',
                 value: liveProjects,
-                color: '#3b82f6',
-                bg: '#eff6ff',
-                border: '#bfdbfe',
+                color: 'var(--st-live-dot)',
                 filterType: 'status',
                 filterValue: 'LIVE',
                 title: 'Live Projects',
@@ -8052,9 +8254,7 @@ async function renderDashboard() {
               tile({
                 label: 'In Progress',
                 value: inProgressProjects,
-                color: 'var(--success)',
-                bg: '#ecfdf5',
-                border: '#bbf7d0',
+                color: 'var(--st-ontrack-dot)',
                 filterType: 'inProgress',
                 filterValue: '',
                 title: 'In Progress Projects',
@@ -8062,9 +8262,7 @@ async function renderDashboard() {
               tile({
                 label: 'Not Started',
                 value: notStartedProjects,
-                color: '#64748b',
-                bg: '#f8fafc',
-                border: '#e2e8f0',
+                color: 'var(--st-notstarted-dot)',
                 filterType: 'status',
                 filterValue: 'NOT STARTED',
                 title: 'Not Started Projects',
@@ -8072,9 +8270,7 @@ async function renderDashboard() {
               tile({
                 label: 'On Hold',
                 value: onHoldProjects,
-                color: '#334155',
-                bg: '#f1f5f9',
-                border: '#e2e8f0',
+                color: 'var(--st-onhold-dot)',
                 filterType: 'status',
                 filterValue: 'ON HOLD',
                 title: 'On Hold Projects',
@@ -8083,24 +8279,14 @@ async function renderDashboard() {
           })()}
         </div>
 
-        <div style="border: 1px solid #fed7aa; background: linear-gradient(135deg, #fff7ed 0%, #ffffff 60%); border-radius: 12px; padding: 14px;">
-          <div style="display:flex; justify-content: space-between; align-items: center; gap: 10px;">
-            <div class="muted" style="font-size: 12px; font-weight: 800; letter-spacing: .2px;">Avg Project Aging (Working Days)</div>
-            <div style="width: 10px; height: 10px; border-radius: 3px; background: var(--warning);"></div>
-          </div>
-          <div style="display:flex; align-items: baseline; justify-content: space-between; gap: 12px; margin-top: 10px;">
-            <div>
-              <div style="font-size: 11px; color: var(--muted); font-weight: 700; text-transform: uppercase; letter-spacing: .4px;">Avg Total Age</div>
-              <div style="font-size: 36px; font-weight: 950; color: var(--warning); line-height: 1;">${projectAgingMetrics.avgTotalAge}</div>
-            </div>
-            <div style="font-size: 12px; color: var(--muted); text-align: right; line-height: 1.5;">
-              <div><strong style="color: var(--text);">${projectAgingMetrics.avgAgeCreatedToStart}</strong> Created→Start</div>
-              <div><strong style="color: var(--text);">${projectAgingMetrics.avgCycleTime}</strong> Start→End/Now</div>
-            </div>
-          </div>
-          <div class="muted" style="margin-top: 10px; font-size: 12px;">
-            Total Age = (Create→Start) + (Start→End/Now).
-          </div>
+        <div class="dark-card aging-card">
+          <span class="aging-label">Average project age · working days</span>
+          <span class="aging-main"><span class="aging-value">${projectAgingMetrics.avgTotalAge}</span><span class="aging-unit">total</span></span>
+          <span class="aging-bar" aria-hidden="true">
+            <span style="flex:${Number(projectAgingMetrics.avgAgeCreatedToStart) || 0} 1 0; background:#A88F96;"></span>
+            <span style="flex:${Number(projectAgingMetrics.avgCycleTime) || 0} 1 0; background:var(--pm-grad);"></span>
+          </span>
+          <span class="aging-legend"><span>Created → start · <strong>${projectAgingMetrics.avgAgeCreatedToStart}</strong></span><span>Start → end/now · <strong>${projectAgingMetrics.avgCycleTime}</strong></span></span>
         </div>
       </div>
 
@@ -8116,7 +8302,7 @@ async function renderDashboard() {
             <thead>
               <tr>
                 <th style="position: sticky; top: 0; z-index: 2; text-align:left; padding: 10px 12px; font-size: 12px; color: var(--muted); border-bottom: 1px solid var(--border); background: #f8fafc;">Department Group</th>
-                <th style="position: sticky; top: 0; z-index: 2; text-align:right; padding: 10px 12px; font-size: 12px; color: #b91c1c; border-bottom: 1px solid var(--border); background: #fef2f2;">Total</th>
+                <th style="position: sticky; top: 0; z-index: 2; text-align:right; padding: 10px 12px; font-size: 12px; color: var(--pm-ink); border-bottom: 1px solid var(--border); background: var(--pm-fill);">Total</th>
                 <th style="position: sticky; top: 0; z-index: 2; text-align:right; padding: 10px 12px; font-size: 12px; color: #1d4ed8; border-bottom: 1px solid var(--border); background: #eff6ff;">Live</th>
                 <th style="position: sticky; top: 0; z-index: 2; text-align:right; padding: 10px 12px; font-size: 12px; color: #047857; border-bottom: 1px solid var(--border); background: #ecfdf5;">In Progress</th>
                 <th style="position: sticky; top: 0; z-index: 2; text-align:right; padding: 10px 12px; font-size: 12px; color: #475569; border-bottom: 1px solid var(--border); background: #f8fafc;">Not Started</th>
@@ -8142,7 +8328,7 @@ async function renderDashboard() {
                   return `
                     <tr style="background: ${bg};">
                       <td style="padding: 10px 12px; border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 800; color: #0f172a;">${g.label}</td>
-                      ${makeCell(getGroup(breakdownTotal, g.key), 'TOTAL', '#b91c1c')}
+                      ${makeCell(getGroup(breakdownTotal, g.key), 'TOTAL', '#1A1114')}
                       ${makeCell(getGroup(breakdownLive, g.key), 'LIVE', '#1d4ed8')}
                       ${makeCell(getGroup(breakdownInProgress, g.key), 'IN_PROGRESS', '#047857')}
                       ${makeCell(getGroup(breakdownNotStarted, g.key), 'NOT_STARTED', '#475569')}
@@ -8158,10 +8344,12 @@ async function renderDashboard() {
         </div>
       </div>
     </div>
-    <div class="grid" style="margin-top:24px">
-      ${createBarChartWithBreakdown(combinedByStatus, 'status', 'c', 'Status Distribution', d.byStatusBreakdown || {}, 'priority', true, 'Project')}
-      ${createBarChartWithBreakdown(d.byPriority || [], 'priority', 'c', 'Priority Distribution', d.byPriorityBreakdown || {}, 'status', true, 'Project')}
-      ${createBarChartWithBreakdown(d.byMilestone || [], 'milestone', 'c', 'Milestone Distribution', d.byMilestoneBreakdown || {}, 'priority', true, 'Project')}
+    <div style="margin-top:16px">
+      ${distributionSwitchHtml([
+        createBarChartWithBreakdown(combinedByStatus, 'status', 'c', 'Status Distribution', d.byStatusBreakdown || {}, 'priority', true, 'Project'),
+        createBarChartWithBreakdown(d.byPriority || [], 'priority', 'c', 'Priority Distribution', d.byPriorityBreakdown || {}, 'status', true, 'Project'),
+        createBarChartWithBreakdown(d.byMilestone || [], 'milestone', 'c', 'Milestone Distribution', d.byMilestoneBreakdown || {}, 'priority', true, 'Project'),
+      ])}
     </div>
     <div class="grid" style="margin-top:24px">
       <div class="card" style="grid-column: 1 / -1;">
@@ -8176,8 +8364,10 @@ async function renderDashboard() {
               const baseStyle = isHeader
                 ? 'padding: 8px 12px; font-weight: 600; text-align: center; border: 1px solid #e2e8f0;'
                 : 'padding: 8px 12px; font-weight: 600; text-align: center; border: 1px solid #e2e8f0;';
-              const bgStyle = bgColor ? ` background: ${bgColor};` : '';
-              const textColor = (whiteText || bgColor === '#475569') ? ' color: white;' : '';
+              // Aurora: calm cells; violet tint marks the total-age row.
+              const tone = { '#2F6FE0': ['var(--pm-subtle)', 'var(--pm-ink)'], '#22A05A': ['var(--pm-accent-tint)', 'var(--pm-accent-deep)'], '#475569': ['var(--pm-fill)', 'var(--pm-slate)'], '#fef3c7': ['#fff', ''] }[bgColor];
+              const bgStyle = tone ? ` background: ${tone[0]};` : (bgColor ? ` background: ${bgColor};` : '');
+              const textColor = tone ? (tone[1] ? ` color: ${tone[1]};` : '') : ((whiteText || bgColor === '#475569') ? ' color: white;' : '');
               return `<td style="${baseStyle}${bgStyle}${textColor}">${value}</td>`;
             };
             
@@ -8186,9 +8376,9 @@ async function renderDashboard() {
               
               if (rowType === 'qty') {
                 return `
-                  ${renderCell(actual.P0?.qty || 0, false, '#3b82f6', true)}
-                  ${renderCell(actual.P1?.qty || 0, false, '#3b82f6', true)}
-                  ${renderCell(actual.P2?.qty || 0, false, '#3b82f6', true)}
+                  ${renderCell(actual.P0?.qty || 0, false, '#2F6FE0', true)}
+                  ${renderCell(actual.P1?.qty || 0, false, '#2F6FE0', true)}
+                  ${renderCell(actual.P2?.qty || 0, false, '#2F6FE0', true)}
                 `;
               }
               if (rowType === 'rec-start') {
@@ -8207,9 +8397,9 @@ async function renderDashboard() {
               }
               if (rowType === 'total-age') {
                 return `
-                  ${renderCell(actual.P0?.avgTotalAge || 0, false, '#10b981', true)}
-                  ${renderCell(actual.P1?.avgTotalAge || 0, false, '#10b981', true)}
-                  ${renderCell(actual.P2?.avgTotalAge || 0, false, '#10b981', true)}
+                  ${renderCell(actual.P0?.avgTotalAge || 0, false, '#22A05A', true)}
+                  ${renderCell(actual.P1?.avgTotalAge || 0, false, '#22A05A', true)}
+                  ${renderCell(actual.P2?.avgTotalAge || 0, false, '#22A05A', true)}
                 `;
               }
               return '';
@@ -8221,47 +8411,47 @@ async function renderDashboard() {
                   <tr>
                     <th rowspan="2" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; text-align: left; font-weight: 600;"></th>
                     <th rowspan="2" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; text-align: left; font-weight: 600;"></th>
-                    <th colspan="3" style="padding: 12px; background: #fbbf24; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: white;">Actual</th>
+                    <th colspan="3" style="padding: 12px; background: var(--pm-accent-tint); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-accent-deep);">Actual</th>
                   </tr>
                   <tr>
-                    <th style="padding: 8px; background: #fef3c7; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: #000;">P0</th>
-                    <th style="padding: 8px; background: #fef3c7; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: #000;">P1</th>
-                    <th style="padding: 8px; background: #fef3c7; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: #000;">P2</th>
+                    <th style="padding: 8px; background: var(--pm-subtle); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P0</th>
+                    <th style="padding: 8px; background: var(--pm-subtle); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P1</th>
+                    <th style="padding: 8px; background: var(--pm-subtle); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P2</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr style="background: #fef3c7;">
+                  <tr style="background: #fff;">
                     <td rowspan="4" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; font-weight: 600; vertical-align: middle; text-align: center;">Open</td>
-                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #3b82f6; color: white;">Total Projects</td>
+                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-subtle); color: var(--pm-ink);">Total Projects</td>
                     ${renderDataCells(open, 'qty')}
                   </tr>
-                  <tr style="background: #fef3c7;">
-                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Age Created→Start</td>
+                  <tr style="background: #fff;">
+                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Age Created→Start</td>
                     ${renderDataCells(open, 'rec-start')}
                   </tr>
-                  <tr style="background: #fef3c7;">
-                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Cycle Time (Start→End)</td>
+                  <tr style="background: #fff;">
+                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Cycle Time (Start→End)</td>
                     ${renderDataCells(open, 'start-live')}
                   </tr>
-                  <tr style="background: #fef3c7;">
-                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #10b981; color: white;">Avg Total Age</td>
+                  <tr style="background: #fff;">
+                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-accent-tint); color: var(--pm-accent-deep);">Avg Total Age</td>
                     ${renderDataCells(open, 'total-age')}
                   </tr>
-                  <tr style="background: #fef3c7;">
+                  <tr style="background: #fff;">
                     <td rowspan="4" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; font-weight: 600; vertical-align: middle; text-align: center;">Closed</td>
-                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #3b82f6; color: white;">Total Projects</td>
+                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-subtle); color: var(--pm-ink);">Total Projects</td>
                     ${renderDataCells(closed, 'qty')}
                   </tr>
-                  <tr style="background: #fef3c7;">
-                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Age Created→Start</td>
+                  <tr style="background: #fff;">
+                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Age Created→Start</td>
                     ${renderDataCells(closed, 'rec-start')}
                   </tr>
-                  <tr style="background: #fef3c7;">
-                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Cycle Time (Start→End)</td>
+                  <tr style="background: #fff;">
+                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Cycle Time (Start→End)</td>
                     ${renderDataCells(closed, 'start-live')}
                   </tr>
-                  <tr style="background: #fef3c7;">
-                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #10b981; color: white;">Avg Total Age</td>
+                  <tr style="background: #fff;">
+                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-accent-tint); color: var(--pm-accent-deep);">Avg Total Age</td>
                     ${renderDataCells(closed, 'total-age')}
                   </tr>
                 </tbody>
@@ -8351,9 +8541,9 @@ async function renderDashboard() {
                   <text x="${chartWidth / 2}" y="${chartHeight - 15}" text-anchor="middle" font-size="13" fill="#334155" font-weight="600">Date (Month)</text>
                   
                   <!-- Moving Average Lines (solid, more prominent) -->
-                  <path d="${generatePath(pointsP0MA)}" stroke="#ef4444" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="${generatePath(pointsP1MA)}" stroke="#3b82f6" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="${generatePath(pointsP2MA)}" stroke="#10b981" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="${generatePath(pointsP0MA)}" stroke="#D9362B" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="${generatePath(pointsP1MA)}" stroke="#2F6FE0" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="${generatePath(pointsP2MA)}" stroke="#22A05A" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
                   <path d="${generatePath(pointsTotalMA)}" stroke="#8b5cf6" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
                   
                   <!-- Benchmark Line (horizontal at value 2) -->
@@ -8368,9 +8558,9 @@ async function renderDashboard() {
                   })()}
                   
                   <!-- Data points for Moving Average -->
-                  ${pointsP0MA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#ef4444" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="P0" style="cursor: pointer;" title="P0 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
-                  ${pointsP1MA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#3b82f6" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="P1" style="cursor: pointer;" title="P1 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
-                  ${pointsP2MA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#10b981" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="P2" style="cursor: pointer;" title="P2 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
+                  ${pointsP0MA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#D9362B" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="P0" style="cursor: pointer;" title="P0 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
+                  ${pointsP1MA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#2F6FE0" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="P1" style="cursor: pointer;" title="P1 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
+                  ${pointsP2MA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#22A05A" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="P2" style="cursor: pointer;" title="P2 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
                   ${pointsTotalMA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#8b5cf6" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="Total" style="cursor: pointer;" title="Total 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
                   
                   <!-- X-axis labels -->
@@ -8388,21 +8578,21 @@ async function renderDashboard() {
               <div style="padding: 20px; background: linear-gradient(to bottom, #f8fafc, #ffffff); border: 1px solid #e2e8f0; border-radius: 12px; margin-top: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.05);">
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 16px;">
                   <div style="display: flex; align-items: center; gap: 10px; padding: 8px; background: white; border-radius: 8px; border: 1px solid #e2e8f0;">
-                    <div style="width: 50px; height: 4px; background: #ef4444; border-radius: 2px;"></div>
+                    <div style="width: 50px; height: 4px; background: #D9362B; border-radius: 2px;"></div>
                     <div>
                       <div style="font-size: 14px; color: #1e293b; font-weight: 600;">P0</div>
                       <div style="font-size: 11px; color: #64748b;">Priority 0</div>
                     </div>
                   </div>
                   <div style="display: flex; align-items: center; gap: 10px; padding: 8px; background: white; border-radius: 8px; border: 1px solid #e2e8f0;">
-                    <div style="width: 50px; height: 4px; background: #3b82f6; border-radius: 2px;"></div>
+                    <div style="width: 50px; height: 4px; background: #2F6FE0; border-radius: 2px;"></div>
                     <div>
                       <div style="font-size: 14px; color: #1e293b; font-weight: 600;">P1</div>
                       <div style="font-size: 11px; color: #64748b;">Priority 1</div>
                     </div>
                   </div>
                   <div style="display: flex; align-items: center; gap: 10px; padding: 8px; background: white; border-radius: 8px; border: 1px solid #e2e8f0;">
-                    <div style="width: 50px; height: 4px; background: #10b981; border-radius: 2px;"></div>
+                    <div style="width: 50px; height: 4px; background: #22A05A; border-radius: 2px;"></div>
                     <div>
                       <div style="font-size: 14px; color: #1e293b; font-weight: 600;">P2</div>
                       <div style="font-size: 11px; color: #64748b;">Priority 2</div>
@@ -8501,14 +8691,14 @@ async function renderDashboard() {
                   <text x="${chartPadding.left / 2}" y="${chartHeight / 2}" text-anchor="middle" font-size="13" fill="#334155" font-weight="600" transform="rotate(-90 ${chartPadding.left / 2} ${chartHeight / 2})">Open Projects</text>
                   <text x="${chartWidth / 2}" y="${chartHeight - 15}" text-anchor="middle" font-size="13" fill="#334155" font-weight="600">Month</text>
 
-                  <path d="${generatePath(pointsP0)}" stroke="#ef4444" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="${generatePath(pointsP1)}" stroke="#3b82f6" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="${generatePath(pointsP2)}" stroke="#10b981" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="${generatePath(pointsP0)}" stroke="#D9362B" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="${generatePath(pointsP1)}" stroke="#2F6FE0" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="${generatePath(pointsP2)}" stroke="#22A05A" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
                   <path d="${generatePath(pointsTotal)}" stroke="#8b5cf6" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
 
-                  ${pointsP0.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#ef4444" stroke="white" stroke-width="2" title="P0 Open: ${p.value} (${p.label})"/>`).join('')}
-                  ${pointsP1.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#3b82f6" stroke="white" stroke-width="2" title="P1 Open: ${p.value} (${p.label})"/>`).join('')}
-                  ${pointsP2.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#10b981" stroke="white" stroke-width="2" title="P2 Open: ${p.value} (${p.label})"/>`).join('')}
+                  ${pointsP0.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#D9362B" stroke="white" stroke-width="2" title="P0 Open: ${p.value} (${p.label})"/>`).join('')}
+                  ${pointsP1.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#2F6FE0" stroke="white" stroke-width="2" title="P1 Open: ${p.value} (${p.label})"/>`).join('')}
+                  ${pointsP2.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#22A05A" stroke="white" stroke-width="2" title="P2 Open: ${p.value} (${p.label})"/>`).join('')}
                   ${pointsTotal.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#8b5cf6" stroke="white" stroke-width="2" title="Total Open: ${p.value} (${p.label})"/>`).join('')}
 
                   ${xAxisLabels.join('')}
@@ -8520,15 +8710,15 @@ async function renderDashboard() {
               <div style="margin-top: 16px; padding: 12px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0;">
                 <div style="display: flex; flex-wrap: wrap; gap: 16px; justify-content: center; margin-bottom: 8px;">
                   <div style="display: flex; align-items: center; gap: 8px;">
-                    <div style="width: 32px; height: 4px; background: #ef4444; border-radius: 2px;"></div>
+                    <div style="width: 32px; height: 4px; background: #D9362B; border-radius: 2px;"></div>
                     <span style="font-size: 12px; color: #1e293b; font-weight: 600;">P0</span>
                   </div>
                   <div style="display: flex; align-items: center; gap: 8px;">
-                    <div style="width: 32px; height: 4px; background: #3b82f6; border-radius: 2px;"></div>
+                    <div style="width: 32px; height: 4px; background: #2F6FE0; border-radius: 2px;"></div>
                     <span style="font-size: 12px; color: #1e293b; font-weight: 600;">P1</span>
                   </div>
                   <div style="display: flex; align-items: center; gap: 8px;">
-                    <div style="width: 32px; height: 4px; background: #10b981; border-radius: 2px;"></div>
+                    <div style="width: 32px; height: 4px; background: #22A05A; border-radius: 2px;"></div>
                     <span style="font-size: 12px; color: #1e293b; font-weight: 600;">P2</span>
                   </div>
                   <div style="display: flex; align-items: center; gap: 8px;">
@@ -8641,25 +8831,27 @@ async function renderDashboard() {
               const baseStyle = isHeader
                 ? 'padding: 8px 12px; font-weight: 600; text-align: center; border: 1px solid #e2e8f0;'
                 : 'padding: 8px 12px; font-weight: 600; text-align: center; border: 1px solid #e2e8f0;';
-              const bgStyle = bgColor ? ` background: ${bgColor};` : '';
-              const textColor = (whiteText || bgColor === '#475569') ? ' color: white;' : '';
+              // Aurora: calm cells; violet tint marks the total-age row.
+              const tone = { '#2F6FE0': ['var(--pm-subtle)', 'var(--pm-ink)'], '#22A05A': ['var(--pm-accent-tint)', 'var(--pm-accent-deep)'], '#475569': ['var(--pm-fill)', 'var(--pm-slate)'], '#fef3c7': ['#fff', ''] }[bgColor];
+              const bgStyle = tone ? ` background: ${tone[0]};` : (bgColor ? ` background: ${bgColor};` : '');
+              const textColor = tone ? (tone[1] ? ` color: ${tone[1]};` : '') : ((whiteText || bgColor === '#475569') ? ' color: white;' : '');
               return `<td style="${baseStyle}${bgStyle}${textColor}">${value}</td>`;
             };
 
             const renderDataCells = (deptData, rowType) => {
               if (!deptData) {
                 return `
-                  ${renderCell(0, false, rowType === 'qty' ? '#3b82f6' : '', rowType === 'qty')}
-                  ${renderCell(0, false, rowType === 'qty' ? '#3b82f6' : '', rowType === 'qty')}
-                  ${renderCell(0, false, rowType === 'qty' ? '#3b82f6' : '', rowType === 'qty')}
+                  ${renderCell(0, false, rowType === 'qty' ? '#2F6FE0' : '', rowType === 'qty')}
+                  ${renderCell(0, false, rowType === 'qty' ? '#2F6FE0' : '', rowType === 'qty')}
+                  ${renderCell(0, false, rowType === 'qty' ? '#2F6FE0' : '', rowType === 'qty')}
                 `;
               }
 
               if (rowType === 'qty') {
                 return `
-                  ${renderCell(deptData.P0?.qty || 0, false, '#3b82f6', true)}
-                  ${renderCell(deptData.P1?.qty || 0, false, '#3b82f6', true)}
-                  ${renderCell(deptData.P2?.qty || 0, false, '#3b82f6', true)}
+                  ${renderCell(deptData.P0?.qty || 0, false, '#2F6FE0', true)}
+                  ${renderCell(deptData.P1?.qty || 0, false, '#2F6FE0', true)}
+                  ${renderCell(deptData.P2?.qty || 0, false, '#2F6FE0', true)}
                 `;
               }
               if (rowType === 'rec-start') {
@@ -8678,9 +8870,9 @@ async function renderDashboard() {
               }
               if (rowType === 'total-age') {
                 return `
-                  ${renderCell(deptData.P0?.avgTotalAge || 0, false, '#10b981', true)}
-                  ${renderCell(deptData.P1?.avgTotalAge || 0, false, '#10b981', true)}
-                  ${renderCell(deptData.P2?.avgTotalAge || 0, false, '#10b981', true)}
+                  ${renderCell(deptData.P0?.avgTotalAge || 0, false, '#22A05A', true)}
+                  ${renderCell(deptData.P1?.avgTotalAge || 0, false, '#22A05A', true)}
+                  ${renderCell(deptData.P2?.avgTotalAge || 0, false, '#22A05A', true)}
                 `;
               }
               return '';
@@ -8700,12 +8892,12 @@ async function renderDashboard() {
                     <th rowspan="2" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; text-align: left; font-weight: 600;">Department</th>
                     <th rowspan="2" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; text-align: left; font-weight: 600;"></th>
                     <th rowspan="2" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; text-align: left; font-weight: 600;"></th>
-                    <th colspan="3" style="padding: 12px; background: #fbbf24; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: white;">Actual</th>
+                    <th colspan="3" style="padding: 12px; background: var(--pm-accent-tint); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-accent-deep);">Actual</th>
                   </tr>
                   <tr>
-                    <th style="padding: 8px; background: #fef3c7; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: #000;">P0</th>
-                    <th style="padding: 8px; background: #fef3c7; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: #000;">P1</th>
-                    <th style="padding: 8px; background: #fef3c7; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: #000;">P2</th>
+                    <th style="padding: 8px; background: var(--pm-subtle); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P0</th>
+                    <th style="padding: 8px; background: var(--pm-subtle); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P1</th>
+                    <th style="padding: 8px; background: var(--pm-subtle); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P2</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -8717,41 +8909,41 @@ async function renderDashboard() {
                       const deptName = dept.name;
 
                       return `
-                        <tr style="background: #fef3c7;">
+                        <tr style="background: #fff;">
                           <td rowspan="8" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; font-weight: 600; vertical-align: middle; text-align: left;">
                             <div class="clickable-chart-item" data-filter-type="departmentId" data-filter-value="${deptId}" data-title="Department: ${deptName}" data-initiative-type="Project" style="cursor: pointer; padding: 4px 8px; border-radius: 4px; transition: background 0.2s;" onmouseover="this.style.background='#e2e8f0'" onmouseout="this.style.background='transparent'">${deptName}</div>
                           </td>
                           <td rowspan="4" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; font-weight: 600; vertical-align: middle; text-align: center;">Open</td>
-                          <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #3b82f6; color: white;">Total Projects</td>
+                          <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-subtle); color: var(--pm-ink);">Total Projects</td>
                           ${renderDataCells(openData, 'qty')}
                         </tr>
-                        <tr style="background: #fef3c7;">
-                          <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Age Created→Start</td>
+                        <tr style="background: #fff;">
+                          <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Age Created→Start</td>
                           ${renderDataCells(openData, 'rec-start')}
                         </tr>
-                        <tr style="background: #fef3c7;">
-                          <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Cycle Time (Start→End)</td>
+                        <tr style="background: #fff;">
+                          <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Cycle Time (Start→End)</td>
                           ${renderDataCells(openData, 'start-live')}
                         </tr>
-                        <tr style="background: #fef3c7;">
-                          <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #10b981; color: white;">Avg Total Age</td>
+                        <tr style="background: #fff;">
+                          <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-accent-tint); color: var(--pm-accent-deep);">Avg Total Age</td>
                           ${renderDataCells(openData, 'total-age')}
                         </tr>
-                        <tr style="background: #fef3c7;">
+                        <tr style="background: #fff;">
                           <td rowspan="4" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; font-weight: 600; vertical-align: middle; text-align: center;">Closed</td>
-                          <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #3b82f6; color: white;">Total Projects</td>
+                          <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-subtle); color: var(--pm-ink);">Total Projects</td>
                           ${renderDataCells(liveData, 'qty')}
                         </tr>
-                        <tr style="background: #fef3c7;">
-                          <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Age Created→Start</td>
+                        <tr style="background: #fff;">
+                          <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Age Created→Start</td>
                           ${renderDataCells(liveData, 'rec-start')}
                         </tr>
-                        <tr style="background: #fef3c7;">
-                          <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Cycle Time (Start→End)</td>
+                        <tr style="background: #fff;">
+                          <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Cycle Time (Start→End)</td>
                           ${renderDataCells(liveData, 'start-live')}
                         </tr>
-                        <tr style="background: #fef3c7;">
-                          <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #10b981; color: white;">Avg Total Age</td>
+                        <tr style="background: #fff;">
+                          <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-accent-tint); color: var(--pm-accent-deep);">Avg Total Age</td>
                           ${renderDataCells(liveData, 'total-age')}
                         </tr>
                       `;
@@ -8856,13 +9048,13 @@ async function renderDashboard() {
 
     const statusColors = (status) => {
       const s = String(status || '').toUpperCase().trim();
-      if (s === 'LIVE') return { fill: '#3b82f6', stroke: '#1d4ed8', label: 'LIVE' };
-      if (s === 'ON TRACK') return { fill: '#10b981', stroke: '#065f46', label: 'ON TRACK' };
-      if (s === 'AT RISK') return { fill: '#f59e0b', stroke: '#b45309', label: 'AT RISK' };
-      if (s === 'DELAYED') return { fill: '#ef4444', stroke: '#991b1b', label: 'DELAYED' };
+      if (s === 'LIVE') return { fill: '#2F6FE0', stroke: '#1d4ed8', label: 'LIVE' };
+      if (s === 'ON TRACK') return { fill: '#22A05A', stroke: '#065f46', label: 'ON TRACK' };
+      if (s === 'AT RISK') return { fill: '#E08A00', stroke: '#b45309', label: 'AT RISK' };
+      if (s === 'DELAYED') return { fill: '#D9362B', stroke: '#991b1b', label: 'DELAYED' };
       if (s === 'NOT STARTED') return { fill: '#94a3b8', stroke: '#475569', label: 'NOT STARTED' };
       if (s === 'ON HOLD') return { fill: '#334155', stroke: '#0f172a', label: 'ON HOLD' };
-      return { fill: '#6366f1', stroke: '#4338ca', label: s || 'N/A' };
+      return { fill: '#D7263D', stroke: '#4338ca', label: s || 'N/A' };
     };
 
     const rowH = 52;     // more room for names (wrap/2 lines)
@@ -8997,10 +9189,10 @@ async function renderDashboard() {
           <span style="font-size: 12px; color:#334155; font-weight: 700;">Actual (solid)</span>
         </div>
         <div style="height: 14px; width: 1px; background: #cbd5e1;"></div>
-        <div style="display:flex; align-items:center; gap: 8px;"><span style="display:inline-block; width: 10px; height: 10px; background:#3b82f6; border-radius: 3px;"></span><span style="font-size: 12px; color:#334155; font-weight: 700;">LIVE</span></div>
-        <div style="display:flex; align-items:center; gap: 8px;"><span style="display:inline-block; width: 10px; height: 10px; background:#10b981; border-radius: 3px;"></span><span style="font-size: 12px; color:#334155; font-weight: 700;">ON TRACK</span></div>
-        <div style="display:flex; align-items:center; gap: 8px;"><span style="display:inline-block; width: 10px; height: 10px; background:#f59e0b; border-radius: 3px;"></span><span style="font-size: 12px; color:#334155; font-weight: 700;">AT RISK</span></div>
-        <div style="display:flex; align-items:center; gap: 8px;"><span style="display:inline-block; width: 10px; height: 10px; background:#ef4444; border-radius: 3px;"></span><span style="font-size: 12px; color:#334155; font-weight: 700;">DELAYED</span></div>
+        <div style="display:flex; align-items:center; gap: 8px;"><span style="display:inline-block; width: 10px; height: 10px; background:#2F6FE0; border-radius: 3px;"></span><span style="font-size: 12px; color:#334155; font-weight: 700;">LIVE</span></div>
+        <div style="display:flex; align-items:center; gap: 8px;"><span style="display:inline-block; width: 10px; height: 10px; background:#22A05A; border-radius: 3px;"></span><span style="font-size: 12px; color:#334155; font-weight: 700;">ON TRACK</span></div>
+        <div style="display:flex; align-items:center; gap: 8px;"><span style="display:inline-block; width: 10px; height: 10px; background:#E08A00; border-radius: 3px;"></span><span style="font-size: 12px; color:#334155; font-weight: 700;">AT RISK</span></div>
+        <div style="display:flex; align-items:center; gap: 8px;"><span style="display:inline-block; width: 10px; height: 10px; background:#D9362B; border-radius: 3px;"></span><span style="font-size: 12px; color:#334155; font-weight: 700;">DELAYED</span></div>
         <div style="display:flex; align-items:center; gap: 8px;"><span style="display:inline-block; width: 10px; height: 10px; background:#94a3b8; border-radius: 3px;"></span><span style="font-size: 12px; color:#334155; font-weight: 700;">NOT STARTED</span></div>
         <div style="display:flex; align-items:center; gap: 8px;"><span style="display:inline-block; width: 10px; height: 10px; background:#334155; border-radius: 3px;"></span><span style="font-size: 12px; color:#334155; font-weight: 700;">ON HOLD</span></div>
         <div class="muted" style="font-size: 12px;">Tip: hover a bar to see dates. Actual with dashed border means ongoing (no actual end date).</div>
@@ -9016,6 +9208,7 @@ async function renderDashboard() {
   renderProjectCalendar();
   
   // Add event listeners for clickable cards
+  mountDashboardNav(PROJECT_DASH_SECTIONS);
   document.querySelectorAll('.clickable-card[data-filter-type]').forEach(card => {
     card.addEventListener('click', () => {
       const filterType = card.dataset.filterType;
@@ -9195,7 +9388,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId, canPlan
   const members = team.filter((u) => u.id !== currentUserId);
   if (!members.length && !me) {
     container.innerHTML = `<div class="card pc-empty">
-      <h3>🗓️ Portfolio Calendar</h3>
+      <h3>Portfolio Calendar</h3>
       <p class="muted">Add your team members in <a href="#profile">My Profile</a> to see their projects and workload here.</p>
     </div>`;
     return;
@@ -9478,7 +9671,7 @@ async function renderPortfolioCalendar(container, { team, currentUserId, canPlan
 
         <div class="card pc-calendar">
           <div class="pc-cal-head">
-            <h3>🗓️ Portfolio Calendar</h3>
+            <h3>Portfolio Calendar</h3>
             <button type="button" class="pc-fullpage-btn" id="pc-fullpage" title="${fullPage ? 'Exit full page (Esc)' : 'Show the calendar on the whole screen'}">${fullPage ? '✕ Exit full page' : '⤢ Full page'}</button>
             <span class="muted">${!canPlan
               ? 'Your own projects and CRs (as IT PM or IT PIC). Click a card to view it; your Manager plans and assigns work here.'
@@ -9868,146 +10061,160 @@ async function renderUserDashboard() {
       ? teamMembers.map(m => ({ value: m.id, label: m.name || m.email }))
       : [];
     
+    const esc = (v) => escapeHtml(String(v ?? ''));
+    const slug = (v) => String(v || '').trim().toLowerCase().replace(/\s+/g, '-');
+    const todayStr = new Date().toISOString().slice(0, 10);
+    const dueLabel = (d) => {
+      if (!d) return { text: '', late: false };
+      const day = String(d).slice(0, 10);
+      const diff = Math.round((new Date(day) - new Date(todayStr)) / 86400000);
+      if (diff < 0) return { text: `Overdue ${-diff}d`, late: true };
+      if (diff === 0) return { text: 'Today', late: true };
+      if (diff === 1) return { text: 'Tomorrow', late: false };
+      return { text: new Date(day).toLocaleDateString('en-GB', { day: '2-digit', month: 'short' }), late: false };
+    };
+    const rail = (milestone, list, status) => {
+      const m = milestone === 'Live' ? 'Live (Warranty Period)' : milestone;
+      const idx = list.indexOf(m);
+      if (idx < 0) return '';
+      return `<span class="ms-rail" data-status="${esc(slug(status))}" aria-hidden="true">${list.map((_, i) => `<span class="${i < idx ? 'done' : i === idx ? 'current' : ''}"></span>`).join('')}</span>`;
+    };
+    const TASK_LABELS = { 'not started': 'Not Started', 'in progress': 'In Progress', 'at risk': 'At Risk', 'cancel': 'Cancelled', 'done': 'Done' };
+    const badge = (status) => {
+      if (!status) return '';
+      const label = TASK_LABELS[String(status).toLowerCase()] || status;
+      return `<span class="status-badge status-${esc(slug(status))}">${esc(label)}</span>`;
+    };
+    const prio = (p) => p ? `<span class="priority-badge priority-${esc(p)}">${esc(p)}</span>` : '';
+    const arrow = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"/></svg>';
+
+    const firstName = String(currentUserProfile?.name || currentUser?.name || '').trim().split(/\s+/)[0] || '';
+    const hour = new Date().getHours();
+    const greeting = hour < 11 ? 'Good morning' : hour < 15 ? 'Good afternoon' : 'Good evening';
+    const todayLong = new Date().toLocaleDateString('en-GB', { weekday: 'long', day: 'numeric', month: 'long', year: 'numeric' });
+    const urgent = Number(data.stats.urgentTodos || 0);
+
+    const kpi = (label, value, sub, href, accent, extraClass = '') => `
+      <a class="kpi-tile ${extraClass}" href="${href}" style="--kpi-accent:${accent}">
+        <span class="kpi-label">${label}<span class="kpi-dot" style="background:${accent}"></span></span>
+        <span class="kpi-value">${esc(value)}</span>
+        <span class="kpi-sub">${sub}</span>
+      </a>`;
+
+    const healthOrder = ['On Track', 'At Risk', 'Delayed', 'Not Started', 'On Hold', 'Live'];
+    const healthColor = { 'On Track': 'var(--st-ontrack-dot)', 'At Risk': 'var(--st-atrisk-dot)', 'Delayed': 'var(--st-delayed-dot)', 'Not Started': 'var(--st-notstarted-dot)', 'On Hold': 'var(--st-onhold-dot)', 'Live': 'var(--st-live-dot)' };
+    const healthCounts = {};
+    [...data.projects, ...data.crs].forEach((i) => {
+      const key = healthOrder.find((s) => s.toLowerCase() === String(i.status || '').toLowerCase());
+      if (key) healthCounts[key] = (healthCounts[key] || 0) + 1;
+    });
+    const healthTotal = Object.values(healthCounts).reduce((a, b) => a + b, 0);
+
+    const listPanel = (title, items, total, href, renderItem, emptyText) => `
+      <section class="panel">
+        <div class="panel-head"><h2>${title}</h2>${total ? `<a href="${href}">View all ${total}</a>` : ''}</div>
+        ${items.length === 0 ? `<p class="panel-empty">${emptyText}</p>` : `<div class="item-list">${items.slice(0, 6).map(renderItem).join('')}</div>`}
+        ${items.length > 6 ? `<a class="list-more" href="${href}">+ ${items.length - 6} more</a>` : ''}
+      </section>`;
+
+    const initiativeRow = (list) => (i) => `
+      <a class="item-row" href="#view/${esc(i.id)}">
+        <span class="item-top"><span class="item-id">${esc(deptName(i.departmentId) || '')}</span>${prio(i.priority)}${badge(i.status)}</span>
+        <span class="item-name">${esc(i.name)}</span>
+        <span class="item-foot">${rail(i.milestone, list, i.status)}<span class="item-ms">${esc(i.milestone || 'No milestone')}</span></span>
+      </a>`;
+
     const overviewHtml = `
       ${isManager && teamMemberOptions.length > 0 ? `
-      <div class="card" style="margin-bottom: 24px; padding: 20px;">
-        <div style="display: flex; gap: 24px; align-items: flex-end; flex-wrap: wrap;">
-          ${createFilterDropdown('filter-team-member', 'Team Member', teamMemberOptions, selectedTeamMemberId, 'updateUserDashboardFilters()')}
-          ${selectedTeamMemberId ? `
-            <button onclick="clearUserDashboardFilters()" style="padding: 10px 16px; background: var(--gray-100); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 14px; color: var(--text);">
-              Clear Filter
-            </button>
-          ` : ''}
-        </div>
+        <div class="page-actions" style="margin-bottom: 16px;">
+          <label class="team-filter">Viewing
+            <select id="filter-team-member" onchange="updateUserDashboardFilters()">
+              <option value="">My work</option>
+              ${teamMemberOptions.map(opt => `<option value="${esc(opt.value)}" ${opt.value === selectedTeamMemberId ? 'selected' : ''}>${esc(opt.label)}</option>`).join('')}
+            </select>
+          </label>
+          ${selectedTeamMemberId ? `<button type="button" class="btn-sm" onclick="clearUserDashboardFilters()">Show my work</button>` : ''}
+        </div>` : ''}
+
+      <section class="home-kpis" aria-label="Summary">
+        ${kpi('My projects', data.stats.totalProjects, `${data.projects.filter(p => /risk|delay/i.test(p.status || '')).length} need attention`, '#list', 'var(--st-progress-dot)')}
+        ${kpi('My CRs', data.stats.totalCRs, `${data.crs.filter(c => /uat|sit/i.test(c.milestone || '')).length} in testing`, '#crlist', 'var(--st-live-dot)')}
+        ${kpi('My tasks', data.stats.totalTasks || 0, `${(data.tasks || []).filter(t => String(t.status || '').toLowerCase() !== 'done').length} still open`, '#user-dashboard', 'var(--st-ontrack-dot)')}
+        ${kpi('To-do', data.stats.todosCount, 'Things waiting on you', '#user-dashboard', 'var(--st-atrisk-dot)')}
+        ${kpi('Urgent', urgent, 'P0 or overdue', '#user-dashboard', 'var(--pm-red)', urgent ? 'urgent' : '')}
+      </section>
+
+      <div class="home-grid" style="grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));">
+        <section class="panel" style="grid-column: span 2; min-width: 0;">
+          <div class="panel-head">
+            <h2>My to-do <span class="count-pill">${data.todos.length} open</span></h2>
+          </div>
+          ${data.todos.length === 0 ? '<p class="panel-empty">Nothing waiting on you. Nice work.</p>' : `
+          <ul class="todo-list">
+            ${data.todos.map(todo => { const due = dueLabel(todo.dueDate); return `
+              <li class="todo-item">
+                ${prio(todo.priority)}
+                <span class="todo-main">
+                  <span class="todo-name">${esc(todo.action || todo.name)}</span>
+                  <span class="todo-meta">${esc(todo.name)}</span>
+                </span>
+                ${badge(todo.status)}
+                ${due.text ? `<span class="todo-due ${due.late ? 'late' : ''}">${esc(due.text)}</span>` : ''}
+                <a class="btn todo-open" href="${esc(todo.link)}" aria-label="Open ${esc(todo.name)}">${arrow}</a>
+              </li>`; }).join('')}
+          </ul>`}
+        </section>
+
+        <section class="dark-card" style="display:flex; flex-direction:column; gap:16px;">
+          <div style="display:flex; align-items:baseline; justify-content:space-between; gap:12px;">
+            <h2 style="margin:0; font-size:17px;">Portfolio health</h2>
+            <span style="font-size:12px; color:#C9AEB4;">${healthTotal} initiatives</span>
+          </div>
+          ${healthTotal ? `
+          <div style="display:flex; height:10px; border-radius:999px; overflow:hidden; gap:3px;">
+            ${healthOrder.filter(s => healthCounts[s]).map(s => `<span style="flex:${healthCounts[s]} 1 0; background:${healthColor[s]};"></span>`).join('')}
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:10px 16px;">
+            ${healthOrder.map(s => `
+              <div style="display:flex; align-items:center; gap:8px; font-size:13px;">
+                <span style="width:8px; height:8px; border-radius:50%; background:${healthColor[s]};"></span>
+                <span style="flex-grow:1; color:#E0CDD1;">${s}</span>
+                <span style="font-family:var(--font-family-mono); color:#fff;">${healthCounts[s] || 0}</span>
+              </div>`).join('')}
+          </div>` : '<p style="margin:0; color:#C9AEB4; font-size:14px;">No projects or CRs assigned yet.</p>'}
+        </section>
       </div>
-      ` : ''}
-      <div class="kpis">
-        <div class="card">
-          <div class="muted">My Projects</div>
-          <div style="font-size:32px;font-weight:700;color: var(--brand)">${data.stats.totalProjects}</div>
-        </div>
-        <div class="card">
-          <div class="muted">My CRs</div>
-          <div style="font-size:32px;font-weight:700;color: var(--brand)">${data.stats.totalCRs}</div>
-        </div>
-        <div class="card">
-          <div class="muted">My Tasks</div>
-          <div style="font-size:32px;font-weight:700;color: var(--brand)">${data.stats.totalTasks || 0}</div>
-        </div>
-        <div class="card">
-          <div class="muted">To-Do Items</div>
-          <div style="font-size:32px;font-weight:700;color: var(--warning)">${data.stats.todosCount}</div>
-        </div>
-        <div class="card">
-          <div class="muted">Urgent</div>
-          <div style="font-size:32px;font-weight:700;color: var(--danger)">${data.stats.urgentTodos}</div>
-        </div>
-      </div>
-      
-      <div class="grid" style="margin-top:24px">
-        <div class="card" style="grid-column: 1 / -1">
-          <h3>📋 My To-Do List</h3>
-          <div style="margin-top: 16px;">
-            ${data.todos.length === 0 ? '<p class="muted">No to-do items. Great job!</p>' : ''}
-            ${data.todos.map(todo => `
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding: 12px; background: #f8fafc; border-radius: 6px; border-left: 4px solid ${todo.priority === 'P0' ? '#ef4444' : todo.priority === 'P1' ? '#f59e0b' : '#6366f1'};">
-                <div style="flex: 1;">
-                  <div style="font-weight: 600; margin-bottom: 4px;">
-                    <span class="priority-badge priority-${todo.priority}">${todo.priority}</span>
-                    <span style="margin-left: 8px;">${todo.name}</span>
-                  </div>
-                  <div style="font-size: 12px; color: var(--muted);">
-                    <span class="status-badge status-${todo.status?.replace(/\s+/g, '-')}">${todo.status}</span>
-                    <span style="margin-left: 8px;">${todo.action}</span>
-                    ${todo.dueDate ? `<span style="margin-left: 8px;">Due: ${todo.dueDate.slice(0, 10)}</span>` : ''}
-                  </div>
-                </div>
-                <a href="${todo.link}"><button>View</button></a>
-              </div>
-            `).join('')}
-          </div>
-        </div>
-      </div>
-      
-      <div class="grid" style="margin-top:24px">
-        <div class="card">
-          <h3>📊 My Projects</h3>
-          <div style="margin-top: 16px; max-height: 400px; overflow-y: auto;">
-            ${data.projects.length === 0 ? '<p class="muted">No projects assigned</p>' : ''}
-            ${data.projects.slice(0, 10).map(project => `
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding: 8px; background: #f8fafc; border-radius: 6px;">
-                <div style="flex: 1;">
-                  <div style="font-weight: 500; margin-bottom: 4px;">${project.name}</div>
-                  <div style="font-size: 12px; color: var(--muted);">
-                    <span class="status-badge status-${project.status?.replace(/\s+/g, '-')}">${project.status}</span>
-                    <span class="priority-badge priority-${project.priority}" style="margin-left: 8px;">${project.priority}</span>
-                    <span style="margin-left: 8px;">${project.milestone || 'N/A'}</span>
-                  </div>
-                </div>
-                <a href="#view/${project.id}"><button>View</button></a>
-              </div>
-            `).join('')}
-            ${data.projects.length > 10 ? `<p class="muted" style="text-align: center; margin-top: 8px;">... and ${data.projects.length - 10} more</p>` : ''}
-          </div>
-        </div>
-        
-        <div class="card">
-          <h3>📝 My Change Requests</h3>
-          <div style="margin-top: 16px; max-height: 400px; overflow-y: auto;">
-            ${data.crs.length === 0 ? '<p class="muted">No CRs assigned</p>' : ''}
-            ${data.crs.slice(0, 10).map(cr => `
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding: 8px; background: #f8fafc; border-radius: 6px;">
-                <div style="flex: 1;">
-                  <div style="font-weight: 500; margin-bottom: 4px;">${cr.name}</div>
-                  <div style="font-size: 12px; color: var(--muted);">
-                    <span class="status-badge status-${cr.status?.replace(/\s+/g, '-')}">${cr.status}</span>
-                    <span class="priority-badge priority-${cr.priority}" style="margin-left: 8px;">${cr.priority}</span>
-                    <span style="margin-left: 8px;">${cr.milestone || 'N/A'}</span>
-                  </div>
-                </div>
-                <a href="#view/${cr.id}"><button>View</button></a>
-              </div>
-            `).join('')}
-            ${data.crs.length > 10 ? `<p class="muted" style="text-align: center; margin-top: 8px;">... and ${data.crs.length - 10} more</p>` : ''}
-          </div>
-        </div>
-        
-        <div class="card">
-          <h3>✅ My Tasks</h3>
-          <div style="margin-top: 16px; max-height: 400px; overflow-y: auto;">
-            ${data.tasks && data.tasks.length === 0 ? '<p class="muted">No tasks assigned</p>' : ''}
-            ${data.tasks && data.tasks.slice(0, 10).map(task => `
-              <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; padding: 8px; background: #f8fafc; border-radius: 6px;">
-                <div style="flex: 1;">
-                  <div style="font-weight: 500; margin-bottom: 4px;">${task.name}</div>
-                  <div style="font-size: 12px; color: var(--muted);">
-                    <span class="status-badge status-${task.status?.replace(/\s+/g, '-')}">${task.status}</span>
-                    ${task.milestone ? `<span style="margin-left: 8px;">📍 ${task.milestone}</span>` : ''}
-                    ${task.endDate ? `<span style="margin-left: 8px;">Due: ${task.endDate.slice(0, 10)}</span>` : ''}
-                  </div>
-                  <div style="font-size: 11px; color: var(--muted); margin-top: 4px;">
-                    Project: ${task.initiativeName}
-                  </div>
-                </div>
-                <a href="#view/${task.initiativeId}"><button>View</button></a>
-              </div>
-            `).join('')}
-            ${data.tasks && data.tasks.length > 10 ? `<p class="muted" style="text-align: center; margin-top: 8px;">... and ${data.tasks.length - 10} more</p>` : ''}
-          </div>
-        </div>
+
+      <div class="home-grid">
+        ${listPanel('My projects', data.projects, data.projects.length, '#list', initiativeRow(PROJECT_MILESTONES), 'No projects assigned')}
+        ${listPanel('My change requests', data.crs, data.crs.length, '#crlist', initiativeRow(CR_MILESTONE_UI_OPTIONS), 'No CRs assigned')}
+        ${listPanel('My tasks', data.tasks || [], (data.tasks || []).length, '#user-dashboard', (t) => { const due = dueLabel(t.endDate); return `
+          <a class="item-row" href="#view/${esc(t.initiativeId)}">
+            <span class="item-top"><span class="item-id">${esc(t.initiativeName)}</span>${badge(t.status)}</span>
+            <span class="item-name">${esc(t.name)}</span>
+            <span class="item-foot"><span class="item-ms" style="flex-grow:1;">${esc(t.milestone || '')}</span>${due.text ? `<span class="todo-due ${due.late && String(t.status || '').toLowerCase() !== 'done' ? 'late' : ''}">${due.text === 'Today' ? 'Due today' : 'Due ' + esc(due.text)}</span>` : ''}</span>
+          </a>`; }, 'No tasks assigned')}
       </div>
     `;
-
+    const headerHtml = `
+      <div class="page-header">
+        <div class="page-header-text">
+          <span class="muted" style="font-size:13px;">${esc(todayLong)}</span>
+          <h1>${greeting}${firstName ? ', ' + esc(firstName) : ''}</h1>
+          <p>${urgent ? `${urgent} urgent item${urgent > 1 ? 's' : ''} need${urgent > 1 ? '' : 's'} you today.` : 'Nothing urgent today.'}</p>
+        </div>
+        <div class="tabs dash-tabs" role="tablist" style="margin:0;">
+          <button type="button" class="tab" role="tab" data-dash-tab="overview">Overview</button>
+          <button type="button" class="tab" role="tab" data-dash-tab="calendar">Portfolio Calendar</button>
+        </div>
+      </div>`;
     {
       // Second tab: Portfolio Calendar (remembered per browser). Managers see and plan
       // their team; everyone else sees their own work, read-only.
       let tab = 'overview';
       try { if (localStorage.getItem('pm_dashboard_tab') === 'calendar') tab = 'calendar'; } catch (_) { /* optional */ }
       app.innerHTML = `
-        <div class="tabs dash-tabs" role="tablist">
-          <button type="button" class="tab" role="tab" data-dash-tab="overview">🏠 Overview</button>
-          <button type="button" class="tab" role="tab" data-dash-tab="calendar">🗓️ Portfolio Calendar</button>
-        </div>
+        ${headerHtml}
         <div id="dash-overview">${overviewHtml}</div>
         <div id="dash-calendar"></div>`;
       let calendarLoaded = false;
@@ -10266,159 +10473,153 @@ async function renderAdminUsers() {
     const roles = [...new Set(users.map(u => u.role).filter(Boolean))].sort();
     const types = [...new Set(users.map(u => u.type).filter(Boolean))].sort();
     
-    // Function to render user rows
+    // Account state: one badge instead of three ✓/✗ columns
+    const accountState = (u) => (!u.active ? 'Inactive' : (!u.emailActivated ? 'Not activated' : 'Active'));
+    const stateClass = { 'Active': 'acct-active', 'Not activated': 'acct-pending', 'Inactive': 'acct-inactive' };
+    const pendingCount = users.filter((u) => accountState(u) !== 'Active').length;
+    const esc = (v) => escapeHtml(String(v ?? ''));
+    const typeLabel = (t) => (t ? String(t).replace(' (Individual Contributor)', '') : '');
+
     const renderUserRows = (filteredUsers) => {
-      return filteredUsers.map(user => `
-        <tr data-name="${(user.name || '').toLowerCase()}" data-email="${(user.email || '').toLowerCase()}" data-role="${(user.role || '').toLowerCase()}" data-type="${(user.type || '').toLowerCase()}" data-department="${user.departmentId || ''}">
-          <td>${user.name}</td>
-          <td>${user.email}</td>
-          <td>${user.role || 'N/A'}</td>
-          <td>${user.type || 'N/A'}</td>
-          <td>${nameById(LOOKUPS.departments, user.departmentId) || 'N/A'}</td>
-          <td>${user.active ? '✓' : '✗'}</td>
-          <td>${user.isAdmin ? '✓' : '✗'}</td>
-          <td>${user.emailActivated ? '✓' : '✗'}</td>
+      return filteredUsers.map(user => {
+        const st = accountState(user);
+        return `
+        <tr data-id="${esc(user.id)}" data-name="${esc((user.name || '').toLowerCase())}" data-email="${esc((user.email || '').toLowerCase())}" data-role="${esc((user.role || '').toLowerCase())}" data-type="${esc((user.type || '').toLowerCase())}" data-department="${esc(user.departmentId || '')}" data-state="${esc(st.toLowerCase())}">
           <td>
-            <button onclick="editUser('${user.id}')" style="margin-right: 8px;">Edit</button>
-            <button onclick="resetUserPassword('${user.id}', '${user.email}')" style="margin-right: 8px;" title="Reset Password">🔑</button>
-            ${user.id !== currentUser?.id ? `<button onclick="deleteUser('${user.id}')" style="color: var(--danger);">Delete</button>` : ''}
+            <button type="button" class="user-cell" onclick="editUser('${esc(user.id)}')">
+              <span class="avatar">${esc(initialsOf(user.name || user.email))}</span>
+              <span class="user-cell-text"><span class="user-cell-name">${esc(user.name)}</span><span class="user-cell-email">${esc(user.email)}</span></span>
+            </button>
           </td>
-        </tr>
-      `).join('');
+          <td><span class="stack-2"><span>${esc(user.role || '—')}</span><span class="muted">${esc(typeLabel(user.type) || '—')}</span></span></td>
+          <td>${esc(nameById(LOOKUPS.departments, user.departmentId) || '—')}</td>
+          <td><span class="acct-badges"><span class="acct-badge ${stateClass[st]}">${st}</span>${user.isAdmin ? '<span class="acct-badge acct-admin">Admin</span>' : ''}</span></td>
+          <td class="col-edit"><button type="button" class="btn-sm" onclick="editUser('${esc(user.id)}')">Edit</button></td>
+        </tr>`;
+      }).join('');
     };
-    
+
     app.innerHTML = `
-      <div class="card">
-        <h2>User Management</h2>
-        
-        <!-- Search and Create Button Row -->
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px; gap: 16px; flex-wrap: wrap;">
-          <button class="primary" onclick="showCreateUserForm()">+ Create User</button>
-          <div style="position: relative; flex: 1; max-width: 400px;">
-            <input type="text" id="user-search" placeholder="Search by name or email..." style="width: 100%; padding: 10px 16px 10px 40px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; box-sizing: border-box;" />
-            <span style="position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--muted);">🔍</span>
-          </div>
-          <div style="color: var(--muted); font-size: 14px;">
-            Total: <strong id="user-count" style="color: var(--text);">${users.length}</strong> users
-          </div>
-        </div>
-        
-        <!-- Filter Row -->
-        <div style="display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; align-items: center;">
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <label style="font-size: 14px; color: var(--muted); white-space: nowrap;">Role:</label>
-            <select id="filter-role" style="padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; min-width: 140px;">
-              <option value="">All Roles</option>
-              ${roles.map(r => `<option value="${r.toLowerCase()}">${r}</option>`).join('')}
+      ${pageHeader('Users', `<span id="user-count">${users.length}</span> users${pendingCount ? ` · ${pendingCount} not active yet` : ''}`, '<button type="button" class="primary" onclick="showCreateUserForm()"><svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Add user</button>')}
+
+      ${pendingCount ? `
+      <div class="notice-bar">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 8v5M12 16h.01"/></svg>
+        <span><strong>${pendingCount} account${pendingCount > 1 ? 's' : ''}</strong> ${pendingCount > 1 ? 'are' : 'is'} inactive or not activated yet. Sign-ups from other domains wait for your approval here.</span>
+        <button type="button" class="btn-sm" id="show-pending-btn">Review</button>
+      </div>` : ''}
+
+      <div class="split-layout">
+        <section class="panel split-main">
+          <div class="panel-toolbar">
+            <label class="search-input">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+              <span class="sr-only">Search users</span>
+              <input type="search" id="user-search" placeholder="Name or email" />
+            </label>
+            <select id="filter-role" aria-label="Role">
+              <option value="">All roles</option>
+              ${roles.map(r => `<option value="${esc(r.toLowerCase())}">${esc(r)}</option>`).join('')}
             </select>
-          </div>
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <label style="font-size: 14px; color: var(--muted); white-space: nowrap;">Type:</label>
-            <select id="filter-type" style="padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; min-width: 140px;">
-              <option value="">All Types</option>
-              ${types.map(t => `<option value="${t.toLowerCase()}">${t}</option>`).join('')}
+            <select id="filter-type" aria-label="Type">
+              <option value="">All types</option>
+              ${types.map(t => `<option value="${esc(t.toLowerCase())}">${esc(typeLabel(t))}</option>`).join('')}
             </select>
-          </div>
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <label style="font-size: 14px; color: var(--muted); white-space: nowrap;">Department:</label>
-            <select id="filter-department" style="padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; min-width: 160px;">
-              <option value="">All Departments</option>
-              ${LOOKUPS.departments.map(d => `<option value="${d.id}">${d.name}</option>`).join('')}
+            <select id="filter-department" aria-label="Department">
+              <option value="">All departments</option>
+              ${LOOKUPS.departments.map(d => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join('')}
             </select>
+            <select id="filter-state" aria-label="Account status">
+              <option value="">Any status</option>
+              <option value="active">Active</option>
+              <option value="not activated">Not activated</option>
+              <option value="inactive">Inactive</option>
+            </select>
+            <button type="button" id="clear-filters-btn" class="btn-sm btn-ghost" style="display:none;">Clear</button>
           </div>
-          <button id="clear-filters-btn" style="padding: 8px 16px; border: 1px solid var(--border); border-radius: 6px; font-size: 14px; background: var(--surface); cursor: pointer; display: none;">Clear Filters</button>
-        </div>
-        
-        <table>
-          <thead>
-            <tr>
-              <th>Name</th>
-              <th>Email</th>
-              <th>Role</th>
-              <th>Type</th>
-              <th>Department</th>
-              <th>Active</th>
-              <th>Admin</th>
-              <th>Email Activated</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody id="users-tbody">
-            ${renderUserRows(users)}
-          </tbody>
-        </table>
-      </div>
-      
-      <div id="user-form-modal" class="modal hidden">
-        <div class="modal-content">
-          <h3 id="user-form-title">Create User</h3>
-          <form id="user-form" class="form">
-            <input type="hidden" name="id" />
-            <div class="form-row">
-              <label>Name</label>
-              <input name="name" required />
+          <table class="users-table">
+            <thead>
+              <tr>
+                <th>User</th>
+                <th>Role · type</th>
+                <th>Department</th>
+                <th>Account</th>
+                <th><span class="sr-only">Edit</span></th>
+              </tr>
+            </thead>
+            <tbody id="users-tbody">
+              ${renderUserRows(users)}
+            </tbody>
+          </table>
+          <p class="panel-empty" id="users-empty" hidden>No users match these filters.</p>
+        </section>
+
+        <aside class="panel split-side" aria-label="User details">
+          <div class="drawer-empty" id="user-drawer-empty">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="9" cy="8" r="4"/><path d="M2 21a7 7 0 0 1 14 0M19 8v6M16 11h6"/></svg>
+            <p>Select a user to edit, or add a new one.</p>
+          </div>
+          <div id="user-form-modal" class="hidden">
+            <div class="drawer-head">
+              <span class="avatar avatar-lg" id="user-form-avatar"></span>
+              <span><h3 id="user-form-title">Add user</h3><span class="muted" id="user-form-sub"></span></span>
             </div>
-            <div class="form-row">
-              <label>Email</label>
-              <input name="email" type="email" required />
-            </div>
-            <div class="form-row">
-              <label>Password</label>
-              <input name="password" type="password" />
-              <small class="muted">Leave empty to keep existing password</small>
-            </div>
-            <div class="form-row">
-              <label>Role</label>
-              <select name="role">
-                <option value="">None</option>
-                <option value="IT">IT</option>
-                <option value="IT - PM">IT - PM</option>
-                <option value="Business User">Business User</option>
-                <option value="Admin">Admin</option>
-              </select>
-            </div>
-            <div class="form-row">
-              <label>Type</label>
-              <select name="type">
-                <option value="">None</option>
-                <option value="IC (Individual Contributor)">IC (Individual Contributor)</option>
-                <option value="Manager">Manager</option>
-                <option value="Management">Management</option>
-              </select>
-            </div>
-            <div class="form-row">
-              <label>Department</label>
-              <select name="departmentId">
-                <option value="">None</option>
-                ${LOOKUPS.departments.map(d => `<option value="${d.id}">${d.name}</option>`).join('')}
-              </select>
-            </div>
-            <div class="form-row" style="flex-direction: row; align-items: center; gap: 8px;">
-              <label style="margin: 0;">Active</label>
-              <input type="checkbox" name="active" checked style="width: auto; margin: 0;" />
-            </div>
-            <div class="form-row" style="flex-direction: row; align-items: center; gap: 8px;">
-              <label style="margin: 0;">Admin</label>
-              <input type="checkbox" name="isAdmin" style="width: auto; margin: 0;" />
-            </div>
-            <div class="form-row" style="flex-direction: row; align-items: center; gap: 8px;">
-              <label style="margin: 0;">Email Activated</label>
-              <input type="checkbox" name="emailActivated" checked style="width: auto; margin: 0;" />
-            </div>
-            <div style="display: flex; justify-content: flex-end; align-items: center; gap: 12px; margin-top: 16px;">
-              <button type="button" onclick="closeUserForm()" style="padding: 8px 24px; font-size: 14px; line-height: 1; margin: 0;">Cancel</button>
-              <button type="submit" style="padding: 8px 24px; font-size: 14px; line-height: 1; margin: 0; background: var(--color-primary-default); color: white; border-color: var(--color-primary-default);">Save</button>
-            </div>
-          </form>
-        </div>
+            <form id="user-form" class="form drawer-form">
+              <input type="hidden" name="id" />
+              <label class="field">Name<input name="name" required /></label>
+              <label class="field">Email<input name="email" type="email" required /></label>
+              <div class="field-grid">
+                <label class="field">Role
+                  <select name="role">
+                    <option value="">None</option>
+                    <option value="IT">IT</option>
+                    <option value="IT - PM">IT - PM</option>
+                    <option value="Business User">Business User</option>
+                    <option value="Admin">Admin</option>
+                  </select>
+                </label>
+                <label class="field">Type
+                  <select name="type">
+                    <option value="">None</option>
+                    <option value="IC (Individual Contributor)">IC</option>
+                    <option value="Manager">Manager</option>
+                    <option value="Management">Management</option>
+                  </select>
+                </label>
+              </div>
+              <label class="field">Department
+                <select name="departmentId">
+                  <option value="">None</option>
+                  ${LOOKUPS.departments.map(d => `<option value="${esc(d.id)}">${esc(d.name)}</option>`).join('')}
+                </select>
+              </label>
+              <div class="toggle-list">
+                <label class="toggle-row"><span><strong>Active</strong><small>Can sign in and appears in pickers</small></span><input type="checkbox" name="active" checked class="switch" /></label>
+                <label class="toggle-row"><span><strong>Admin</strong><small>Full access to the Admin section</small></span><input type="checkbox" name="isAdmin" class="switch" /></label>
+                <label class="toggle-row"><span><strong>Email verified</strong><small>Activation link confirmed</small></span><input type="checkbox" name="emailActivated" checked class="switch" /></label>
+              </div>
+              <label class="field">New password
+                <input name="password" type="password" autocomplete="new-password" minlength="6" />
+                <small class="muted" id="user-password-hint">Leave empty to keep the current password.</small>
+              </label>
+              <div class="drawer-foot">
+                <button type="button" class="btn-ghost danger-text" id="user-delete-btn" hidden>Delete user</button>
+                <span style="flex:1"></span>
+                <button type="button" onclick="closeUserForm()">Cancel</button>
+                <button type="submit" class="primary">Save</button>
+              </div>
+            </form>
+          </div>
+        </aside>
       </div>
     `;
-    
+
     // Search and Filter functionality
     const searchInput = document.getElementById('user-search');
     const filterRole = document.getElementById('filter-role');
     const filterType = document.getElementById('filter-type');
     const filterDepartment = document.getElementById('filter-department');
+    const filterState = document.getElementById('filter-state');
     const clearFiltersBtn = document.getElementById('clear-filters-btn');
     const usersTbody = document.getElementById('users-tbody');
     const userCount = document.getElementById('user-count');
@@ -10428,6 +10629,7 @@ async function renderAdminUsers() {
       const roleFilter = filterRole.value.toLowerCase();
       const typeFilter = filterType.value.toLowerCase();
       const deptFilter = filterDepartment.value;
+      const stateFilter = filterState.value;
       
       const rows = usersTbody.querySelectorAll('tr');
       let visibleCount = 0;
@@ -10447,7 +10649,8 @@ async function renderAdminUsers() {
         const typeMatch = !typeFilter || type === typeFilter;
         const deptMatch = !deptFilter || dept === deptFilter;
         
-        const matches = searchMatch && roleMatch && typeMatch && deptMatch;
+        const stateMatch = !stateFilter || (row.dataset.state || '') === stateFilter;
+        const matches = searchMatch && roleMatch && typeMatch && deptMatch && stateMatch;
         row.style.display = matches ? '' : 'none';
         if (matches) visibleCount++;
       });
@@ -10455,8 +10658,9 @@ async function renderAdminUsers() {
       userCount.textContent = visibleCount;
       
       // Show/hide clear filters button
-      const hasFilters = searchTerm || roleFilter || typeFilter || deptFilter;
-      clearFiltersBtn.style.display = hasFilters ? 'block' : 'none';
+      const hasFilters = searchTerm || roleFilter || typeFilter || deptFilter || stateFilter;
+      clearFiltersBtn.style.display = hasFilters ? '' : 'none';
+      document.getElementById('users-empty').hidden = visibleCount > 0;
     };
     
     // Add event listeners
@@ -10464,26 +10668,47 @@ async function renderAdminUsers() {
     filterRole.addEventListener('change', applyFilters);
     filterType.addEventListener('change', applyFilters);
     filterDepartment.addEventListener('change', applyFilters);
+    filterState.addEventListener('change', applyFilters);
+    document.getElementById('show-pending-btn')?.addEventListener('click', () => {
+      filterState.value = 'not activated';
+      applyFilters();
+      if (!usersTbody.querySelector('tr:not([style*="none"])')) { filterState.value = 'inactive'; applyFilters(); }
+    });
     
     clearFiltersBtn.addEventListener('click', () => {
       searchInput.value = '';
       filterRole.value = '';
       filterType.value = '';
       filterDepartment.value = '';
+      filterState.value = '';
       applyFilters();
     });
     
+    const openDrawer = (user) => {
+      document.getElementById('user-drawer-empty').hidden = true;
+      document.getElementById('user-form-modal').classList.remove('hidden');
+      document.getElementById('user-form-avatar').textContent = user ? initialsOf(user.name || user.email) : '+';
+      document.getElementById('user-form-sub').textContent = user ? user.email : 'They get an activation email if their domain allows it.';
+      document.getElementById('user-password-hint').textContent = user ? 'Leave empty to keep the current password.' : 'At least 6 characters.';
+      usersTbody.querySelectorAll('tr').forEach((r) => r.classList.toggle('is-selected', !!user && r.dataset.id === user.id));
+      const del = document.getElementById('user-delete-btn');
+      del.hidden = !user || user.id === currentUser?.id;
+      del.onclick = user ? () => deleteUser(user.id) : null;
+      if (window.innerWidth < 1100) document.querySelector('.split-side')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      document.querySelector('#user-form input[name="name"]')?.focus({ preventScroll: true });
+    };
+
     window.showCreateUserForm = () => {
-      document.getElementById('user-form-title').textContent = 'Create User';
+      document.getElementById('user-form-title').textContent = 'Add user';
       document.getElementById('user-form').reset();
       document.getElementById('user-form').querySelector('input[name="id"]').value = '';
-      document.getElementById('user-form-modal').classList.remove('hidden');
+      openDrawer(null);
     };
     
     window.editUser = async (userId) => {
       const user = users.find(u => u.id === userId);
       if (!user) return;
-      document.getElementById('user-form-title').textContent = 'Edit User';
+      document.getElementById('user-form-title').textContent = user.name || 'Edit user';
       const form = document.getElementById('user-form');
       form.querySelector('input[name="id"]').value = user.id;
       form.querySelector('input[name="name"]').value = user.name || '';
@@ -10494,7 +10719,8 @@ async function renderAdminUsers() {
       form.querySelector('input[name="active"]').checked = user.active;
       form.querySelector('input[name="isAdmin"]').checked = user.isAdmin;
       form.querySelector('input[name="emailActivated"]').checked = user.emailActivated;
-      document.getElementById('user-form-modal').classList.remove('hidden');
+      form.querySelector('input[name="password"]').value = '';
+      openDrawer(user);
     };
     
     window.deleteUser = async (userId) => {
@@ -10509,6 +10735,8 @@ async function renderAdminUsers() {
     
     window.closeUserForm = () => {
       document.getElementById('user-form-modal').classList.add('hidden');
+      document.getElementById('user-drawer-empty').hidden = false;
+      usersTbody.querySelectorAll('tr.is-selected').forEach((r) => r.classList.remove('is-selected'));
     };
     
     window.resetUserPassword = async (userId, userEmail) => {
@@ -10964,33 +11192,57 @@ async function renderDepartmentMaster() {
 
   const draw = () => {
     const totals = rows.reduce((t, r) => ({ p: t.p + r.projects, c: t.c + r.crs, u: t.u + r.users }), { p: 0, c: 0, u: 0 });
+    const num = (n) => n ? `<span class="num">${n}</span>` : '<span class="num zero">0</span>';
     app.innerHTML = `
-      <div class="card">
-        <div style="display:flex; justify-content: space-between; align-items:center; gap:12px; flex-wrap: wrap;">
-          <h2 style="margin:0;">🏢 Department Master</h2>
-          <button class="primary" id="dm-add">+ Add Department</button>
+      ${pageHeader('Departments', `The list behind every Department field. ${rows.length} departments, used by ${totals.p} projects, ${totals.c} CRs and ${totals.u} users.`, '<button type="button" class="primary" id="dm-add"><svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Add department</button>')}
+      <section class="panel">
+        <div class="panel-toolbar">
+          <label class="search-input" style="max-width:360px;">
+            <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+            <span class="sr-only">Search departments</span>
+            <input type="search" id="dm-search" placeholder="Search departments" autocomplete="off" />
+          </label>
+          <span class="muted" id="dm-count" style="margin-left:auto;">${rows.length} departments</span>
         </div>
-        <p class="muted" style="margin-top:8px;">Source of the “Department” field on projects, CRs and users, and of the
-          department filters and dashboards. ${rows.length} departments · used by ${totals.p} projects, ${totals.c} CRs and ${totals.u} users.</p>
-        <div style="margin-top: 16px; overflow:auto;">
-          <table class="dm-table">
-            <thead><tr><th>Department</th><th>Projects</th><th>CRs</th><th>Users</th><th class="dm-actions">Actions</th></tr></thead>
-            <tbody>
-              ${rows.map((r) => `
-                <tr data-id="${escapeHtml(r.id)}">
-                  <td><strong>${escapeHtml(r.shownAs)}</strong>${r.shownAs !== r.name ? ` <span class="muted dm-stored" title="Stored name; PM shows it as “${escapeHtml(r.shownAs)}”">(stored as “${escapeHtml(r.name)}”)</span>` : ''}</td>
-                  <td>${r.projects || '<span class="muted">0</span>'}</td>
-                  <td>${r.crs || '<span class="muted">0</span>'}</td>
-                  <td>${r.users || '<span class="muted">0</span>'}</td>
-                  <td class="dm-actions">
-                    <button type="button" class="dm-edit" data-id="${escapeHtml(r.id)}">Edit</button>
-                    <button type="button" class="dm-delete pm-delete-sm" data-id="${escapeHtml(r.id)}">Delete</button>
-                  </td>
-                </tr>`).join('') || '<tr><td colspan="5" class="muted">No departments yet.</td></tr>'}
-            </tbody>
-          </table>
-        </div>
-      </div>`;
+        <table class="dm-table">
+          <thead><tr><th>Department</th><th class="num-col">Projects</th><th class="num-col">CRs</th><th class="num-col">Users</th><th class="dm-actions"><span class="sr-only">Actions</span></th></tr></thead>
+          <tbody>
+            ${rows.map((r) => {
+              const used = r.projects + r.crs + r.users;
+              return `
+              <tr data-id="${escapeHtml(r.id)}" data-search="${escapeHtml(`${r.shownAs} ${r.name}`.toLowerCase())}">
+                <th scope="row">
+                  <span class="stack-2">
+                    <span class="dm-name">${escapeHtml(r.shownAs)}${used ? '' : ' <span class="tag-muted">Unused</span>'}</span>
+                    ${r.shownAs !== r.name ? `<span class="muted" title="Stored name; PM shows it as “${escapeHtml(r.shownAs)}”">Stored as “${escapeHtml(r.name)}”</span>` : ''}
+                  </span>
+                </th>
+                <td class="num-col">${num(r.projects)}</td>
+                <td class="num-col">${num(r.crs)}</td>
+                <td class="num-col">${num(r.users)}</td>
+                <td class="dm-actions">
+                  <button type="button" class="dm-edit btn-sm" data-id="${escapeHtml(r.id)}">Rename</button>
+                  <button type="button" class="dm-delete icon-btn icon-btn-sm danger-text" data-id="${escapeHtml(r.id)}" aria-label="Delete ${escapeHtml(r.shownAs)}" title="Delete"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
+                </td>
+              </tr>`;
+            }).join('') || '<tr><td colspan="5" class="muted">No departments yet.</td></tr>'}
+          </tbody>
+        </table>
+        <p class="panel-empty" id="dm-empty" hidden>No departments match your search.</p>
+      </section>`;
+
+    const dmSearch = app.querySelector('#dm-search');
+    dmSearch.oninput = () => {
+      const q = dmSearch.value.trim().toLowerCase();
+      let shown = 0;
+      app.querySelectorAll('.dm-table tbody tr[data-id]').forEach((tr) => {
+        const hit = !q || tr.dataset.search.includes(q);
+        tr.hidden = !hit;
+        if (hit) shown += 1;
+      });
+      app.querySelector('#dm-count').textContent = q ? `${shown} of ${rows.length} departments` : `${rows.length} departments`;
+      app.querySelector('#dm-empty').hidden = shown > 0;
+    };
 
     app.querySelector('#dm-add').onclick = async () => {
       const name = await textInputDialog({ title: 'Add department', label: 'Department name', confirmText: 'Add' });
@@ -11108,44 +11360,41 @@ async function renderMasterDwsApplications() {
 
   const escape = (s) => escapeHtml(String(s ?? ''));
 
-  app.innerHTML = `
-    <div class="card">
-      <div style="display:flex; justify-content: space-between; align-items:center; gap:12px; flex-wrap: wrap;">
-        <h2 style="margin:0;">Master DWS Application</h2>
-        <button class="primary" id="btn-add-dws">+ Add Application</button>
-      </div>
-      <p class="muted" style="margin-top:8px;">Used as the source for CR field “System Impacted”. Click a system name to view the CRs impacting it.</p>
+  const palette = ['#D7263D', '#16A6CF', '#22A05A', '#E08A00', '#D6343A', '#4A2630', '#2F6FE0', '#0A6C87'];
+  const colorFor = (name) => palette[[...String(name || '')].reduce((a, c) => a + c.charCodeAt(0), 0) % palette.length];
+  const abbr = (name) => {
+    const w = String(name || '').replace(/[()\-–]/g, ' ').split(/\s+/).filter(Boolean);
+    return (((w[0] || '')[0] || '') + ((w[1] || '')[0] || (w[0] || '')[1] || '')).toUpperCase();
+  };
+  const host = (u) => { try { return new URL(u).host; } catch (_) { return String(u || ''); } };
+  const linkify = (text) => escape(text).replace(/https?:\/\/[^\s<]+/g, (url) => `<a href="${url}" target="_blank" rel="noopener">${url}</a>`);
+  const extIcon = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 17 17 7M8 7h9v9"/></svg>';
+  let selectedId = apps[0]?.id || null;
 
-      <div style="margin-top: 16px; overflow:auto;">
-        <table>
-          <thead>
-            <tr>
-              <th>System Name</th>
-              <th>Production URL</th>
-              <th>Staging URL</th>
-              <th>Github URL</th>
-              <th>Deployment Steps</th>
-              <th>Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            ${apps.map(a => `
-              <tr>
-                <td><a href="#" data-action="view-crs" data-id="${escape(a.id)}" title="View CRs impacting this system" style="font-weight:700; text-decoration:none; color: var(--primary, #2563eb);">${escape(a.systemName)}</a></td>
-                <td>${a.productionUrl ? `<a href="${escape(a.productionUrl)}" target="_blank" rel="noopener">Open</a>` : '<span class="muted">-</span>'}</td>
-                <td>${a.stagingUrl ? `<a href="${escape(a.stagingUrl)}" target="_blank" rel="noopener">Open</a>` : '<span class="muted">-</span>'}</td>
-                <td style="max-width:320px;white-space:pre-wrap;word-break:break-word;">${a.githubUrl ? escape(String(a.githubUrl)) : '<span class="muted">-</span>'}</td>
-                <td style="max-width:360px;white-space:pre-wrap;word-break:break-word;">${a.deploymentSteps ? escape(String(a.deploymentSteps)) : '<span class="muted">-</span>'}</td>
-                <td style="white-space:nowrap;">
-                  <button data-action="edit" data-id="${escape(a.id)}">Edit</button>
-                  <button data-action="delete" data-id="${escape(a.id)}" style="color: var(--danger); margin-left: 8px;">Delete</button>
-                </td>
-              </tr>
-            `).join('')}
-          </tbody>
-        </table>
-      </div>
-    </div>
+  app.innerHTML = `
+    ${pageHeader('DWS Applications', 'The systems a CR can impact. Pick one to see its links, deployment steps and the CRs that touch it.', '<button type="button" class="primary" id="btn-add-dws"><svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Add application</button>')}
+    ${apps.length ? `
+    <div class="dws-layout">
+      <section class="dws-side">
+        <label class="search-input">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+          <span class="sr-only">Search applications</span>
+          <input type="search" id="dws-search" placeholder="Search ${apps.length} applications" autocomplete="off" />
+        </label>
+        <div class="dws-list" id="dws-list">
+          ${apps.map((a) => `
+            <button type="button" class="dws-item" data-id="${escape(a.id)}" data-search="${escape(String(a.systemName || '').toLowerCase())}" aria-pressed="false">
+              <span class="dws-icon" style="background:${colorFor(a.systemName)}">${escape(abbr(a.systemName))}</span>
+              <span class="dws-item-text">
+                <span class="dws-item-name">${escape(a.systemName)}</span>
+                <span class="dws-item-sub">${escape(a.productionUrl ? host(a.productionUrl) : 'No production URL')}</span>
+              </span>
+            </button>`).join('')}
+        </div>
+        <p class="panel-empty" id="dws-none" hidden>No applications match.</p>
+      </section>
+      <section class="panel dws-detail" id="dws-detail" aria-live="polite"></section>
+    </div>` : '<section class="panel"><p class="panel-empty">No applications yet. Add the first one.</p></section>'}
   `;
 
   const openModal = (mode, existing) => {
@@ -11305,37 +11554,106 @@ async function renderMasterDwsApplications() {
 
   document.getElementById('btn-add-dws').onclick = () => openModal('create');
 
-  app.querySelectorAll('a[data-action="view-crs"]').forEach((link) => {
-    link.onclick = (e) => {
-      e.preventDefault();
-      const existing = apps.find((a) => a.id === link.dataset.id);
-      if (existing) openCrsModal(existing);
-    };
-  });
+  const deleteApp = async (existing) => {
+    if (!(await confirmDialog(`Delete "${existing?.systemName || 'this application'}"?`, { title: 'Delete application', confirmText: 'Delete', danger: true }))) return;
+    try {
+      await fetchJSON(`/api/dws-applications/${existing.id}`, { method: 'DELETE' });
+      LOOKUPS = { users: [], departments: [], dwsApplications: [] };
+      await ensureLookups();
+      renderMasterDwsApplications();
+    } catch (err) {
+      notify(err.message || String(err));
+    }
+  };
 
-  app.querySelectorAll('button[data-action="edit"]').forEach((btn) => {
+  let detailSeq = 0;
+  const renderDetail = async (id) => {
+    const a = apps.find((x) => x.id === id);
+    const box = document.getElementById('dws-detail');
+    if (!a || !box) return;
+    selectedId = id;
+    const seq = ++detailSeq;
+    app.querySelectorAll('.dws-item').forEach((b) => {
+      const on = b.dataset.id === id;
+      b.classList.toggle('active', on);
+      b.setAttribute('aria-pressed', String(on));
+    });
+    const steps = String(a.deploymentSteps || '').split(/\r?\n/).map((x) => x.trim()).filter(Boolean)
+      .map((x) => x.replace(/^\d+[.)]\s*/, ''));
+    const linkCard = (label, url) => url
+      ? `<a class="dws-link" href="${escape(url)}" target="_blank" rel="noopener"><span class="dws-link-k">${label}${extIcon}</span><span class="dws-link-v">${escape(host(url))}</span></a>`
+      : `<div class="dws-link is-empty"><span class="dws-link-k">${label}</span><span class="dws-link-v">Not set</span></div>`;
+    const gh = String(a.githubUrl || '').trim();
+    const ghSingleUrl = /^https?:\/\/\S+$/.test(gh);
+    box.innerHTML = `
+      <div class="dws-detail-head">
+        <span class="dws-icon dws-icon-lg" style="background:${colorFor(a.systemName)}">${escape(abbr(a.systemName))}</span>
+        <div class="dws-detail-title">
+          <h2>${escape(a.systemName)}</h2>
+          <span class="muted">${escape(a.productionUrl ? host(a.productionUrl) : 'No production URL yet')}</span>
+        </div>
+        <button type="button" class="btn-sm" data-act="edit">Edit</button>
+        <button type="button" class="icon-btn icon-btn-sm danger-text" data-act="delete" aria-label="Delete ${escape(a.systemName)}" title="Delete"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
+      </div>
+      <div class="dws-links">
+        ${linkCard('Production', a.productionUrl)}
+        ${linkCard('Staging', a.stagingUrl)}
+        ${ghSingleUrl ? linkCard('GitHub', gh) : `<div class="dws-link ${gh ? '' : 'is-empty'}"><span class="dws-link-k">GitHub</span><span class="dws-link-v dws-wrap">${gh ? linkify(gh) : 'Not set'}</span></div>`}
+      </div>
+      <div class="dws-block">
+        <h3>Deployment steps</h3>
+        ${steps.length ? `<ol class="dws-steps">${steps.map((t, i) => `<li><span class="dws-step-n">${String(i + 1).padStart(2, '0')}</span><span class="dws-wrap">${linkify(t)}</span></li>`).join('')}</ol>` : '<p class="muted">No deployment steps written yet. Use Edit to add them.</p>'}
+      </div>
+      <div class="dws-block">
+        <div class="dws-block-head"><h3>CRs impacting this system</h3><button type="button" class="btn-sm" data-act="all-crs" hidden>See all</button></div>
+        <div id="dws-crs-inline"><p class="muted">Loading…</p></div>
+      </div>`;
+    box.querySelector('[data-act="edit"]').onclick = () => openModal('edit', a);
+    box.querySelector('[data-act="delete"]').onclick = () => deleteApp(a);
+    const allBtn = box.querySelector('[data-act="all-crs"]');
+    allBtn.onclick = () => openCrsModal(a);
+    try {
+      const result = await fetchJSON(`/api/dws-applications/${encodeURIComponent(a.id)}/crs`);
+      if (seq !== detailSeq) return;
+      const crs = Array.isArray(result?.items) ? result.items : [];
+      const host2 = box.querySelector('#dws-crs-inline');
+      if (!crs.length) { host2.innerHTML = '<p class="muted">No CRs impact this system yet.</p>'; return; }
+      allBtn.hidden = false;
+      allBtn.textContent = `See all ${crs.length}`;
+      host2.innerHTML = `<div class="dws-crs">${crs.slice(0, 6).map((c) => {
+        const st = String(c.status || '').toLowerCase().replace(/\s+/g, '-');
+        return `<a class="dws-cr" href="#view/${escape(c.id)}">
+          <span class="dws-cr-ticket">${escape(c.ticket || '—')}</span>
+          <span class="dws-cr-name">${escape(c.name || '—')}</span>
+          <span class="dws-cr-ms">${escape(normalizeCrMilestoneForDisplay({ type: 'CR', milestone: c.milestone }) || '')}</span>
+          ${c.status ? `<span class="status-badge status-${escape(st)}">${escape(c.status)}</span>` : ''}
+        </a>`;
+      }).join('')}</div>`;
+    } catch (err) {
+      if (seq === detailSeq) box.querySelector('#dws-crs-inline').innerHTML = `<div class="error">Failed to load CRs: ${escape(err.message || String(err))}</div>`;
+    }
+  };
+
+  app.querySelectorAll('.dws-item').forEach((btn) => {
     btn.onclick = () => {
-      const id = btn.dataset.id;
-      const existing = apps.find((a) => a.id === id);
-      openModal('edit', existing);
+      renderDetail(btn.dataset.id);
+      if (window.innerWidth < 900) document.getElementById('dws-detail')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     };
   });
-
-  app.querySelectorAll('button[data-action="delete"]').forEach((btn) => {
-    btn.onclick = async () => {
-      const id = btn.dataset.id;
-      const existing = apps.find((a) => a.id === id);
-      if (!(await confirmDialog(`Delete "${existing?.systemName || 'this application'}"?`, { title: 'Delete application', confirmText: 'Delete', danger: true }))) return;
-      try {
-        await fetchJSON(`/api/dws-applications/${id}`, { method: 'DELETE' });
-        LOOKUPS = { users: [], departments: [], dwsApplications: [] };
-        await ensureLookups();
-        renderMasterDwsApplications();
-      } catch (err) {
-        notify(err.message || String(err));
-      }
+  const dwsSearch = document.getElementById('dws-search');
+  if (dwsSearch) {
+    dwsSearch.oninput = () => {
+      const q = dwsSearch.value.trim().toLowerCase();
+      let shown = 0;
+      app.querySelectorAll('.dws-item').forEach((b) => {
+        const hit = !q || b.dataset.search.includes(q);
+        b.hidden = !hit;
+        if (hit) shown += 1;
+      });
+      document.getElementById('dws-none').hidden = shown > 0;
     };
-  });
+  }
+  if (selectedId) renderDetail(selectedId);
 }
 
 async function renderManagementDashboard() {
@@ -11356,7 +11674,7 @@ async function renderManagementDashboard() {
   }
 
   const status = String(data?.portfolioStatus || 'GREEN').toUpperCase();
-  const statusColor = status === 'RED' ? '#ef4444' : status === 'AMBER' ? '#f59e0b' : '#22c55e';
+  const statusColor = status === 'RED' ? '#D9362B' : status === 'AMBER' ? '#E08A00' : '#22A05A';
   const notes = data?.notes || { portfolioStatus: status, highlights: '', criticalAlerts: '', updatedAt: null, updatedBy: null };
 
   const crFunnel = Array.isArray(data?.crFunnel) ? data.crFunnel : [];
@@ -11365,7 +11683,21 @@ async function renderManagementDashboard() {
     ? data.itProjectLiveWarranty
     : (Array.isArray(data?.itProjectLived) ? data.itProjectLived : []);
   const itProjectFullyLive = Array.isArray(data?.itProjectFullyLive) ? data.itProjectFullyLive : [];
-  const itProjectNotStarted = Array.isArray(data?.itProjectNotStarted) ? data.itProjectNotStarted : [];
+  // Not Started shows only projects planned to start in the NEXT calendar quarter.
+  const nextQuarter = (() => {
+    const now = new Date();
+    const q = Math.floor(now.getMonth() / 3) + 1; // next quarter index (0-based months / 3, +1)
+    const start = new Date(now.getFullYear(), q * 3, 1);
+    const end = new Date(start.getFullYear(), start.getMonth() + 3, 0);
+    const iso = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    return { from: iso(start), to: iso(end), label: `Q${Math.floor(start.getMonth() / 3) + 1} ${start.getFullYear()}` };
+  })();
+  const itProjectNotStarted = (Array.isArray(data?.itProjectNotStarted) ? data.itProjectNotStarted : [])
+    .filter((row) => {
+      const d = String(row.planStartDate || '').slice(0, 10);
+      return d && d >= nextQuarter.from && d <= nextQuarter.to;
+    })
+    .sort((a, b) => String(a.planStartDate).localeCompare(String(b.planStartDate)));
   const topCrs = Array.isArray(data?.highPriorityCrs) ? data.highPriorityCrs : [];
   const risks = Array.isArray(data?.risksBlockers) ? data.risksBlockers : [];
 
@@ -11603,7 +11935,7 @@ async function renderManagementDashboard() {
       </div>
 
       <div class="mgmt-section mgmt-section--not-started">
-        <div class="mgmt-section-title">${mgmtTitleWithCount('IT PROJECT NOT STARTED', itProjectNotStarted.length)}</div>
+        <div class="mgmt-section-title">${mgmtTitleWithCount(`IT PROJECT NOT STARTED · STARTING ${nextQuarter.label}`, itProjectNotStarted.length)}</div>
           <div class="mgmt-body">
             <div class="mgmt-timeline">
               <table class="mgmt-simple-table" style="min-width:640px;">
@@ -11624,7 +11956,7 @@ async function renderManagementDashboard() {
                       <td>${escapeHtml(row.department || '—')}</td>
                       <td style="max-width:280px;white-space:pre-wrap;word-break:break-word;">${escapeHtml(row.businessImpact || '')}</td>
                     </tr>`).join('')
-                    : `<tr><td class="muted" colspan="4">No not-started projects found</td></tr>`}
+                    : `<tr><td class="muted" colspan="4">No projects planned to start in ${nextQuarter.label}</td></tr>`}
                 </tbody>
               </table>
             </div>
@@ -11707,7 +12039,7 @@ async function renderManagementDashboard() {
   }
   const applyStatusSelectStyle = () => {
     const v = String(statusSelect?.value || 'GREEN').toUpperCase();
-    const color = v === 'RED' ? '#ef4444' : v === 'AMBER' ? '#f59e0b' : '#22c55e';
+    const color = v === 'RED' ? '#D9362B' : v === 'AMBER' ? '#E08A00' : '#22A05A';
     if (statusSelect) {
       statusSelect.style.borderColor = color;
       statusSelect.style.color = color;
@@ -12088,7 +12420,7 @@ async function renderCRDashboard() {
                 <div style="width: 120px; font-size: 12px; color: var(--muted);">${item[labelKey] || 'N/A'}</div>
                 <div style="flex: 1; margin: 0 12px;">
                   <div style="background: #f1f5f9; height: 20px; border-radius: 10px; overflow: hidden;">
-                    <div style="background: ${statusClass.includes('live') ? '#3b82f6' : statusClass.includes('at-risk') ? '#f59e0b' : statusClass.includes('delayed') ? '#ef4444' : '#6366f1'}; height: 100%; width: ${percentage}%; transition: width 0.3s;"></div>
+                    <div style="background: ${statusClass.includes('live') ? '#2F6FE0' : statusClass.includes('at-risk') ? '#E08A00' : statusClass.includes('delayed') ? '#D9362B' : '#D7263D'}; height: 100%; width: ${percentage}%; transition: width 0.3s;"></div>
                   </div>
                 </div>
                 <div style="width: 40px; text-align: right; font-weight: 600; font-size: 14px;">${item[valueKey] || 0}</div>
@@ -12132,9 +12464,9 @@ async function renderCRDashboard() {
                 if (totalBreakdown > 0) {
                   breakdownHtml = `
                     <div style="margin-top: 6px; padding-left: 132px; font-size: 11px; color: var(--muted); display: flex; gap: 12px;">
-                      ${p0 > 0 ? `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #ef4444; border-radius: 2px;"></span>P0: ${p0}</span>` : ''}
-                      ${p1 > 0 ? `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #f59e0b; border-radius: 2px;"></span>P1: ${p1}</span>` : ''}
-                      ${p2 > 0 ? `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #10b981; border-radius: 2px;"></span>P2: ${p2}</span>` : ''}
+                      ${p0 > 0 ? `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #D9362B; border-radius: 2px;"></span>P0: ${p0}</span>` : ''}
+                      ${p1 > 0 ? `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #E08A00; border-radius: 2px;"></span>P1: ${p1}</span>` : ''}
+                      ${p2 > 0 ? `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: #22A05A; border-radius: 2px;"></span>P2: ${p2}</span>` : ''}
                     </div>
                   `;
                 }
@@ -12148,7 +12480,7 @@ async function renderCRDashboard() {
                         const count = breakdown[status] || 0;
                         if (count > 0) {
                           const statusClass = status.toLowerCase().replace(/\s+/g, '-');
-                          const color = statusClass.includes('live') ? '#3b82f6' : statusClass.includes('at-risk') ? '#f59e0b' : statusClass.includes('delayed') ? '#ef4444' : '#6366f1';
+                          const color = statusClass.includes('live') ? '#2F6FE0' : statusClass.includes('at-risk') ? '#E08A00' : statusClass.includes('delayed') ? '#D9362B' : '#D7263D';
                           return `<span style="display: inline-flex; align-items: center; gap: 4px;"><span style="display: inline-block; width: 8px; height: 8px; background: ${color}; border-radius: 2px;"></span>${status}: ${count}</span>`;
                         }
                         return '';
@@ -12165,7 +12497,7 @@ async function renderCRDashboard() {
                   <div style="width: 120px; font-size: 12px; color: var(--muted);">${item[labelKey] || 'N/A'}</div>
                   <div style="flex: 1; margin: 0 12px;">
                     <div style="background: #f1f5f9; height: 20px; border-radius: 10px; overflow: hidden;">
-                      <div style="background: ${statusClass.includes('live') ? '#3b82f6' : statusClass.includes('at-risk') ? '#f59e0b' : statusClass.includes('delayed') ? '#ef4444' : '#6366f1'}; height: 100%; width: ${percentage}%; transition: width 0.3s;"></div>
+                      <div style="background: ${statusClass.includes('live') ? '#2F6FE0' : statusClass.includes('at-risk') ? '#E08A00' : statusClass.includes('delayed') ? '#D9362B' : '#D7263D'}; height: 100%; width: ${percentage}%; transition: width 0.3s;"></div>
                     </div>
                   </div>
                   <div style="width: 40px; text-align: right; font-weight: 600; font-size: 14px;">${item[valueKey] || 0}</div>
@@ -12207,7 +12539,8 @@ async function renderCRDashboard() {
     .sort((a, b) => a.label.localeCompare(b.label));
   
   app.innerHTML = `
-    <div class="card" id="cr-dashboard-filters" style="margin-bottom: 24px; padding: 20px;">
+    ${pageHeader('CR Dashboard', 'Click any number to see the change requests behind it.')}
+    <div class="card filter-bar" id="cr-dashboard-filters" style="margin-bottom: 24px; padding: 20px;">
       <div style="display: flex; gap: 24px; align-items: flex-end; flex-wrap: wrap;">
         ${createFilterDropdown('filter-department-cr', 'Department', departmentOptions, selectedDepartmentId, 'updateCRDashboardFilters()')}
         ${createFilterDropdown('filter-itmanager-cr', 'IT Manager', itManagerOptions, selectedItManagerId, 'updateCRDashboardFilters()')}
@@ -12227,9 +12560,6 @@ async function renderCRDashboard() {
                 `).join('')}
               </div>
             </div>
-            <button type="button" onclick="updateCRDashboardFilters()" style="padding: 10px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; cursor: pointer; font-size: 14px; color: var(--text);">
-              Apply
-            </button>
           </div>
         </div>
         ${(selectedDepartmentId || selectedItManagerId || selectedSystemImpactedIds.length) ? `
@@ -12244,9 +12574,9 @@ async function renderCRDashboard() {
         <div class="muted">Total CRs</div>
         <div class="cr-kpi-value" style="color: var(--brand)">${d.crs || 0}</div>
       </div>
-      <div class="card clickable-card" data-filter-type="status" data-filter-value="LIVE" data-title="Live CRs" data-initiative-type="CR" style="cursor: pointer; border-left: 3px solid #3b82f6;">
+      <div class="card clickable-card" data-filter-type="status" data-filter-value="LIVE" data-title="Live CRs" data-initiative-type="CR" style="cursor: pointer; border-left: 3px solid #2F6FE0;">
         <div class="muted">Live CRs</div>
-        <div class="cr-kpi-value" style="color: #3b82f6">${d.liveCount || 0}</div>
+        <div class="cr-kpi-value" style="color: #2F6FE0">${d.liveCount || 0}</div>
         <div class="muted cr-kpi-sub" style="margin-top: 6px; line-height: 1.4;">
           <span title="Status Live, milestone Live (Warranty Period)">Warranty: ${d.liveWarrantyCount ?? 0}</span>
           <span style="margin: 0 6px;">·</span>
@@ -12280,9 +12610,11 @@ async function renderCRDashboard() {
       </div>
     </div>
     <div class="grid" style="margin-top:24px">
-      ${createBarChartWithBreakdown(d.byStatus || [], 'status', 'c', 'Status Distribution', d.byStatusBreakdown, 'priority', true)}
-      ${createBarChartWithBreakdown(d.byPriority || [], 'priority', 'c', 'Priority Distribution', d.byPriorityBreakdown, 'status', true)}
-      ${createBarChartWithBreakdown(d.byMilestone || [], 'milestone', 'c', 'Milestone Distribution', d.byMilestoneBreakdown, 'priority', true)}
+      ${distributionSwitchHtml([
+        createBarChartWithBreakdown(d.byStatus || [], 'status', 'c', 'Status Distribution', d.byStatusBreakdown, 'priority', true),
+        createBarChartWithBreakdown(d.byPriority || [], 'priority', 'c', 'Priority Distribution', d.byPriorityBreakdown, 'status', true),
+        createBarChartWithBreakdown(d.byMilestone || [], 'milestone', 'c', 'Milestone Distribution', d.byMilestoneBreakdown, 'priority', true),
+      ])}
     </div>
     <div class="grid" style="margin-top:24px">
       <div class="card" style="grid-column: 1 / -1;">
@@ -12297,8 +12629,10 @@ async function renderCRDashboard() {
               const baseStyle = isHeader 
                 ? 'padding: 8px 12px; font-weight: 600; text-align: center; border: 1px solid #e2e8f0;'
                 : 'padding: 8px 12px; font-weight: 600; text-align: center; border: 1px solid #e2e8f0;';
-              const bgStyle = bgColor ? ` background: ${bgColor};` : '';
-              const textColor = (whiteText || bgColor === '#475569') ? ' color: white;' : '';
+              // Aurora: calm cells; violet tint marks the total-age row.
+              const tone = { '#2F6FE0': ['var(--pm-subtle)', 'var(--pm-ink)'], '#22A05A': ['var(--pm-accent-tint)', 'var(--pm-accent-deep)'], '#475569': ['var(--pm-fill)', 'var(--pm-slate)'], '#fef3c7': ['#fff', ''] }[bgColor];
+              const bgStyle = tone ? ` background: ${tone[0]};` : (bgColor ? ` background: ${bgColor};` : '');
+              const textColor = tone ? (tone[1] ? ` color: ${tone[1]};` : '') : ((whiteText || bgColor === '#475569') ? ' color: white;' : '');
               return `<td style="${baseStyle}${bgStyle}${textColor}">${value}</td>`;
             };
             
@@ -12310,12 +12644,12 @@ async function renderCRDashboard() {
               if (rowType === 'qty') {
                 // Total CRs - blue background for both Actual and Forecast
                 cells = `
-                  ${renderCell(actual.P0?.qty || 0, false, '#3b82f6', true)}
-                  ${renderCell(actual.P1?.qty || 0, false, '#3b82f6', true)}
-                  ${renderCell(actual.P2?.qty || 0, false, '#3b82f6', true)}
-                  ${renderCell(forecast.P0?.qty || 0, false, '#3b82f6', true)}
-                  ${renderCell(forecast.P1?.qty || 0, false, '#3b82f6', true)}
-                  ${renderCell(forecast.P2?.qty || 0, false, '#3b82f6', true)}
+                  ${renderCell(actual.P0?.qty || 0, false, '#2F6FE0', true)}
+                  ${renderCell(actual.P1?.qty || 0, false, '#2F6FE0', true)}
+                  ${renderCell(actual.P2?.qty || 0, false, '#2F6FE0', true)}
+                  ${renderCell(forecast.P0?.qty || 0, false, '#2F6FE0', true)}
+                  ${renderCell(forecast.P1?.qty || 0, false, '#2F6FE0', true)}
+                  ${renderCell(forecast.P2?.qty || 0, false, '#2F6FE0', true)}
                 `;
               } else if (rowType === 'rec-start') {
                 cells = `
@@ -12338,12 +12672,12 @@ async function renderCRDashboard() {
               } else if (rowType === 'total-age') {
                 // Avg Total Age - green background for both Actual and Forecast
                 cells = `
-                  ${renderCell(actual.P0?.avgTotalAge || 0, false, '#10b981', true)}
-                  ${renderCell(actual.P1?.avgTotalAge || 0, false, '#10b981', true)}
-                  ${renderCell(actual.P2?.avgTotalAge || 0, false, '#10b981', true)}
-                  ${renderCell(forecast.P0?.avgTotalAge || 0, false, '#10b981', true)}
-                  ${renderCell(forecast.P1?.avgTotalAge || 0, false, '#10b981', true)}
-                  ${renderCell(forecast.P2?.avgTotalAge || 0, false, '#10b981', true)}
+                  ${renderCell(actual.P0?.avgTotalAge || 0, false, '#22A05A', true)}
+                  ${renderCell(actual.P1?.avgTotalAge || 0, false, '#22A05A', true)}
+                  ${renderCell(actual.P2?.avgTotalAge || 0, false, '#22A05A', true)}
+                  ${renderCell(forecast.P0?.avgTotalAge || 0, false, '#22A05A', true)}
+                  ${renderCell(forecast.P1?.avgTotalAge || 0, false, '#22A05A', true)}
+                  ${renderCell(forecast.P2?.avgTotalAge || 0, false, '#22A05A', true)}
                 `;
               }
               
@@ -12356,51 +12690,51 @@ async function renderCRDashboard() {
                   <tr>
                     <th rowspan="2" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; text-align: left; font-weight: 600;"></th>
                     <th rowspan="2" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; text-align: left; font-weight: 600;"></th>
-                    <th colspan="3" style="padding: 12px; background: #fbbf24; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: white;">Actual</th>
-                    <th colspan="3" style="padding: 12px; background: #475569; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: white;">Forecast</th>
+                    <th colspan="3" style="padding: 12px; background: var(--pm-accent-tint); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-accent-deep);">Actual</th>
+                    <th colspan="3" style="padding: 12px; background: var(--pm-fill); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">Forecast</th>
                   </tr>
                   <tr>
-                    <th style="padding: 8px; background: #fef3c7; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: #000;">P0</th>
-                    <th style="padding: 8px; background: #fef3c7; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: #000;">P1</th>
-                    <th style="padding: 8px; background: #fef3c7; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: #000;">P2</th>
-                    <th style="padding: 8px; background: #475569; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: white;">P0</th>
-                    <th style="padding: 8px; background: #475569; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: white;">P1</th>
-                    <th style="padding: 8px; background: #475569; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: white;">P2</th>
+                    <th style="padding: 8px; background: var(--pm-subtle); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P0</th>
+                    <th style="padding: 8px; background: var(--pm-subtle); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P1</th>
+                    <th style="padding: 8px; background: var(--pm-subtle); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P2</th>
+                    <th style="padding: 8px; background: var(--pm-fill); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P0</th>
+                    <th style="padding: 8px; background: var(--pm-fill); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P1</th>
+                    <th style="padding: 8px; background: var(--pm-fill); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P2</th>
                   </tr>
                 </thead>
                 <tbody>
-                  <tr style="background: #fef3c7;">
+                  <tr style="background: #fff;">
                     <td rowspan="4" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; font-weight: 600; vertical-align: middle; text-align: center;">Open</td>
-                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #3b82f6; color: white;">Total CRs</td>
+                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-subtle); color: var(--pm-ink);">Total CRs</td>
                     ${renderDataCells(open, 'qty')}
                   </tr>
-                  <tr style="background: #fef3c7;">
-                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Age Created→Start</td>
+                  <tr style="background: #fff;">
+                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Age Created→Start</td>
                     ${renderDataCells(open, 'rec-start')}
                   </tr>
-                  <tr style="background: #fef3c7;">
-                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Cycle Time (Start→End)</td>
+                  <tr style="background: #fff;">
+                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Cycle Time (Start→End)</td>
                     ${renderDataCells(open, 'start-live')}
                   </tr>
-                  <tr style="background: #fef3c7;">
-                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #10b981; color: white;">Avg Total Age</td>
+                  <tr style="background: #fff;">
+                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-accent-tint); color: var(--pm-accent-deep);">Avg Total Age</td>
                     ${renderDataCells(open, 'total-age')}
                   </tr>
-                  <tr style="background: #fef3c7;">
+                  <tr style="background: #fff;">
                     <td rowspan="4" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; font-weight: 600; vertical-align: middle; text-align: center;">Closed</td>
-                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #3b82f6; color: white;">Total CRs</td>
+                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-subtle); color: var(--pm-ink);">Total CRs</td>
                     ${renderDataCells(live, 'qty')}
                   </tr>
-                  <tr style="background: #fef3c7;">
-                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Age Created→Start</td>
+                  <tr style="background: #fff;">
+                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Age Created→Start</td>
                     ${renderDataCells(live, 'rec-start')}
                   </tr>
-                  <tr style="background: #fef3c7;">
-                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Cycle Time (Start→End)</td>
+                  <tr style="background: #fff;">
+                    <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Cycle Time (Start→End)</td>
                     ${renderDataCells(live, 'start-live')}
                   </tr>
-                  <tr style="background: #fef3c7;">
-                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #10b981; color: white;">Avg Total Age</td>
+                  <tr style="background: #fff;">
+                    <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-accent-tint); color: var(--pm-accent-deep);">Avg Total Age</td>
                     ${renderDataCells(live, 'total-age')}
                   </tr>
                 </tbody>
@@ -12490,9 +12824,9 @@ async function renderCRDashboard() {
                   <text x="${chartWidth / 2}" y="${chartHeight - 15}" text-anchor="middle" font-size="13" fill="#334155" font-weight="600">Date (Month)</text>
                   
                   <!-- Moving Average Lines (solid, more prominent) -->
-                  <path d="${generatePath(pointsP0MA)}" stroke="#ef4444" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="${generatePath(pointsP1MA)}" stroke="#3b82f6" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="${generatePath(pointsP2MA)}" stroke="#10b981" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="${generatePath(pointsP0MA)}" stroke="#D9362B" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="${generatePath(pointsP1MA)}" stroke="#2F6FE0" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="${generatePath(pointsP2MA)}" stroke="#22A05A" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
                   <path d="${generatePath(pointsTotalMA)}" stroke="#8b5cf6" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
                   
                   <!-- Benchmark Line (horizontal at value 7) -->
@@ -12507,9 +12841,9 @@ async function renderCRDashboard() {
                   })()}
                   
                   <!-- Data points for Moving Average -->
-                  ${pointsP0MA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#ef4444" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="P0" style="cursor: pointer;" title="P0 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
-                  ${pointsP1MA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#3b82f6" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="P1" style="cursor: pointer;" title="P1 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
-                  ${pointsP2MA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#10b981" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="P2" style="cursor: pointer;" title="P2 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
+                  ${pointsP0MA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#D9362B" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="P0" style="cursor: pointer;" title="P0 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
+                  ${pointsP1MA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#2F6FE0" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="P1" style="cursor: pointer;" title="P1 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
+                  ${pointsP2MA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#22A05A" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="P2" style="cursor: pointer;" title="P2 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
                   ${pointsTotalMA.map(p => `<circle cx="${p.x}" cy="${p.y}" r="5" fill="#8b5cf6" stroke="white" stroke-width="2" class="chart-point-ma" data-value="${p.value.toFixed(1)}" data-month="${p.month}" data-priority="Total" style="cursor: pointer;" title="Total 2M Avg: ${p.value.toFixed(1)} (${p.month})"/>`).join('')}
                   
                   <!-- X-axis labels -->
@@ -12527,21 +12861,21 @@ async function renderCRDashboard() {
               <div style="padding: 20px; background: linear-gradient(to bottom, #f8fafc, #ffffff); border: 1px solid #e2e8f0; border-radius: 12px; margin-top: 20px; box-shadow: 0 1px 4px rgba(0,0,0,0.05);">
                 <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 16px; margin-bottom: 16px;">
                   <div style="display: flex; align-items: center; gap: 10px; padding: 8px; background: white; border-radius: 8px; border: 1px solid #e2e8f0;">
-                    <div style="width: 50px; height: 4px; background: #ef4444; border-radius: 2px;"></div>
+                    <div style="width: 50px; height: 4px; background: #D9362B; border-radius: 2px;"></div>
                     <div>
                       <div style="font-size: 14px; color: #1e293b; font-weight: 600;">P0</div>
                       <div style="font-size: 11px; color: #64748b;">Priority 0</div>
                     </div>
                   </div>
                   <div style="display: flex; align-items: center; gap: 10px; padding: 8px; background: white; border-radius: 8px; border: 1px solid #e2e8f0;">
-                    <div style="width: 50px; height: 4px; background: #3b82f6; border-radius: 2px;"></div>
+                    <div style="width: 50px; height: 4px; background: #2F6FE0; border-radius: 2px;"></div>
                     <div>
                       <div style="font-size: 14px; color: #1e293b; font-weight: 600;">P1</div>
                       <div style="font-size: 11px; color: #64748b;">Priority 1</div>
                     </div>
                   </div>
                   <div style="display: flex; align-items: center; gap: 10px; padding: 8px; background: white; border-radius: 8px; border: 1px solid #e2e8f0;">
-                    <div style="width: 50px; height: 4px; background: #10b981; border-radius: 2px;"></div>
+                    <div style="width: 50px; height: 4px; background: #22A05A; border-radius: 2px;"></div>
                     <div>
                       <div style="font-size: 14px; color: #1e293b; font-weight: 600;">P2</div>
                       <div style="font-size: 11px; color: #64748b;">Priority 2</div>
@@ -12650,14 +12984,14 @@ async function renderCRDashboard() {
                   <text x="${chartPadding.left / 2}" y="${chartHeight / 2}" text-anchor="middle" font-size="13" fill="#334155" font-weight="600" transform="rotate(-90 ${chartPadding.left / 2} ${chartHeight / 2})">Open CRs</text>
                   <text x="${chartWidth / 2}" y="${chartHeight - 15}" text-anchor="middle" font-size="13" fill="#334155" font-weight="600">Week</text>
 
-                  <path d="${generatePath(pointsP0)}" stroke="#ef4444" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="${generatePath(pointsP1)}" stroke="#3b82f6" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
-                  <path d="${generatePath(pointsP2)}" stroke="#10b981" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="${generatePath(pointsP0)}" stroke="#D9362B" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="${generatePath(pointsP1)}" stroke="#2F6FE0" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+                  <path d="${generatePath(pointsP2)}" stroke="#22A05A" stroke-width="3" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
                   <path d="${generatePath(pointsTotal)}" stroke="#8b5cf6" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
 
-                  ${pointsP0.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#ef4444" stroke="white" stroke-width="2" title="P0 Open: ${p.value} (${p.label})"/>`).join('')}
-                  ${pointsP1.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#3b82f6" stroke="white" stroke-width="2" title="P1 Open: ${p.value} (${p.label})"/>`).join('')}
-                  ${pointsP2.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#10b981" stroke="white" stroke-width="2" title="P2 Open: ${p.value} (${p.label})"/>`).join('')}
+                  ${pointsP0.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#D9362B" stroke="white" stroke-width="2" title="P0 Open: ${p.value} (${p.label})"/>`).join('')}
+                  ${pointsP1.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#2F6FE0" stroke="white" stroke-width="2" title="P1 Open: ${p.value} (${p.label})"/>`).join('')}
+                  ${pointsP2.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#22A05A" stroke="white" stroke-width="2" title="P2 Open: ${p.value} (${p.label})"/>`).join('')}
                   ${pointsTotal.map(p => `<circle cx="${p.x}" cy="${p.y}" r="4.5" fill="#8b5cf6" stroke="white" stroke-width="2" title="Total Open: ${p.value} (${p.label})"/>`).join('')}
                   
 
@@ -12670,15 +13004,15 @@ async function renderCRDashboard() {
               <div style="margin-top: 16px; padding: 12px; background: #f8fafc; border-radius: 8px; border: 1px solid #e2e8f0;">
                 <div style="display: flex; flex-wrap: wrap; gap: 16px; justify-content: center; margin-bottom: 8px;">
                   <div style="display: flex; align-items: center; gap: 8px;">
-                    <div style="width: 32px; height: 4px; background: #ef4444; border-radius: 2px;"></div>
+                    <div style="width: 32px; height: 4px; background: #D9362B; border-radius: 2px;"></div>
                     <span style="font-size: 12px; color: #1e293b; font-weight: 600;">P0</span>
                   </div>
                   <div style="display: flex; align-items: center; gap: 8px;">
-                    <div style="width: 32px; height: 4px; background: #3b82f6; border-radius: 2px;"></div>
+                    <div style="width: 32px; height: 4px; background: #2F6FE0; border-radius: 2px;"></div>
                     <span style="font-size: 12px; color: #1e293b; font-weight: 600;">P1</span>
                   </div>
                   <div style="display: flex; align-items: center; gap: 8px;">
-                    <div style="width: 32px; height: 4px; background: #10b981; border-radius: 2px;"></div>
+                    <div style="width: 32px; height: 4px; background: #22A05A; border-radius: 2px;"></div>
                     <span style="font-size: 12px; color: #1e293b; font-weight: 600;">P2</span>
                   </div>
                   <div style="display: flex; align-items: center; gap: 8px;">
@@ -12798,17 +13132,19 @@ async function renderCRDashboard() {
               const baseStyle = isHeader 
                 ? 'padding: 8px 12px; font-weight: 600; text-align: center; border: 1px solid #e2e8f0;'
                 : 'padding: 8px 12px; font-weight: 600; text-align: center; border: 1px solid #e2e8f0;';
-              const bgStyle = bgColor ? ` background: ${bgColor};` : '';
-              const textColor = (whiteText || bgColor === '#475569') ? ' color: white;' : '';
+              // Aurora: calm cells; violet tint marks the total-age row.
+              const tone = { '#2F6FE0': ['var(--pm-subtle)', 'var(--pm-ink)'], '#22A05A': ['var(--pm-accent-tint)', 'var(--pm-accent-deep)'], '#475569': ['var(--pm-fill)', 'var(--pm-slate)'], '#fef3c7': ['#fff', ''] }[bgColor];
+              const bgStyle = tone ? ` background: ${tone[0]};` : (bgColor ? ` background: ${bgColor};` : '');
+              const textColor = tone ? (tone[1] ? ` color: ${tone[1]};` : '') : ((whiteText || bgColor === '#475569') ? ' color: white;' : '');
               return `<td style="${baseStyle}${bgStyle}${textColor}">${value}</td>`;
             };
             
             const renderDataCells = (deptData, rowType) => {
               if (!deptData) {
                 return `
-                  ${renderCell(0, false, rowType === 'qty' ? '#3b82f6' : '', rowType === 'qty')}
-                  ${renderCell(0, false, rowType === 'qty' ? '#3b82f6' : '', rowType === 'qty')}
-                  ${renderCell(0, false, rowType === 'qty' ? '#3b82f6' : '', rowType === 'qty')}
+                  ${renderCell(0, false, rowType === 'qty' ? '#2F6FE0' : '', rowType === 'qty')}
+                  ${renderCell(0, false, rowType === 'qty' ? '#2F6FE0' : '', rowType === 'qty')}
+                  ${renderCell(0, false, rowType === 'qty' ? '#2F6FE0' : '', rowType === 'qty')}
                 `;
               }
               
@@ -12816,9 +13152,9 @@ async function renderCRDashboard() {
               if (rowType === 'qty') {
                 // Total CRs - blue background
                 cells = `
-                  ${renderCell(deptData.P0?.qty || 0, false, '#3b82f6', true)}
-                  ${renderCell(deptData.P1?.qty || 0, false, '#3b82f6', true)}
-                  ${renderCell(deptData.P2?.qty || 0, false, '#3b82f6', true)}
+                  ${renderCell(deptData.P0?.qty || 0, false, '#2F6FE0', true)}
+                  ${renderCell(deptData.P1?.qty || 0, false, '#2F6FE0', true)}
+                  ${renderCell(deptData.P2?.qty || 0, false, '#2F6FE0', true)}
                 `;
               } else if (rowType === 'rec-start') {
                 cells = `
@@ -12835,9 +13171,9 @@ async function renderCRDashboard() {
               } else if (rowType === 'total-age') {
                 // Avg Total Age - green background
                 cells = `
-                  ${renderCell(deptData.P0?.avgTotalAge || 0, false, '#10b981', true)}
-                  ${renderCell(deptData.P1?.avgTotalAge || 0, false, '#10b981', true)}
-                  ${renderCell(deptData.P2?.avgTotalAge || 0, false, '#10b981', true)}
+                  ${renderCell(deptData.P0?.avgTotalAge || 0, false, '#22A05A', true)}
+                  ${renderCell(deptData.P1?.avgTotalAge || 0, false, '#22A05A', true)}
+                  ${renderCell(deptData.P2?.avgTotalAge || 0, false, '#22A05A', true)}
                 `;
               }
               
@@ -12857,12 +13193,12 @@ async function renderCRDashboard() {
                     <th rowspan="2" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; text-align: left; font-weight: 600;">Department</th>
                     <th rowspan="2" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; text-align: left; font-weight: 600;"></th>
                     <th rowspan="2" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; text-align: left; font-weight: 600;"></th>
-                    <th colspan="3" style="padding: 12px; background: #fbbf24; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: white;">Actual</th>
+                    <th colspan="3" style="padding: 12px; background: var(--pm-accent-tint); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-accent-deep);">Actual</th>
                   </tr>
                   <tr>
-                    <th style="padding: 8px; background: #fef3c7; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: #000;">P0</th>
-                    <th style="padding: 8px; background: #fef3c7; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: #000;">P1</th>
-                    <th style="padding: 8px; background: #fef3c7; border: 1px solid #e2e8f0; text-align: center; font-weight: 600; color: #000;">P2</th>
+                    <th style="padding: 8px; background: var(--pm-subtle); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P0</th>
+                    <th style="padding: 8px; background: var(--pm-subtle); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P1</th>
+                    <th style="padding: 8px; background: var(--pm-subtle); border: 1px solid var(--pm-line); text-align: center; font-weight: 600; color: var(--pm-slate);">P2</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -12873,41 +13209,41 @@ async function renderCRDashboard() {
                     const deptName = dept.name;
                     
                     return `
-                      <tr style="background: #fef3c7;">
+                      <tr style="background: #fff;">
                         <td rowspan="8" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; font-weight: 600; vertical-align: middle; text-align: left;">
                           <div class="clickable-chart-item" data-filter-type="departmentId" data-filter-value="${deptId}" data-title="Department: ${deptName}" data-initiative-type="CR" style="cursor: pointer; padding: 4px 8px; border-radius: 4px; transition: background 0.2s;" onmouseover="this.style.background='#e2e8f0'" onmouseout="this.style.background='transparent'">${deptName}</div>
                         </td>
                         <td rowspan="4" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; font-weight: 600; vertical-align: middle; text-align: center;">Open</td>
-                        <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #3b82f6; color: white;">Total CRs</td>
+                        <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-subtle); color: var(--pm-ink);">Total CRs</td>
                         ${renderDataCells(openData, 'qty')}
                       </tr>
-                      <tr style="background: #fef3c7;">
-                        <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Age Created→Start</td>
+                      <tr style="background: #fff;">
+                        <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Age Created→Start</td>
                         ${renderDataCells(openData, 'rec-start')}
                       </tr>
-                      <tr style="background: #fef3c7;">
-                        <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Cycle Time (Start→End)</td>
+                      <tr style="background: #fff;">
+                        <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Cycle Time (Start→End)</td>
                         ${renderDataCells(openData, 'start-live')}
                       </tr>
-                      <tr style="background: #fef3c7;">
-                        <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #10b981; color: white;">Avg Total Age</td>
+                      <tr style="background: #fff;">
+                        <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-accent-tint); color: var(--pm-accent-deep);">Avg Total Age</td>
                         ${renderDataCells(openData, 'total-age')}
                       </tr>
-                      <tr style="background: #fef3c7;">
+                      <tr style="background: #fff;">
                         <td rowspan="4" style="padding: 12px; background: #f8fafc; border: 1px solid #e2e8f0; font-weight: 600; vertical-align: middle; text-align: center;">Closed</td>
-                        <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #3b82f6; color: white;">Total CRs</td>
+                        <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-subtle); color: var(--pm-ink);">Total CRs</td>
                         ${renderDataCells(liveData, 'qty')}
                       </tr>
-                      <tr style="background: #fef3c7;">
-                        <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Age Created→Start</td>
+                      <tr style="background: #fff;">
+                        <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Age Created→Start</td>
                         ${renderDataCells(liveData, 'rec-start')}
                       </tr>
-                      <tr style="background: #fef3c7;">
-                        <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid #e2e8f0; background: #fef3c7;">Avg Cycle Time (Start→End)</td>
+                      <tr style="background: #fff;">
+                        <td style="padding: 8px 12px; font-weight: 600; text-align: left; border: 1px solid var(--pm-line); background: #fff; color: var(--pm-slate);">Avg Cycle Time (Start→End)</td>
                         ${renderDataCells(liveData, 'start-live')}
                       </tr>
-                      <tr style="background: #fef3c7;">
-                        <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid #e2e8f0; background: #10b981; color: white;">Avg Total Age</td>
+                      <tr style="background: #fff;">
+                        <td style="padding: 8px 12px; font-weight: 700; text-align: left; border: 1px solid var(--pm-line); background: var(--pm-accent-tint); color: var(--pm-accent-deep);">Avg Total Age</td>
                         ${renderDataCells(liveData, 'total-age')}
                       </tr>
                     `;
@@ -12923,7 +13259,7 @@ async function renderCRDashboard() {
       </div>
       ${d.weeklyTrendData && d.weeklyTrendData.length > 0 ? `
       <div class="card" style="margin-top: 24px; grid-column: 1 / -1;">
-        <h3>📈 CR Weekly Trend</h3>
+        <h3>CR Weekly Trend</h3>
         <div style="margin-top: 16px;">
           ${(() => {
             // Calculate max value for scaling
@@ -13030,6 +13366,23 @@ async function renderCRDashboard() {
   `;
   
   // Add event listeners for clickable cards
+  mountDashboardNav(CR_DASH_SECTIONS);
+  // System impacted applies when its dropdown closes (no separate Apply button).
+  (() => {
+    const dd = document.getElementById('dropdown-fSystemImpacted-cr');
+    if (!dd) return;
+    const snapshot = () => [...dd.querySelectorAll('input:checked')].map((i) => i.value).sort().join(',');
+    const initial = snapshot();
+    const onDoc = (e) => {
+      if (!document.body.contains(dd)) { document.removeEventListener('click', onDoc); return; }
+      if (e.target.closest('#dropdown-fSystemImpacted-cr') || e.target.closest('[data-filter="fSystemImpacted-cr"]')) return;
+      if (snapshot() !== initial) {
+        document.removeEventListener('click', onDoc);
+        window.updateCRDashboardFilters?.();
+      }
+    };
+    document.addEventListener('click', onDoc);
+  })();
   document.querySelectorAll('.clickable-card[data-filter-type]').forEach(card => {
     card.addEventListener('click', () => {
       const filterType = card.dataset.filterType;
@@ -13119,12 +13472,7 @@ async function renderSso() {
   const error = params.get('error');
 
   const failCard = (msg) => {
-    app.innerHTML = `
-      <div class="card auth-card">
-        <h2>SSO Sign-in Failed</h2>
-        <p class="error">${escapeHtml(msg)}</p>
-        <a href="#auth"><button class="primary">Back to Login</button></a>
-      </div>`;
+    app.innerHTML = authStatus('err', 'DWS Hub sign-in failed', msg);
   };
 
   if (error) {
@@ -13137,6 +13485,7 @@ async function renderSso() {
     setToken(token);
     // Strip the token from the URL/history immediately.
     history.replaceState(null, '', location.pathname + location.search);
+    app.innerHTML = authStatus('wait', 'Signing you in…', 'Checking your DWS Hub session. This takes a few seconds.', false);
     try {
       const user = await getCurrentUser();
       if (user) {
@@ -13154,95 +13503,135 @@ async function renderSso() {
   location.hash = '#auth';
 }
 
-function renderAuth() {
-  setActive('#auth');
-  app.innerHTML = `
-    <div class="card auth-card">
-      <h2>Welcome</h2>
-      <p class="muted">Sign in to manage Projects & Change Requests.</p>
-      <div class="tabs">
-        <button class="tab active" data-tab="login">Login</button>
-        <button class="tab" data-tab="register">Register</button>
-        <button class="tab" data-tab="forgot">Forgot Password</button>
-      </div>
-      <div id="auth-views">
-        <form id="form-login" class="form auth-view" data-view="login">
-          <div class="form-row">
-            <label>Email</label>
-            <input name="email" type="email" required />
-          </div>
-          <div class="form-row">
-            <label>Password</label>
-            <input name="password" type="password" required />
-          </div>
-          <button type="submit" class="primary">Login</button>
-        </form>
-        <form id="form-register" class="form auth-view hidden" data-view="register">
-          <div class="form-row">
-            <label>Name</label>
-            <input name="name" required />
-          </div>
-          <div class="form-row">
-            <label>Email</label>
-            <input name="email" type="email" required />
-            <small class="muted">Note: @energi-up.com, @kpn-corp.com, and @cemindo.com emails will receive activation link. Other domains require admin approval.</small>
-          </div>
-          <div class="form-row">
-            <label>Password</label>
-            <input name="password" type="password" required minlength="6" />
-          </div>
-          <div class="form-row">
-            <label>Confirm Password</label>
-            <input name="confirmPassword" type="password" required minlength="6" />
-          </div>
-          <button type="submit" class="primary">Register</button>
-        </form>
-        <form id="form-forgot" class="form auth-view hidden" data-view="forgot">
-          <div class="form-row">
-            <label>Email</label>
-            <input name="email" type="email" required />
-          </div>
-          <button type="submit" class="primary">Send reset link</button>
-        </form>
-      </div>
-    </div>
-  `;
+// Signed-out screens share one split layout: brand panel left, form right.
+function authScreen(inner) {
+  return `
+    <div class="auth-split">
+      <section class="auth-aside" aria-label="About PM Tools">
+        <a class="sidebar-brand" href="#auth">
+          <span class="sidebar-logo" aria-hidden="true"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M5 19V5l7 7 7-7v14"/></svg></span>
+          <span class="sidebar-brand-text"><span class="sidebar-brand-name">PM Tools</span><span class="sidebar-brand-sub">KPN Downstream IT</span></span>
+        </a>
+        <div class="auth-aside-copy">
+          <h1>Every project and change request, in one place.</h1>
+          <p>Plan, track and report IT delivery from first request to fully live.</p>
+        </div>
+        <span class="auth-aside-foot">Need access? Contact the IT PMO.</span>
+      </section>
+      <section class="auth-pane"><div class="auth-card">${inner}</div></section>
+    </div>`;
+}
 
-  const tabs = document.querySelectorAll('.tabs .tab');
-  const views = document.querySelectorAll('.auth-view');
-  tabs.forEach(tab => {
-    tab.onclick = () => {
-      tabs.forEach(t => t.classList.remove('active'));
-      tab.classList.add('active');
-      const view = tab.dataset.tab;
-      views.forEach(v => {
-        v.classList.toggle('hidden', v.dataset.view !== view);
-      });
+const AUTH_STATUS_ICONS = {
+  ok: '<path d="m5 12 5 5 9-10"/>',
+  err: '<path d="M6 6l12 12M18 6 6 18"/>',
+  wait: '<path d="M12 3a9 9 0 1 0 9 9"/>',
+};
+
+function authStatus(kind, title, message, withLink = true) {
+  return authScreen(`
+    <div class="auth-status" role="${kind === 'err' ? 'alert' : 'status'}">
+      <span class="auth-status-icon ${kind}"><svg viewBox="0 0 24 24" aria-hidden="true">${AUTH_STATUS_ICONS[kind]}</svg></span>
+      <h2>${escapeHtml(title)}</h2>
+      <p class="muted">${escapeHtml(message)}</p>
+      ${withLink ? '<a class="btn btn-dark" href="#auth">Go to sign in</a>' : ''}
+    </div>`);
+}
+
+const PASSWORD_EYE = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg>';
+
+function wirePasswordToggles(root) {
+  root.querySelectorAll('.pw-toggle').forEach((btn) => {
+    btn.onclick = () => {
+      const input = btn.parentElement.querySelector('input');
+      const show = input.type === 'password';
+      input.type = show ? 'text' : 'password';
+      btn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
     };
   });
+}
 
-  // SSO (DWS Hub): show a "Sign in with DWS Hub" button only if the backend has
-  // OIDC configured. Local email/password login above is unaffected either way.
+const AUTH_VIEW_COPY = {
+  login: ['Sign in', 'Use your company account.'],
+  register: ['Create an account', '@energi-up.com, @kpn-corp.com and @cemindo.com addresses get an activation link. Other domains wait for admin approval.'],
+  forgot: ['Reset your password', 'We will email you a link to set a new one.'],
+};
+
+function renderAuth() {
+  setActive('#auth');
+  app.innerHTML = authScreen(`
+      <h2 id="auth-title">Sign in</h2>
+      <p class="muted" id="auth-sub">Use your company account.</p>
+      <div id="sso-slot"></div>
+      <div id="auth-views">
+        <form id="form-login" class="form auth-view" data-view="login">
+          <label class="field">Email
+            <input name="email" type="email" autocomplete="email" placeholder="name@energi-up.com" required />
+          </label>
+          <div class="field">
+            <div class="field-row"><label for="login-password">Password</label><button type="button" class="link-btn" data-goto="forgot">Forgot password?</button></div>
+            <div class="pw-wrap"><input id="login-password" name="password" type="password" autocomplete="current-password" required /><button type="button" class="pw-toggle" aria-label="Show password">${PASSWORD_EYE}</button></div>
+          </div>
+          <button type="submit" class="primary">Sign in</button>
+          <p class="auth-switch">New here? <button type="button" class="link-btn" data-goto="register">Create an account</button></p>
+        </form>
+        <form id="form-register" class="form auth-view hidden" data-view="register">
+          <label class="field">Full name
+            <input name="name" autocomplete="name" required />
+          </label>
+          <label class="field">Work email
+            <input name="email" type="email" autocomplete="email" required />
+          </label>
+          <div class="field">
+            <label for="register-password">Password</label>
+            <div class="pw-wrap"><input id="register-password" name="password" type="password" autocomplete="new-password" required minlength="6" /><button type="button" class="pw-toggle" aria-label="Show password">${PASSWORD_EYE}</button></div>
+            <small class="muted">At least 6 characters</small>
+          </div>
+          <label class="field">Confirm password
+            <input name="confirmPassword" type="password" autocomplete="new-password" required minlength="6" />
+          </label>
+          <button type="submit" class="primary">Create account</button>
+          <p class="auth-switch">Have an account? <button type="button" class="link-btn" data-goto="login">Sign in</button></p>
+        </form>
+        <form id="form-forgot" class="form auth-view hidden" data-view="forgot">
+          <label class="field">Email
+            <input name="email" type="email" autocomplete="email" required />
+          </label>
+          <button type="submit" class="primary">Send reset link</button>
+          <p class="auth-switch"><button type="button" class="link-btn" data-goto="login">Back to sign in</button></p>
+        </form>
+      </div>
+  `);
+
+  const views = document.querySelectorAll('.auth-view');
+  const showView = (view) => {
+    views.forEach(v => v.classList.toggle('hidden', v.dataset.view !== view));
+    const [title, sub] = AUTH_VIEW_COPY[view];
+    document.getElementById('auth-title').textContent = title;
+    document.getElementById('auth-sub').textContent = sub;
+    document.getElementById('sso-slot').hidden = view !== 'login';
+    document.querySelector(`.auth-view[data-view="${view}"] input`)?.focus();
+  };
+  app.querySelectorAll('[data-goto]').forEach(btn => {
+    btn.onclick = () => showView(btn.dataset.goto);
+  });
+  wirePasswordToggles(app);
+
+  // SSO (DWS Hub): show "Continue with DWS Hub" above the email form only if the
+  // backend has OIDC configured. Email/password sign-in is unaffected either way.
   (async () => {
     try {
       const res = await fetch('/api/auth/sso/config');
       if (!res.ok) return;
       const cfg = await res.json();
       if (!cfg || !cfg.oidc) return;
-      const loginForm = document.getElementById('form-login');
-      if (!loginForm) return;
+      const slot = document.getElementById('sso-slot');
       // Guard against double-injection if renderAuth() runs more than once
       // before this async probe resolves.
-      if (loginForm.querySelector('.sso-button')) return;
-      const divider = document.createElement('div');
-      divider.className = 'sso-divider';
-      divider.innerHTML = '<span>or</span>';
-      const ssoBtn = document.createElement('a');
-      ssoBtn.href = '/api/auth/sso/oidc/login';
-      ssoBtn.className = 'sso-button';
-      ssoBtn.textContent = 'Sign in with DWS Hub';
-      loginForm.appendChild(divider);
-      loginForm.appendChild(ssoBtn);
+      if (!slot || slot.querySelector('.sso-button')) return;
+      slot.innerHTML = `
+        <a class="sso-button" href="/api/auth/sso/oidc/login"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4 6v6c0 5 3.5 8 8 9 4.5-1 8-4 8-9V6z"/></svg>Continue with DWS Hub</a>
+        <div class="sso-divider"><span>or use email</span></div>`;
     } catch (_) { /* SSO is optional; ignore probe failures */ }
   })();
 
@@ -13303,12 +13692,7 @@ function renderAuth() {
     } else {
       notify('Registration successful. You can now log in.');
     }
-    tabs.forEach(t => {
-      t.classList.toggle('active', t.dataset.tab === 'login');
-    });
-    views.forEach(v => {
-      v.classList.toggle('hidden', v.dataset.view !== 'login');
-    });
+    showView('login');
   };
 
   document.getElementById('form-forgot').onsubmit = async e => {
@@ -13463,6 +13847,8 @@ async function updateNavAuth() {
   if (!user && getToken()) {
     user = await getCurrentUser();
   }
+  document.body.classList.toggle('signed-in', !!user);
+  document.body.classList.toggle('signed-out', !user);
   if (user) {
     // Compute fine-grained access rules (based on email domain + type)
     const access = await getUserAccess();
@@ -13474,6 +13860,12 @@ async function updateNavAuth() {
         profileMenuName.textContent = user.name;
       }
     }
+    const initials = initialsOf(user.name || user.email);
+    const setText = (id, text) => { const el = document.getElementById(id); if (el) el.textContent = text; };
+    setText('profile-menu-initials', initials);
+    setText('sidebar-user-initials', initials);
+    setText('sidebar-user-name', user.name || user.email || '');
+    setText('sidebar-user-role', [user.role, user.type].filter((v) => v && v !== 'N/A').join(' · '));
     if (navNotifications) {
       navNotifications.classList.remove('hidden');
       loadNotifications(); // Load notifications when user is logged in
@@ -13552,7 +13944,7 @@ async function updateNavAuth() {
     }
     if (navAuth) {
       navAuth.classList.remove('hidden');
-      navAuth.textContent = '🔐 Login';
+      navAuth.textContent = 'Sign in';
       navAuth.href = '#auth';
     }
     // Hide protected links when not logged in
@@ -13658,6 +14050,8 @@ router();
 
 // Handle activation route
 async function renderActivate(token) {
+  setActive('#auth');
+  app.innerHTML = authStatus('wait', 'Activating your account…', 'One moment.', false);
   try {
     const res = await fetch('/api/auth/activate', {
       method: 'POST',
@@ -13666,39 +14060,34 @@ async function renderActivate(token) {
     });
     const json = await res.json();
     if (!res.ok) {
-      app.innerHTML = `<div class="card"><h2>Activation Failed</h2><p class="error">${json.error || 'Invalid activation token'}</p><a href="#auth"><button>Go to Login</button></a></div>`;
+      app.innerHTML = authStatus('err', 'Activation failed', json.error || 'Invalid activation token');
       return;
     }
-    app.innerHTML = `<div class="card"><h2>Account Activated</h2><p>${json.message || 'Your account has been activated successfully!'}</p><a href="#auth"><button class="primary">Go to Login</button></a></div>`;
+    app.innerHTML = authStatus('ok', 'Account activated', json.message || 'Your email is confirmed. You can sign in now.');
   } catch (e) {
-    app.innerHTML = `<div class="card"><h2>Activation Error</h2><p class="error">${e.message}</p><a href="#auth"><button>Go to Login</button></a></div>`;
+    app.innerHTML = authStatus('err', 'Activation error', e.message);
   }
 }
 
 // Handle password reset route
 async function renderResetPassword(token) {
   setActive('#auth');
-  app.innerHTML = `
-    <div class="card auth-card">
-      <h2>Reset Password</h2>
-      <p class="muted">Enter your new password below.</p>
+  app.innerHTML = authScreen(`
+      <h2>Set a new password</h2>
+      <p class="muted">At least 6 characters.</p>
       <form id="form-reset-password" class="form">
-        <div class="form-row">
-          <label>New Password</label>
-          <input name="password" type="password" required minlength="6" />
-          <small class="muted">Password must be at least 6 characters</small>
+        <div class="field">
+          <label for="reset-password">New password</label>
+          <div class="pw-wrap"><input id="reset-password" name="password" type="password" autocomplete="new-password" required minlength="6" /><button type="button" class="pw-toggle" aria-label="Show password">${PASSWORD_EYE}</button></div>
         </div>
-        <div class="form-row">
-          <label>Confirm New Password</label>
-          <input name="confirmPassword" type="password" required minlength="6" />
-        </div>
-        <button type="submit" class="primary">Reset Password</button>
-        <div style="margin-top: 16px;">
-          <a href="#auth" style="color: var(--primary);">Back to Login</a>
-        </div>
+        <label class="field">Confirm new password
+          <input name="confirmPassword" type="password" autocomplete="new-password" required minlength="6" />
+        </label>
+        <button type="submit" class="primary">Save new password</button>
+        <p class="auth-switch"><a class="link-btn" href="#auth">Back to sign in</a></p>
       </form>
-    </div>
-  `;
+  `);
+  wirePasswordToggles(app);
 
   document.getElementById('form-reset-password').onsubmit = async e => {
     e.preventDefault();
@@ -13727,13 +14116,7 @@ async function renderResetPassword(token) {
         notify(json.error || 'Password reset failed');
         return;
       }
-      app.innerHTML = `
-        <div class="card">
-          <h2>Password Reset Successful</h2>
-          <p>${json.message || 'Your password has been reset successfully. You can now log in with your new password.'}</p>
-          <a href="#auth"><button class="primary">Go to Login</button></a>
-        </div>
-      `;
+      app.innerHTML = authStatus('ok', 'Password updated', json.message || 'Your password has been reset. You can sign in with your new password.');
     } catch (e) {
       notify('Error resetting password: ' + e.message);
     }
@@ -13744,7 +14127,16 @@ async function renderResetPassword(token) {
 (async () => {
   const user = await getCurrentUser();
   updateNavAuth();
-  
+
+  // Mobile: the sidebar slides in over the page.
+  document.getElementById('sidebar-toggle')?.addEventListener('click', () => {
+    setSidebarOpen(!document.body.classList.contains('nav-open'));
+  });
+  document.getElementById('sidebar-scrim')?.addEventListener('click', () => setSidebarOpen(false));
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && document.body.classList.contains('nav-open')) setSidebarOpen(false);
+  });
+
   // Initialize profile menu dropdown
   const profileMenuBtn = document.getElementById('profile-menu-btn');
   const profileDropdown = document.getElementById('profile-dropdown');
