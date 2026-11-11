@@ -191,33 +191,4 @@ setInterval(async () => {
   }
 }, 24 * 60 * 60 * 1000); // 24 hours
 
-// 5-minute Google Sheets auto-sync (Project and CR tabs) if env configured
-const SHEET_ID = process.env.SHEET_ID;
-const GID = process.env.GID;
-const CR_GID = process.env.CR_GID;
-if (SHEET_ID && GID) {
-  const runSync = async () => {
-    try {
-      // Sync Project tab
-      const projectMod = await import('./sync_google_sheets.js');
-      await projectMod.default();
-
-      // Sync CR tab if configured
-      if (CR_GID) {
-        const crMod = await import('./sync_google_sheets_cr.js');
-        await crMod.default();
-      }
-
-      // Create daily snapshot after sync to capture changes
-      const snapshotMod = await import('./daily-snapshots.js');
-      snapshotMod.createDailySnapshot();
-    } catch (e) {
-      console.error('Auto-sync error:', e.message);
-    }
-  };
-  setInterval(runSync, 5 * 60 * 1000);
-  // initial sync on boot (non-blocking)
-  runSync();
-}
-
 

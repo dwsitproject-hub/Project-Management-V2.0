@@ -1,6 +1,6 @@
 # Project & Change Request Management System
 
-A web-based project and change request management application with authentication, user management, and Google Sheets integration.
+A web-based project and change request management application with authentication, and user management.
 
 ## 🚀 Features
 
@@ -8,7 +8,6 @@ A web-based project and change request management application with authenticatio
 - **User Authentication**: Secure login, registration, password reset, and email activation
 - **Role-Based Access Control**: Admin and user roles with appropriate permissions
 - **Dashboard & Analytics**: Comprehensive dashboards with project insights and metrics
-- **Google Sheets Integration**: Automatic sync from Google Sheets every 5 minutes
 - **Daily Snapshots**: Automatic tracking of milestone durations and project aging
 - **Comments & Tasks**: Collaboration features for projects and change requests
 - **Meeting Notes**: Capture structured meeting notes with participants, action items, email delivery log, and history tracking
@@ -146,46 +145,6 @@ Admins can:
 - Manage all projects and change requests
 - Access admin dashboard
 
-## 📊 Google Sheets Integration
-
-The application automatically syncs data from Google Sheets every 5 minutes.
-
-### Configuration
-
-- **Sheet ID**: `1sX4-W1A5pCHFXC3IiS0yJ8sXJlZG_KcY`
-- **Project GID**: `1287888772`
-- **CR GID**: `355802550`
-- **Source**: https://docs.google.com/spreadsheets/d/1sX4-W1A5pCHFXC3IiS0yJ8sXJlZG_KcY/edit
-
-### Auto-Sync
-
-When configured with environment variables (`SHEET_ID`, `GID`, `CR_GID`), the server automatically:
-- Syncs Project data every 5 minutes
-- Syncs Change Request data every 5 minutes
-- Creates daily snapshots to track milestone durations
-
-### Manual Sync
-
-**Windows Scripts:**
-- `sync-now.bat` - Immediate sync (double-click)
-- `sync-now.ps1` - PowerShell version
-
-**Command Line:**
-```bash
-# Sync Project data
-node backend/sync_google_sheets.js
-
-# Sync CR data
-node backend/sync_google_sheets_cr.js
-```
-
-### Notes
-
-- Auto-sync runs every **5 minutes** when server starts with environment variables configured
-- The importer auto-detects `Project` vs `CR` based on columns
-- Column headers are matched flexibly (e.g., `Initiative Name`, `Project Name`, or `Name`)
-- Ensure the Google Sheet is published or shared publicly for CSV export to work
-
 ## 📝 Meeting Notes
 
 The Meeting Notes module provides a structured way to record and distribute project meeting outcomes.
@@ -267,11 +226,6 @@ SMTP_SECURE=false
 SMTP_USER=your-smtp-user
 SMTP_PASSWORD=your-smtp-password
 SMTP_REJECT_UNAUTHORIZED=true
-
-# Google Sheets (optional)
-SHEET_ID=1sX4-W1A5pCHFXC3IiS0yJ8sXJlZG_KcY
-GID=1287888772
-CR_GID=355802550
 ```
 
 ## 📁 Project Structure
@@ -348,7 +302,6 @@ See [DEPLOYMENT-ALIYUN.md#troubleshooting](DEPLOYMENT-ALIYUN.md#troubleshooting)
 
 - **Port conflicts**: Check if ports are already in use
 - **Database connection**: Verify PostgreSQL is running and credentials are correct
-- **Google Sheets sync**: Ensure Sheet ID and GIDs are correct
 - **Email not working**: Check SMTP configuration in `.env`
 
 ## 📝 License

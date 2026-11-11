@@ -9,7 +9,7 @@ Assumptions:
 
 - Docker & Docker Compose are **already installed** on both servers.
 - You have **sudo** or equivalent privileges.
-- Outbound internet is allowed to GitHub, SMTP, and (optionally) Google Sheets.
+- Outbound internet is allowed to GitHub and SMTP.
 - All commands below are executed as a non‑root user that is in the `docker` group.
 
 ---
@@ -94,12 +94,6 @@ SMTP_USER=your-smtp-user
 SMTP_PASSWORD=your-smtp-password
 SMTP_REJECT_UNAUTHORIZED=true
 
-# -----------------------
-# Google Sheets (optional)
-# -----------------------
-SHEET_ID=1sX4-W1A5pCHFXC3IiS0yJ8sXJlZG_KcY
-GID=1287888772
-CR_GID=355802550
 EOF
 ```
 

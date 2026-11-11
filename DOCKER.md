@@ -16,11 +16,6 @@ Create a `.env` file in the project root with:
 ```env
 DATABASE_URL=postgres://postgres:postgres123@postgres:5432/project_management_v2
 
-# Google Sheets configuration (optional)
-SHEET_ID=1sX4-W1A5pCHFXC3IiS0yJ8sXJlZG_KcY
-GID=1287888772
-CR_GID=355802550
-
 # Admin user configuration
 ADMIN_EMAIL=admin@example.com
 ADMIN_PASSWORD=Admin123!
@@ -54,9 +49,6 @@ docker-compose exec backend npm run db:import-json
 # Seed admin user
 docker-compose exec backend npm run db:seed-admin
 
-# Sync from Google Sheets (if configured)
-docker-compose exec backend npm run sync:sheet
-docker-compose exec backend npm run sync:cr
 ```
 
 ### 4. Access the application

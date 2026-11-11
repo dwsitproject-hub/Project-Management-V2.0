@@ -63,8 +63,7 @@ When all tests pass, you should see:
    - Check port 3000 is available
 
 2. **No data found**
-   - Run sync: `npm run sync:sheet` and `npm run sync:cr`
-   - Check Google Sheets access and GIDs
+   - Seed the admin user (`npm run db:seed-admin`) and create a project or CR
 
 3. **API endpoints failing**
    - Check server logs for errors

@@ -34,9 +34,6 @@ services:
       - DATABASE_URL=postgres://postgres:postgres123@postgres:5432/project_management_v2
       - PORT=3000
       - HOST=0.0.0.0
-      - SHEET_ID=${SHEET_ID:-}
-      - GID=${GID:-}
-      - CR_GID=${CR_GID:-}
       - JWT_SECRET=${JWT_SECRET:-dev-secret-change-me-in-production}
       # --- DWS Hub SSO (all optional; each mechanism activates only when set) ---
       # OIDC (recommended). Leave OIDC_DISCOVERY_URL/OIDC_CLIENT_ID empty to disable.
