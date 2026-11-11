@@ -7,13 +7,27 @@ const databaseUrl =
   'postgres://postgres:postgres123@localhost:5544/project_management_v2';
 
 const pool = new Pool({ connectionString: databaseUrl });
-let initialized = false;
+let schemaReady = null; // promise of the one-time schema set-up in this process
 
-async function initializeSchema() {
-  if (initialized) return;
-  initialized = true;
+// Lock id for the schema set-up, so two nodes starting together don't run the DDL at
+// the same time (concurrent CREATE / ALTER ... IF NOT EXISTS can fail or deadlock).
+const SCHEMA_LOCK_ID = 727274001;
+
+/** Creates / upgrades the tables once per process; retried on the next call if it failed. */
+function initializeSchema() {
+  if (!schemaReady) {
+    schemaReady = runSchemaSetup().catch((e) => {
+      schemaReady = null;
+      throw e;
+    });
+  }
+  return schemaReady;
+}
+
+async function runSchemaSetup() {
   const client = await pool.connect();
   try {
+    await client.query('SELECT pg_advisory_lock($1)', [SCHEMA_LOCK_ID]);
     const ddl = `
       CREATE TABLE IF NOT EXISTS "departments" (
         "id" TEXT PRIMARY KEY,
@@ -458,45 +472,105 @@ async function initializeSchema() {
       ALTER TABLE "meetingNoteHistory" ADD COLUMN IF NOT EXISTS "newValue" TEXT;
       ALTER TABLE "meetingNoteHistory" ADD COLUMN IF NOT EXISTS "changedBy" TEXT;
       ALTER TABLE "meetingNoteHistory" ADD COLUMN IF NOT EXISTS "changedAt" TEXT;
+
+      -- Bumped by every write() that changes something. Each node compares it with the
+      -- version its cache was loaded at, so a save on one node is seen on all of them.
+      CREATE TABLE IF NOT EXISTS "storeMeta" (
+        "id" TEXT PRIMARY KEY,
+        "version" BIGINT NOT NULL DEFAULT 0
+      );
+      INSERT INTO "storeMeta"("id", "version") VALUES ('store', 0) ON CONFLICT ("id") DO NOTHING;
+
+      -- CR creation emails waiting to be sent (services/cr-email-queue.js). Not part of
+      -- read()/write(): only the queue touches it.
+      CREATE TABLE IF NOT EXISTS "crEmailQueue" (
+        "initiativeId" TEXT PRIMARY KEY,
+        "status" TEXT NOT NULL DEFAULT 'pending',
+        "dueAt" TIMESTAMPTZ NOT NULL,
+        "attempts" INTEGER NOT NULL DEFAULT 0,
+        "claimedAt" TIMESTAMPTZ,
+        "sentAt" TIMESTAMPTZ,
+        "lastError" TEXT,
+        "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS "crEmailQueue_due" ON "crEmailQueue" ("status", "dueAt");
     `;
     await client.query(ddl);
   } finally {
+    await client.query('SELECT pg_advisory_unlock($1)', [SCHEMA_LOCK_ID]).catch(() => {});
     client.release();
   }
 }
 
 // ---- Read cache --------------------------------------------------------------
 // Every request reads the whole store (the auth middleware AND the route each call
-// read()). Against a remote DB (ApsaraDB RDS) one read is ~21 sequential round-trips
-// plus ~1.4 MB over the wire. We cache the last read and drop it on every write(),
-// so reads in this process are never staler than the last write. The short TTL only
-// bounds staleness from writers OUTSIDE this process (e.g. `node backend/seed_admin.js`
-// run via docker exec). store.write() only writes the rows a request changed, so a
-// stale snapshot can't overwrite such an external change; it just shows up later.
-// Set STORE_READ_CACHE_TTL_MS=0 to disable.
+// read()). Against a remote DB (ApsaraDB RDS) a full read is ~23 queries plus ~1.4 MB
+// over the wire, so each process keeps the last read in memory.
+//
+// Several backend nodes (HA) each have their own cache, so before answering from it we
+// compare the "storeMeta" version (one tiny query; write() bumps it in the same
+// transaction) with the version the cache was loaded at. A save on any node is
+// therefore seen by the very next request on every node. A write in this process also
+// drops its own cache straight away.
+//
+// The TTL only matters for changes that bypass write() (SQL typed by hand): an expired
+// cache is still answered from, and refreshed in the background.
+// Set STORE_READ_CACHE_TTL_MS=0 to disable the cache.
 const READ_CACHE_TTL_MS = Number(process.env.STORE_READ_CACHE_TTL_MS ?? 30000);
-let readCache = null; // { data, at }
+let readCache = null; // { data, version, at }
 let cacheGeneration = 0; // bumped on invalidate so an in-flight read can't cache stale data
 let inflightRead = null; // coalesces concurrent cache misses into a single DB read
+let inflightVersion = null; // coalesces concurrent version checks
 
-function loadShared() {
-  if (READ_CACHE_TTL_MS > 0 && readCache) {
-    // Expired: answer from the cache and refresh it in the background. The cache is
-    // dropped on every write in this process, so this is only ever behind writers
-    // outside it, and by at most one refresh.
-    if (Date.now() - readCache.at >= READ_CACHE_TTL_MS) startDbRead().catch((e) => console.error('[STORE] Background refresh failed:', e.message));
-    return Promise.resolve(readCache.data);
+/** The current store version in the DB (concurrent callers share one query). */
+function currentVersion() {
+  if (!inflightVersion) {
+    const p = (async () => {
+      await initializeSchema();
+      const res = await pool.query('SELECT "version" FROM "storeMeta" WHERE "id" = $1', ['store']);
+      return Number(res.rows[0]?.version ?? 0);
+    })().finally(() => {
+      if (inflightVersion === p) inflightVersion = null;
+    });
+    inflightVersion = p;
   }
-  return startDbRead();
+  return inflightVersion;
 }
 
-function startDbRead() {
-  if (!inflightRead) {
+async function loadShared() {
+  if (READ_CACHE_TTL_MS <= 0) return (await readFromDb()).data;
+  const cached = readCache;
+  if (!cached) return (await startDbRead()).data;
+
+  let version;
+  try {
+    version = await currentVersion();
+  } catch (e) {
+    // DB unreachable: keep answering reads from memory (writes will fail anyway).
+    console.error('[STORE] Version check failed, serving cached data:', e.message);
+    return cached.data;
+  }
+  if (version === cached.version) {
+    if (Date.now() - cached.at >= READ_CACHE_TTL_MS) {
+      startDbRead().catch((e) => console.error('[STORE] Background refresh failed:', e.message));
+    }
+    return cached.data;
+  }
+  // Another node (or a script) saved since this cache was loaded: reload. A read that
+  // was already running may have started before that save, so check what it got.
+  let entry = await startDbRead();
+  if (entry.version < version) entry = await startDbRead({ fresh: true });
+  return entry.data;
+}
+
+function startDbRead({ fresh = false } = {}) {
+  if (!inflightRead || fresh) {
     const gen = cacheGeneration;
     const p = readFromDb()
-      .then((data) => {
-        if (gen === cacheGeneration && READ_CACHE_TTL_MS > 0) readCache = { data, at: Date.now() };
-        return data;
+      .then((entry) => {
+        const newer = !readCache || entry.version >= readCache.version;
+        if (gen === cacheGeneration && READ_CACHE_TTL_MS > 0 && newer) readCache = entry;
+        return entry;
       })
       .finally(() => {
         if (inflightRead === p) inflightRead = null;
@@ -556,6 +630,10 @@ async function readShared() {
 
 async function readFromDb() {
   await initializeSchema();
+  // Read the version BEFORE the tables: the data is then at least that new, so a save
+  // landing mid-read only causes one extra reload later, never a stale cache.
+  const versionRes = await pool.query('SELECT "version" FROM "storeMeta" WHERE "id" = $1', ['store']);
+  const version = Number(versionRes.rows[0]?.version ?? 0);
   const data = {};
   const tables = [
     'departments',
@@ -790,7 +868,7 @@ async function readFromDb() {
     // Filter out entries without initiativeId to avoid breaking lookups
     .filter((h) => !!h.initiativeId);
 
-  return data;
+  return { data, version, at: Date.now() };
 }
 
 /** Serialize writes (one transaction at a time) to avoid races (502 / duplicate key). */
@@ -1014,6 +1092,9 @@ async function writeImpl(data) {
   let written = 0;
   try {
     await client.query('BEGIN');
+    // Take the version row's lock first: saves from several nodes then run one at a
+    // time (like the in-process writeQueue), so they can't deadlock on each other's rows.
+    await client.query('SELECT "version" FROM "storeMeta" WHERE "id" = $1 FOR UPDATE', ['store']);
     for (const spec of TABLE_SPECS) {
       const key = spec.key || 'id';
       if (origin && isUntouched(data, spec.table)) continue;
@@ -1050,6 +1131,10 @@ async function writeImpl(data) {
       if (spec.children) await upsertRows(client, 'changeHistoryItem', CHANGE_ITEM_COLS, 'id', uniqueChildRows(changed));
       written += changed.length + removed.length;
     }
+    // Tell every node's cache that the data changed (only when something did).
+    if (written > 0 || !origin) {
+      await client.query('UPDATE "storeMeta" SET "version" = "version" + 1 WHERE "id" = $1', ['store']);
+    }
     await client.query('COMMIT');
     console.log(`[STORE] Write completed (${origin ? 'changes only' : 'full'}) - ${written} rows in ${Date.now() - started}ms`);
   } catch (e) {
@@ -1071,5 +1156,5 @@ function originRows(origin, spec) {
   return perTable.get(spec.table);
 }
 
-export default { read, readShared, write, invalidateReadCache, pool, databaseUrl };
+export default { read, readShared, write, invalidateReadCache, ensureSchema: initializeSchema, pool, databaseUrl };
 

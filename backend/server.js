@@ -7,6 +7,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import http from 'http';
 import dbStore from './store.js';
+import { startCrEmailSweeper } from './services/cr-email-queue.js';
+import { checkUploadsDir } from './services/uploads.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -121,8 +123,16 @@ app.listen(PORT, HOST, () => {
 
   // Read-only DB health signal for deployments (replaces the old boot-time full rewrite).
   dbStore.read()
-    .then((d) => console.log(`[STORE] Connected - Users: ${(d.users || []).length}, Initiatives: ${(d.initiatives || []).length}`))
-    .catch((e) => console.error('[STORE] Initial read failed:', e.message));
+    .then((d) => {
+      console.log(`[STORE] Connected - Users: ${(d.users || []).length}, Initiatives: ${(d.initiatives || []).length}`);
+      // Needs the schema (crEmailQueue), which the first read creates.
+      startCrEmailSweeper();
+    })
+    .catch((e) => {
+      console.error('[STORE] Initial read failed:', e.message);
+      startCrEmailSweeper(); // its sweeps retry until the DB is reachable
+    });
+  checkUploadsDir();
 
   // Initialize daily snapshots on server start
   import('./daily-snapshots.js').then(async m => {

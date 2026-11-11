@@ -1,7 +1,8 @@
 import express from 'express';
 import store from '../store.js';
 import crypto from 'crypto';
-import { sendCRCreationEmail } from '../services/email.js';
+import { queueCrCreationEmail } from '../services/cr-email-queue.js';
+import { resolveDocumentPath } from '../services/uploads.js';
 import { initiativeTriggersCrCreationEmail } from '../services/cr-email-eligibility.js';
 import fs from 'fs/promises';
 import {
@@ -411,71 +412,25 @@ router.post('/', async (req, res) => {
   
   await store.write(data);
 
-  // Send email notification for new CR creation only when System Impacted includes SAP FICO or SAP NON FICO
-  // Note: Email will be sent when documents are uploaded (if within 10 minutes)
-  // If no documents are uploaded within 10 minutes, email will be sent via delayed check
+  // CR creation email (only when System Impacted includes SAP FICO or SAP NON FICO). It is
+  // queued, not sent here: documents are uploaded right after creation and must be
+  // attached, so it goes out ~15 s after the last upload, or after 10 minutes if none
+  // come (services/cr-email-queue.js — works across several backend nodes).
   if (type === 'CR') {
     const createdInitiative = data.initiatives.find((i) => i.id === id);
-    const emailEligible =
-      createdInitiative && initiativeTriggersCrCreationEmail(data, createdInitiative);
-
-    if (emailEligible) {
-      console.log(`[CR CREATION] New CR created (SAP email eligible): ${name} (ID: ${id})`);
-      const emailFlag = `cr_email_pending_${id}`;
-      global[emailFlag] = {
-        initiativeId: id,
-        createdAt: new Date(),
-        sent: false,
-      };
-
-      setTimeout(async () => {
-        try {
-          const flag = global[emailFlag];
-          if (flag && !flag.sent) {
-            console.log(
-              `[CR CREATION] No documents uploaded within 10 minutes, sending email without documents...`
-            );
-            const currentData = await store.read();
-            const initiative = currentData.initiatives.find((i) => i.id === id);
-            if (
-              initiative &&
-              initiative.type === 'CR' &&
-              initiativeTriggersCrCreationEmail(currentData, initiative)
-            ) {
-              const userLookups = currentData.users.map((u) => ({
-                id: u.id,
-                name: u.name,
-                email: u.email || null,
-              }));
-
-              const documents = (currentData.documents || []).filter((d) => d.initiativeId === id);
-
-              const crData = {
-                name: initiative.name,
-                description: initiative.description,
-                businessImpact: initiative.businessImpact,
-                priority: initiative.priority,
-                businessOwnerId: initiative.businessOwnerId,
-                businessUserIds: initiative.businessUserIds,
-                itPicId: initiative.itPicId,
-                itPicIds: initiative.itPicIds,
-                itManagerIds: initiative.itManagerIds,
-              };
-
-              await sendCRCreationEmail(crData, userLookups, documents);
-              flag.sent = true;
-            }
-            delete global[emailFlag];
-          }
-        } catch (error) {
-          console.error('[EMAIL ERROR] Error sending delayed CR creation email:', error);
-        }
-      }, 10 * 60 * 1000); // 10 minutes
+    if (createdInitiative && initiativeTriggersCrCreationEmail(data, createdInitiative)) {
+      try {
+        await queueCrCreationEmail(id);
+        console.log(`[CR CREATION] New CR created (SAP email queued): ${name} (ID: ${id})`);
+      } catch (e) {
+        // The CR is saved; don't fail the request because the email couldn't be queued.
+        console.error(`[CR CREATION] Could not queue the creation email for ${id}:`, e.message);
+      }
     } else {
       console.log(`[CR CREATION] New CR created (no SAP FICO / SAP NON FICO email): ${name} (ID: ${id})`);
     }
   }
-  
+
   res.status(201).json({ id });
 });
 
@@ -714,7 +669,10 @@ router.delete('/:id', async (req, res) => {
     await store.write(data);
 
     // Files only after the records are gone (a failed write leaves everything intact).
-    await Promise.all(documents.filter((d) => d.filePath).map((d) => fs.unlink(d.filePath).catch(() => {})));
+    await Promise.all(documents.filter((d) => d.filePath).map(async (d) => {
+      const filePath = await resolveDocumentPath(d.filePath);
+      if (filePath) await fs.unlink(filePath).catch(() => {});
+    }));
 
     const summary = Object.entries(removed).filter(([, n]) => n).map(([t, n]) => `${t}=${n}`).join(', ') || 'no related records';
     console.log(`[DELETE] ${initiative.type} "${initiative.name}" (${id}) by ${req.user.email || req.user.id}: ${summary}`);

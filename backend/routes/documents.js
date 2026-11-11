@@ -6,8 +6,8 @@ import { fileURLToPath } from 'url';
 import store from '../store.js';
 import crypto from 'crypto';
 import { authenticateToken } from '../middleware/auth.js';
-import { sendCRCreationEmail } from '../services/email.js';
-import { initiativeTriggersCrCreationEmail } from '../services/cr-email-eligibility.js';
+import { crDocumentUploaded } from '../services/cr-email-queue.js';
+import { UPLOADS_DIR as uploadsDir, resolveDocumentPath } from '../services/uploads.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -17,18 +17,8 @@ const router = express.Router();
 const now = () => new Date().toISOString();
 const uuid = () => crypto.randomUUID();
 
-// Ensure uploads directory exists
-// Use /app/uploads instead of /app/backend/uploads for better compatibility
-const uploadsDir = path.join(process.cwd(), 'uploads');
-
-// Create uploads directory synchronously on module load
-(async () => {
-  try {
-    await fs.mkdir(uploadsDir, { recursive: true });
-  } catch (error) {
-    console.error('Error creating uploads directory:', error);
-  }
-})();
+// Files go to UPLOADS_DIR (services/uploads.js): the shared Synology folder on
+// staging / production, checked for write access at start-up (server.js).
 
 // Configure multer for file uploads
 const storage = multer.diskStorage({
@@ -95,66 +85,15 @@ router.post('/', authenticateToken, upload.single('file'), async (req, res) => {
   data.documents.push(document);
   await store.write(data);
 
-  // Check if this is a CR and send email with documents (only once)
+  // A CR's creation email waits for its documents: push it to ~15 s after this upload
+  // so every file uploaded with the CR is attached (services/cr-email-queue.js).
   try {
-    const initiative = data.initiatives.find(i => i.id === initiativeId);
-    if (initiative && initiative.type === 'CR' && initiativeTriggersCrCreationEmail(data, initiative)) {
-      // Check if CR was created recently (within 10 minutes) to send email with documents
-      const crCreatedAt = new Date(initiative.createdAt);
-      const now = new Date();
-      const minutesSinceCreation = (now - crCreatedAt) / (1000 * 60);
-      
-      // Only send email if CR was created recently (to avoid sending emails for old CRs when documents are added later)
-      if (minutesSinceCreation <= 10) {
-        // Get all documents for this CR
-        const allDocuments = (data.documents || []).filter(d => d.initiativeId === initiativeId);
-        
-        // Check if email was already sent for this CR
-        const emailFlag = `cr_email_pending_${initiativeId}`;
-        const flag = global[emailFlag];
-        
-        // Only send email if it hasn't been sent yet
-        if (flag && !flag.sent) {
-          // Get user lookups for email addresses
-          const userLookups = data.users.map(u => ({
-            id: u.id,
-            name: u.name,
-            email: u.email || null
-          }));
-          
-          // Prepare CR data for email
-          const crData = {
-            name: initiative.name,
-            description: initiative.description,
-            businessImpact: initiative.businessImpact,
-            priority: initiative.priority,
-            businessOwnerId: initiative.businessOwnerId,
-            businessUserIds: initiative.businessUserIds,
-            itPicId: initiative.itPicId,
-            itPicIds: initiative.itPicIds,
-            itManagerIds: initiative.itManagerIds
-          };
-          
-          console.log(`[CR EMAIL] Sending email for CR ${initiative.name} with ${allDocuments.length} document(s)`);
-          
-          // Mark as sent before sending to prevent duplicates
-          flag.sent = true;
-          
-          // Send email with all documents (asynchronously, don't block response)
-          sendCRCreationEmail(crData, userLookups, allDocuments).then(() => {
-            console.log(`[CR EMAIL] Email sent successfully for CR ${initiative.name}`);
-            delete global[emailFlag];
-          }).catch(error => {
-            console.error('[EMAIL ERROR] Failed to send CR creation email with documents:', error);
-            flag.sent = false; // Reset flag on error so we can retry
-          });
-        } else if (!flag) {
-          console.log(`[CR EMAIL] Skipped for ${initiative.name} (CR creation email only for SAP FICO / SAP NON FICO, or already sent)`);
-        }
-      }
+    const initiative = data.initiatives.find((i) => i.id === initiativeId);
+    if (initiative?.type === 'CR' && (await crDocumentUploaded(initiativeId))) {
+      console.log(`[CR EMAIL] Document added to "${initiative.name}"; email will include it`);
     }
   } catch (emailError) {
-    console.error('[EMAIL ERROR] Error sending CR creation email:', emailError);
+    console.error('[EMAIL ERROR] Could not reschedule the CR creation email:', emailError.message);
     // Don't fail the document upload if email fails
   }
 
@@ -171,10 +110,9 @@ router.get('/:id/download', authenticateToken, async (req, res) => {
   }
 
   try {
-    const filePath = document.filePath;
-    const fileExists = await fs.access(filePath).then(() => true).catch(() => false);
-    
-    if (!fileExists) {
+    const filePath = await resolveDocumentPath(document.filePath);
+
+    if (!filePath) {
       return res.status(404).json({ error: 'File not found on server' });
     }
 
@@ -208,7 +146,8 @@ router.delete('/:id', authenticateToken, async (req, res) => {
 
   // Delete file from filesystem
   try {
-    await fs.unlink(document.filePath).catch(() => {
+    const filePath = await resolveDocumentPath(document.filePath);
+    if (filePath) await fs.unlink(filePath).catch(() => {
       // File might already be deleted, continue anyway
     });
   } catch (error) {
