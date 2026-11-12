@@ -1024,3 +1024,5 @@ nav.dash-nav { justify-content: flex-start; width: auto; }
 .ext-ids .muted { margin: 0; }
 .chip.ext-id { font-family: var(--font-family-mono); font-size: 12px; }
 input[name="externalIds"] + small { display: block; margin-top: 4px; font-size: 12px; }
+
+.ext-hint { display: block; margin-top: 4px; font-size: 12px; }

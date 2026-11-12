@@ -19,9 +19,10 @@ function readExternalIds(req, res, data, selfId) {
   }
   const clash = findExternalIdConflict(data.dwsApplications, result.ids, selfId);
   if (clash) {
-    res.status(409).json({
-      error: `External ID "${clash.externalId}" is already used by "${clash.row.systemName}"`,
-    });
+    // External IDs here are ERP module ids; name the module when we know it.
+    const mod = (data.erpModules || []).find((m) => m.id === clash.externalId);
+    const what = mod ? `ERP module "${mod.name}"` : `External ID "${clash.externalId}"`;
+    res.status(409).json({ error: `${what} is already used by "${clash.row.systemName}"` });
     return null;
   }
   return result.ids;

@@ -24,6 +24,7 @@ import {
   projectMilestoneMatchesFilter,
 } from '../projectMilestones.js';
 import { normalizeExternalIds, findExternalIdConflict } from '../externalIds.js';
+import { ERP_CR_FIELDS, readErpCrFields } from '../erpCrFields.js';
 
 // Per-type rules. `cr` = the type has the nested `cr` change-request dates object.
 const TYPES = {
@@ -73,6 +74,7 @@ const UPDATABLE_FIELDS = [
   'remark',
   'documentationLink',
   'externalIds',
+  ...ERP_CR_FIELDS,
 ];
 
 const CR_DATE_FIELDS = [
@@ -142,7 +144,9 @@ function applyFilters(rows, reqBody, rules) {
         String(r.name || '').toLowerCase().includes(qLower) ||
         String(r.description || '').toLowerCase().includes(qLower) ||
         String(r.ticket || '').toLowerCase().includes(qLower) ||
-        (r.externalIds || []).some((x) => String(x).toLowerCase().includes(qLower))
+        (r.externalIds || []).some((x) => String(x).toLowerCase().includes(qLower)) ||
+        String(r.tCode || '').toLowerCase().includes(qLower) ||
+        String(r.crReference || '').toLowerCase().includes(qLower)
       );
     });
   }
@@ -261,6 +265,9 @@ async function updateInitiative(req, res, type) {
       }
       body.externalIds = result.ids;
     }
+    const erpCr = readErpCrFields(body, data);
+    if (erpCr.error) return res.status(400).json({ error: erpCr.error });
+    Object.assign(body, erpCr.values);
 
     for (const k of UPDATABLE_FIELDS) {
       if (!(k in body)) continue;

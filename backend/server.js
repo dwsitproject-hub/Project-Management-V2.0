@@ -48,6 +48,7 @@ import { requestTimeout } from './middleware/timeout.js';
 import { crsRouter as apiV1CrsRouter, initiativesRouter as apiV1InitiativesRouter } from './routes/api-v1-initiatives.js';
 import dwsApplicationsRouter from './routes/dws-applications.js';
 import departmentsRouter from './routes/departments.js';
+import erpModulesRouter from './routes/erp-modules.js';
 import managementDashboardRouter from './routes/management-dashboard.js';
 import ssoRouter from './routes/sso.js';
 import hubSdkRouter from './routes/hub-sdk.js';
@@ -80,6 +81,7 @@ app.use('/api/v1/initiatives', authenticateToken, requestTimeout(5000), apiV1Ini
 app.use('/api/dws-applications', authenticateToken, dwsApplicationsRouter);
 // Department Master (admin only); everyone else reads departments via /api/lookups
 app.use('/api/departments', authenticateToken, requireAdmin, departmentsRouter);
+app.use('/api/erp-modules', authenticateToken, erpModulesRouter);
 app.use('/api/management-dashboard', authenticateToken, managementDashboardRouter);
 
 // Health

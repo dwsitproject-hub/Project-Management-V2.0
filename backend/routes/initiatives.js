@@ -6,6 +6,7 @@ import { resolveDocumentPath } from '../services/uploads.js';
 import { initiativeTriggersCrCreationEmail } from '../services/cr-email-eligibility.js';
 import fs from 'fs/promises';
 import { normalizeExternalIds, findExternalIdConflict } from '../externalIds.js';
+import { ERP_CR_FIELDS, readErpCrFields } from '../erpCrFields.js';
 import {
   CR_TASK_DEFINITIONS,
   getCrAssigneeIdFromBody,
@@ -179,7 +180,9 @@ router.get('/', async (req, res) => {
       (r.name || '').toLowerCase().includes(qLower) ||
       (r.description || '').toLowerCase().includes(qLower) ||
       (r.ticket || '').toLowerCase().includes(qLower) ||
-      (r.externalIds || []).some((x) => String(x).toLowerCase().includes(qLower))
+      (r.externalIds || []).some((x) => String(x).toLowerCase().includes(qLower)) ||
+      (r.tCode || '').toLowerCase().includes(qLower) ||
+      (r.crReference || '').toLowerCase().includes(qLower)
     );
   }
   if (type) rows = rows.filter(r => r.type === type);
@@ -346,6 +349,8 @@ router.post('/', async (req, res) => {
   const data = await store.read();
   const externalIds = readExternalIds(req, res, data, null);
   if (!externalIds) return;
+  const erpCr = readErpCrFields(req.body, data);
+  if (erpCr.error) return res.status(400).json({ error: erpCr.error });
 
   // Convert arrays to comma-separated strings for storage
   const businessUserIdsStr = Array.isArray(businessUserIds) ? businessUserIds.join(',') : (businessUserIds || null);
@@ -378,6 +383,8 @@ router.post('/', async (req, res) => {
     crMilestonePhase: null,
     startDate,endDate: endDate||null,planStartDate: planStartDate||null,planEndDate: planEndDate||null,remark: remark||null,documentationLink: documentationLink||null,
     externalIds,
+    erpModuleId: null, tCode: null, functionalDepartment: null, crReference: null,
+    ...erpCr.values,
     createdAt, updatedAt
   });
   if (type === 'CR') {
@@ -472,7 +479,10 @@ router.put('/:id', async (req, res) => {
     if (!externalIds) return;
     req.body.externalIds = externalIds;
   }
-  const allowed = ['name','ticket','description','businessImpact','priority','businessOwnerId','businessUserIds','departmentId','itPicId','itPicIds','itPmId','itManagerIds','systemImpactedIds','status','milestone','startDate','endDate','planStartDate','planEndDate','remark','documentationLink','externalIds'];
+  const erpCr = readErpCrFields(req.body, data);
+  if (erpCr.error) return res.status(400).json({ error: erpCr.error });
+  Object.assign(req.body, erpCr.values); // trimmed; empty -> null
+  const allowed = ['name','ticket','description','businessImpact','priority','businessOwnerId','businessUserIds','departmentId','itPicId','itPicIds','itPmId','itManagerIds','systemImpactedIds','status','milestone','startDate','endDate','planStartDate','planEndDate','remark','documentationLink','externalIds', ...ERP_CR_FIELDS];
   
   // Track changes and update fields
   for (const k of allowed) {

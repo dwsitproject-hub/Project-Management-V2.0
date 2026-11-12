@@ -2412,8 +2412,16 @@ let lookupsLoading = null; // shared by concurrent callers so /api/lookups is fe
 async function ensureLookups() {
   if (LOOKUPS.users.length && LOOKUPS.departments.length) return LOOKUPS;
   if (!lookupsLoading) {
-    lookupsLoading = fetchJSON('/api/lookups')
-      .then((data) => { LOOKUPS = data; return LOOKUPS; })
+    // ERP modules (reference copy of the ERP CR system's modules) come from their own
+    // signed-in endpoint; a failure there must not break the page, so it falls back to [].
+    lookupsLoading = Promise.all([
+      fetchJSON('/api/lookups'),
+      fetchJSON('/api/erp-modules').catch(() => []),
+    ])
+      .then(([data, erpModules]) => {
+        LOOKUPS = { ...data, erpModules: Array.isArray(erpModules) ? erpModules : [] };
+        return LOOKUPS;
+      })
       .finally(() => { lookupsLoading = null; });
   }
   return lookupsLoading;
@@ -2508,6 +2516,10 @@ function formatActivityFieldLabelGlobal(field) {
     planEndDate: 'Plan End Date',
     documentationLink: 'Project Doc Link',
     externalIds: 'External IDs',
+    erpModuleId: 'ERP Module',
+    tCode: 'T-Code',
+    functionalDepartment: 'Functional Department',
+    crReference: 'CR Reference',
   };
   if (mapping[field]) return mapping[field];
   return String(field).charAt(0).toUpperCase() + String(field).slice(1).replace(/([A-Z])/g, ' $1').trim();
@@ -2515,6 +2527,7 @@ function formatActivityFieldLabelGlobal(field) {
 
 function formatActivityValueGlobal(field, raw) {
   if (raw === null || raw === undefined || raw === '') return '(empty)';
+    if (field === 'erpModuleId') return erpModuleLabel(String(raw));
   if (field === 'businessOwnerId' || field === 'itPicId' || field === 'itPmId' || field === 'changedBy') {
     const name = nameById(LOOKUPS.users, raw);
     return name || String(raw);
@@ -3473,7 +3486,11 @@ async function renderList() {
       planStartDate: 'Plan Start Date',
       planEndDate: 'Plan End Date',
       documentationLink: 'Project Doc Link',
-      externalIds: 'External IDs'
+      externalIds: 'External IDs',
+      erpModuleId: 'ERP Module',
+      tCode: 'T-Code',
+      functionalDepartment: 'Functional Department',
+      crReference: 'CR Reference'
     };
     if (mapping[field]) return mapping[field];
     return field.charAt(0).toUpperCase() + field.slice(1).replace(/([A-Z])/g, ' $1').trim();
@@ -3482,6 +3499,7 @@ async function renderList() {
   // Helper to format activity log values (IDs -> names, etc.)
   const formatActivityValue = (field, raw) => {
     if (raw === null || raw === undefined || raw === '') return '(empty)';
+    if (field === 'erpModuleId') return erpModuleLabel(String(raw));
 
     // For user single-value fields
     if (field === 'businessOwnerId' || field === 'itPicId' || field === 'itPmId' || field === 'changedBy') {
@@ -4022,6 +4040,69 @@ function externalIdChips(raw, empty = '') {
   return ids.length ? ids.map((id) => `<span class="chip ext-id">${escapeHtml(id)}</span>`).join(' ') : empty;
 }
 
+// ---- ERP modules (ERP CR system's module master) ----
+function erpModuleById(id) {
+  return (LOOKUPS.erpModules || []).find((m) => m.id === id) || null;
+}
+
+/** "FI" for a known module, the raw id for an unknown one, '' for none. */
+function erpModuleLabel(id) {
+  if (!id) return '';
+  const m = erpModuleById(id);
+  return m ? `${m.name}${m.isActive === false ? ' (inactive)' : ''}` : id;
+}
+
+/** Module chips for a DWS application's externalIds (they hold ERP module ids). */
+function erpModuleChips(raw, empty = '') {
+  const ids = externalIdList(raw);
+  if (!ids.length) return empty;
+  return ids.map((id) => {
+    const m = erpModuleById(id);
+    return `<span class="chip ext-id" title="${escapeHtml(id)}">${escapeHtml(m ? m.name : id)}${m ? '' : ' <span class="tag-muted">not in ERP modules</span>'}</span>`;
+  }).join(' ');
+}
+
+/**
+ * Picker for a DWS application's ERP modules (saved in externalIds). Active modules are
+ * listed; ids already saved stay selectable even if inactive or unknown, so editing an
+ * application never drops a mapping silently.
+ */
+function erpModulesMultiSelect(selectedRaw) {
+  const selected = externalIdList(selectedRaw);
+  const opts = (LOOKUPS.erpModules || [])
+    .filter((m) => m.isActive !== false || selected.includes(m.id))
+    .map((m) => ({ id: m.id, name: `${m.name}${m.isActive === false ? ' (inactive)' : ''}` }));
+  for (const id of selected) if (!opts.some((o) => o.id === id)) opts.push({ id, name: `${id} (not in ERP modules)` });
+  return createMultiSelect('externalIds', opts.map((o) => ({ id: escapeHtml(o.id), name: escapeHtml(o.name) })), selected.map(escapeHtml));
+}
+
+/** Select for a CR's ERP module (initiatives.erpModuleId). */
+function erpModuleSelect(selectedId) {
+  const mods = (LOOKUPS.erpModules || []).filter((m) => m.isActive !== false || m.id === selectedId);
+  const known = mods.some((m) => m.id === selectedId);
+  return `<select name="erpModuleId">
+    <option value="">— None —</option>
+    ${mods.map((m) => `<option value="${escapeHtml(m.id)}" ${m.id === selectedId ? 'selected' : ''}>${escapeHtml(erpModuleLabel(m.id))}</option>`).join('')}
+    ${selectedId && !known ? `<option value="${escapeHtml(selectedId)}" selected>${escapeHtml(selectedId)} (not in ERP modules)</option>` : ''}
+  </select>`;
+}
+
+/** Form rows for the CR fields that come from ERP (CR type only). */
+function erpCrFieldRows(i) {
+  return [
+    formRow('ERP Module', erpModuleSelect(i?.erpModuleId || '')),
+    formRow('T-Code', `<input name="tCode" value="${escapeHtml(i?.tCode || '')}" maxlength="255" placeholder="e.g. ZMM001" autocomplete="off" />`),
+    formRow('Functional Department', `<input name="functionalDepartment" value="${escapeHtml(i?.functionalDepartment || '')}" maxlength="255" autocomplete="off" />`),
+    formRow('CR Reference', `<input name="crReference" value="${escapeHtml(i?.crReference || '')}" maxlength="255" placeholder="Ticket number of a related CR" autocomplete="off" />`),
+  ].join('');
+}
+
+/** The same four fields for a payload (CR only; empty text -> null). */
+function erpCrFieldsFromForm(obj) {
+  const t = (v) => String(v ?? '').trim() || null;
+  return { erpModuleId: t(obj.erpModuleId), tCode: t(obj.tCode), functionalDepartment: t(obj.functionalDepartment), crReference: t(obj.crReference) };
+}
+
 // Helper function to create searchable single-select dropdown
 function createSearchableSelect(name, options, selectedValue = '', placeholder = 'Select...', allowNone = false) {
   const selectedOption = options.find(opt => opt.id === selectedValue);
@@ -4274,7 +4355,7 @@ function commonFields(initiative = null, defaultType = 'Project', nameLabel = 'I
     formRow('IT PM', createSearchableSelect('itPmId', itPmUsers, initiative?.itPmId || '', 'Select...', true)),
     formRow('IT Manager', createMultiSelect('itManagerIds', itManagerUsers, initiative?.itManagerIds || [])),
     ...(selectedType === 'CR'
-      ? [formRow('System Impacted', createMultiSelect('systemImpactedIds', dwsAppOptions, initiative?.systemImpactedIds || []))]
+      ? [formRow('System Impacted', createMultiSelect('systemImpactedIds', dwsAppOptions, initiative?.systemImpactedIds || [])), erpCrFieldRows(initiative)]
       : []),
     formRow('Status', `<select name="status">${['Not Started','On Hold','On Track','At Risk','Delayed','Live','Cancelled'].map(s => option(s, s, initiative?.status === s)).join('')}</select>`),
     formRow('Milestone', `<select name="milestone">${
@@ -4576,7 +4657,8 @@ async function renderNew(defaultType = 'Project') {
       planEndDate: obj.planEndDate || null,
       remark: obj.remark || null,
       documentationLink: obj.documentationLink || null,
-      externalIds: externalIdList(obj.externalIds)
+      externalIds: externalIdList(obj.externalIds),
+      ...(obj.type === 'CR' ? erpCrFieldsFromForm(obj) : {})
     };
     // CR dates removed - no longer used
     if (obj.type === 'CR') {
@@ -4803,7 +4885,11 @@ async function renderView(id) {
       planStartDate: 'Plan Start Date',
       planEndDate: 'Plan End Date',
       documentationLink: 'Project Doc Link',
-      externalIds: 'External IDs'
+      externalIds: 'External IDs',
+      erpModuleId: 'ERP Module',
+      tCode: 'T-Code',
+      functionalDepartment: 'Functional Department',
+      crReference: 'CR Reference'
     };
     if (mapping[field]) return mapping[field];
     return field.charAt(0).toUpperCase() + field.slice(1).replace(/([A-Z])/g, ' $1').trim();
@@ -4812,6 +4898,7 @@ async function renderView(id) {
   // Helper to format activity log values (IDs -> names, etc.)
   const formatActivityValue = (field, raw) => {
     if (raw === null || raw === undefined || raw === '') return '(empty)';
+    if (field === 'erpModuleId') return erpModuleLabel(String(raw));
 
     // Single user ID fields
     if (field === 'businessOwnerId' || field === 'itPicId' || field === 'itPmId' || field === 'changedBy') {
@@ -4936,6 +5023,11 @@ async function renderView(id) {
           <div><div class="muted">Total Age</div><div><strong>${totalAge !== null ? totalAge + ' days' : 'N/A'}</strong></div></div>
           ${i.type === 'CR' ? `<div><div class="muted">System Impacted</div><div>${escapeHtml(dwsSystemNamesFromInitiative(i) || '')}</div></div>` : ''}
           <div><div class="muted">External IDs</div><div class="ext-ids">${externalIdChips(i.externalIds, '<span class="muted">—</span>')}</div></div>
+          ${i.type === 'CR' ? `
+          <div><div class="muted">ERP Module</div><div>${escapeHtml(erpModuleLabel(i.erpModuleId)) || '<span class="muted">—</span>'}</div></div>
+          <div><div class="muted">T-Code</div><div>${escapeHtml(i.tCode || '') || '<span class="muted">—</span>'}</div></div>
+          <div><div class="muted">Functional Department</div><div>${escapeHtml(i.functionalDepartment || '') || '<span class="muted">—</span>'}</div></div>
+          <div><div class="muted">CR Reference</div><div>${escapeHtml(i.crReference || '') || '<span class="muted">—</span>'}</div></div>` : ''}
           <div style="grid-column: 1 / -1"><div class="muted">Description</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.description || '')}</div></div>
           <div style="grid-column: 1 / -1"><div class="muted">Business Impact</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.businessImpact || '')}</div></div>
           <div style="grid-column: 1 / -1"><div class="muted">Remark</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.remark || '')}</div></div>
@@ -5398,7 +5490,7 @@ async function renderView(id) {
             : PROJECT_MILESTONES.map(m => `<option value="${m}" ${normalizeProjectMilestoneForDisplay(i.milestone) === m ? 'selected' : ''}>${m}</option>`).join('')
         }</select>`)}
         ${formRow('Department', createSearchableSelect('departmentId', LOOKUPS.departments, i.departmentId || '', 'Select...'))}
-        ${i.type === 'CR' ? formRow('System Impacted', createMultiSelect('systemImpactedIds', (LOOKUPS.dwsApplications || []).map(a => ({ id: a.id, name: a.systemName })), i.systemImpactedIds || [])) : ''}
+        ${i.type === 'CR' ? formRow('System Impacted', createMultiSelect('systemImpactedIds', (LOOKUPS.dwsApplications || []).map(a => ({ id: a.id, name: a.systemName })), i.systemImpactedIds || [])) + erpCrFieldRows(i) : ''}
         ${formRow('Actual Start Date', `<input type="date" name="startDate" value="${i.startDate?.slice(0,10) || ''}" />`)}
         ${formRow('Actual End Date', `<input type="date" name="endDate" value="${i.endDate?.slice(0,10) || ''}" />`)}
         ${formRow('Plan Start Date', `<input type="date" name="planStartDate" value="${i.planStartDate?.slice(0,10) || ''}" required />`)}
@@ -5473,6 +5565,7 @@ async function renderView(id) {
       remark: obj.remark || null,
         documentationLink: obj.documentationLink || null,
         externalIds: externalIdList(obj.externalIds),
+        ...(i.type === 'CR' ? erpCrFieldsFromForm(obj) : {}),
         changedBy: currentUser?.id || 'Unknown'
       };
       
@@ -6931,6 +7024,7 @@ async function renderEdit(id) {
       remark: obj.remark || null,
       documentationLink: obj.documentationLink || null,
       externalIds: externalIdList(obj.externalIds),
+      ...(i.type === 'CR' ? erpCrFieldsFromForm(obj) : {}),
       changedBy: currentUser?.id || 'Unknown'
     };
     // CR dates removed - no longer used
@@ -11400,7 +11494,7 @@ async function renderMasterDwsApplications() {
   let selectedId = apps[0]?.id || null;
 
   app.innerHTML = `
-    ${pageHeader('DWS Applications', 'The systems a CR can impact. Pick one to see its links, deployment steps and the CRs that touch it.', '<button type="button" class="primary" id="btn-add-dws"><svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Add application</button>')}
+    ${pageHeader('DWS Applications', 'The systems a CR can impact. Pick one to see its links, deployment steps and the CRs that touch it.', '<button type="button" id="btn-erp-modules">ERP modules</button> <button type="button" class="primary" id="btn-add-dws"><svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Add application</button>')}
     ${apps.length ? `
     <div class="dws-layout">
       <section class="dws-side">
@@ -11411,7 +11505,7 @@ async function renderMasterDwsApplications() {
         </label>
         <div class="dws-list" id="dws-list">
           ${apps.map((a) => `
-            <button type="button" class="dws-item" data-id="${escape(a.id)}" data-search="${escape([a.systemName, ...externalIdList(a.externalIds)].join(' ').toLowerCase())}" aria-pressed="false">
+            <button type="button" class="dws-item" data-id="${escape(a.id)}" data-search="${escape([a.systemName, ...externalIdList(a.externalIds).flatMap((id) => [id, erpModuleById(id)?.name || ''])].join(' ').toLowerCase())}" aria-pressed="false">
               <span class="dws-icon" style="background:${colorFor(a.systemName)}">${escape(abbr(a.systemName))}</span>
               <span class="dws-item-text">
                 <span class="dws-item-name">${escape(a.systemName)}</span>
@@ -11437,7 +11531,7 @@ async function renderMasterDwsApplications() {
           ${formRow('System Staging URL', `<input name="stagingUrl" type="url" value="${escape(existing?.stagingUrl || '')}" placeholder="https://..." />`)}
           ${formRow('Github URL', `<textarea name="githubUrl" rows="3" style="width:100%;resize:vertical;" placeholder="Repository link or description...">${escape(existing?.githubUrl || '')}</textarea>`)}
           ${formRow('Deployment Steps', `<textarea name="deploymentSteps" rows="5" style="width:100%;resize:vertical;" placeholder="Step-by-step deployment instructions for this application...">${escape(existing?.deploymentSteps || '')}</textarea>`)}
-          ${formRow('External IDs', externalIdsInput(existing?.externalIds, 'e.g. FI, CO', 'ERP module codes that map to this application, separated by commas. Each code can belong to one application only.'))}
+          ${formRow('ERP Modules', `${erpModulesMultiSelect(existing?.externalIds)}<small class="muted ext-hint">ERP modules that map to this application (saved as its External IDs). Each module can belong to one application only.${(LOOKUPS.erpModules || []).length ? '' : ' No ERP modules loaded yet.'}</small>`)}
           <div style="display:flex; gap: 12px;">
             <button type="submit" class="primary">${mode === 'create' ? 'Create' : 'Save'}</button>
             <button type="button" id="btn-cancel">Cancel</button>
@@ -11446,6 +11540,7 @@ async function renderMasterDwsApplications() {
       </div>
     `;
     document.body.appendChild(modal);
+    initializeMultiSelects();
 
     modal.querySelector('#btn-cancel').onclick = () => modal.remove();
     modal.onclick = (e) => {
@@ -11583,6 +11678,73 @@ async function renderMasterDwsApplications() {
   };
 
   document.getElementById('btn-add-dws').onclick = () => openModal('create');
+  // ERP modules: reference copy of the ERP CR system's module master. Loaded here by
+  // pasting an ERP export; modules are never deleted, only switched inactive.
+  const openErpModulesModal = () => {
+    const modal = document.createElement('div');
+    modal.className = 'modal-backdrop';
+    const draw = () => {
+      const mods = (LOOKUPS.erpModules || []).slice().sort((a, b) => String(a.name).localeCompare(String(b.name)));
+      modal.innerHTML = `
+        <div class="modal-content" style="max-width: 820px; width: 95%;">
+          <div style="display:flex; justify-content: space-between; align-items:center; gap:12px;">
+            <h3 style="margin:0;">ERP modules <span class="tag-muted">${mods.length}</span></h3>
+            <button type="button" data-act="close">Close</button>
+          </div>
+          <p class="muted" style="margin:8px 0 12px;">Copy of the ERP CR system's <code>modules</code>. The ID is ERP's <code>modules.id</code>; map modules to applications with Edit → ERP Modules.</p>
+          <div class="erp-mod-list" style="max-height:340px;overflow:auto;">
+            ${mods.length ? `<table class="table" style="width:100%;"><thead><tr><th>Name</th><th>ERP ID</th><th>Used by</th><th>Active</th></tr></thead><tbody>
+              ${mods.map((m) => {
+                const usedBy = apps.filter((a) => externalIdList(a.externalIds).includes(m.id)).map((a) => a.systemName);
+                return `<tr>
+                  <td><strong>${escape(m.name)}</strong>${m.description ? `<br><small class="muted">${escape(m.description)}</small>` : ''}</td>
+                  <td><code class="ext-id">${escape(m.id)}</code></td>
+                  <td>${usedBy.length ? escape(usedBy.join(', ')) : '<span class="muted">—</span>'}</td>
+                  <td><input type="checkbox" class="switch" data-act="toggle" data-id="${escape(m.id)}" ${m.isActive !== false ? 'checked' : ''} aria-label="Active"></td>
+                </tr>`;
+              }).join('')}</tbody></table>` : '<p class="panel-empty">No ERP modules yet. Paste them below.</p>'}
+          </div>
+          <h4 style="margin:16px 0 6px;">Import / update from ERP</h4>
+          <textarea id="erp-mod-paste" rows="5" style="width:100%;resize:vertical;font-family:var(--font-family-mono);" placeholder="One module per line: id, name, department_id (optional), description (optional)&#10;Tab-separated rows copied from Excel also work."></textarea>
+          <div style="display:flex; gap:12px; align-items:center; margin-top:8px;">
+            <button type="button" class="primary" data-act="import">Import</button>
+            <span class="muted" id="erp-mod-msg"></span>
+          </div>
+        </div>`;
+      modal.querySelector('[data-act="close"]').onclick = close;
+      modal.querySelectorAll('[data-act="toggle"]').forEach((cb) => {
+        cb.onchange = async () => {
+          try {
+            await fetchJSON(`/api/erp-modules/${encodeURIComponent(cb.dataset.id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ isActive: cb.checked }) });
+            await reloadModules();
+          } catch (err) { cb.checked = !cb.checked; notify(err.message || String(err)); }
+        };
+      });
+      modal.querySelector('[data-act="import"]').onclick = async () => {
+        const rows = modal.querySelector('#erp-mod-paste').value.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+        const items = rows
+          .map((l) => (l.includes('\t') ? l.split('\t') : l.split(',')).map((c) => c.trim().replace(/^"(.*)"$/, '$1')))
+          .filter((c) => !/^id$/i.test(c[0])) // skip a header row
+          .map(([id, name, erpDepartmentId, ...rest]) => ({ id, name, erpDepartmentId: erpDepartmentId || null, description: rest.join(', ') || null }));
+        if (!items.length) return notify('Paste at least one module line.');
+        try {
+          const r = await fetchJSON('/api/erp-modules/bulk', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(items) });
+          await reloadModules();
+          modal.querySelector('#erp-mod-msg').textContent = `${r.created} added, ${r.updated} updated, ${r.unchanged} unchanged.`;
+        } catch (err) { notify(err.message || String(err)); }
+      };
+    };
+    const reloadModules = async () => {
+      LOOKUPS.erpModules = await fetchJSON('/api/erp-modules');
+      draw();
+    };
+    const close = () => { modal.remove(); renderMasterDwsApplications(); };
+    modal.addEventListener('click', (e) => { if (e.target === modal) close(); });
+    draw();
+    document.body.appendChild(modal);
+  };
+  document.getElementById('btn-erp-modules').onclick = openErpModulesModal;
+
 
   const deleteApp = async (existing) => {
     if (!(await confirmDialog(`Delete "${existing?.systemName || 'this application'}"?`, { title: 'Delete application', confirmText: 'Delete', danger: true }))) return;
@@ -11631,8 +11793,8 @@ async function renderMasterDwsApplications() {
         ${ghSingleUrl ? linkCard('GitHub', gh) : `<div class="dws-link ${gh ? '' : 'is-empty'}"><span class="dws-link-k">GitHub</span><span class="dws-link-v dws-wrap">${gh ? linkify(gh) : 'Not set'}</span></div>`}
       </div>
       <div class="dws-block">
-        <h3>External IDs</h3>
-        <div class="ext-ids">${externalIdChips(a.externalIds, '<p class="muted">No ERP module codes mapped yet. Use Edit to add them.</p>')}</div>
+        <h3>ERP modules</h3>
+        <div class="ext-ids">${erpModuleChips(a.externalIds, '<p class="muted">No ERP modules mapped yet. Use Edit to add them.</p>')}</div>
       </div>
       <div class="dws-block">
         <h3>Deployment steps</h3>
