@@ -1,0 +1,580 @@
+<title>PM Tools ERP CR Sync API</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: reference doc. Sticky contents rail on the left (desktop), one reading column; stacks on phones.
+   Palette follows PM Tools' "Ember" theme so the guide reads as part of the product. */
+:root {
+  --bg: #F8F4F4;
+  --surface: #FFFFFF;
+  --fill: #F5EEEF;
+  --line: #ECE3E5;
+  --ink: #1A1114;
+  --ink-2: #4A2630;
+  --muted: #6A5B60;
+  --accent: #D7263D;
+  --accent-deep: #B01C30;
+  --accent-tint: #FDECEE;
+  --code-bg: #1E1216;
+  --code-fg: #F3E8EA;
+  --code-key: #FF9A7A;
+  --code-str: #9FD8B0;
+  --code-dim: #A88F96;
+  --m-get: #1F4FA6;   --m-get-bg: #E8F0FE;
+  --m-put: #17663A;   --m-put-bg: #E5F5EC;
+  --m-patch: #8A4A00; --m-patch-bg: #FFF2DE;
+  --m-post: #6B2BA8;  --m-post-bg: #F2E8FC;
+  --warn-bg: #FFF2DE; --warn-fg: #6E3B00;
+  --font-body: 'Inter', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --font-head: 'Space Grotesk', 'Inter', system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #140A0D; --surface: #1D1015; --fill: #26151B; --line: #3A1A23;
+    --ink: #F5ECEE; --ink-2: #E2C9CF; --muted: #A88F96;
+    --accent: #FF5A6E; --accent-deep: #FF8090; --accent-tint: #3A1820;
+    --code-bg: #0E0608; --code-fg: #F3E8EA; --code-key: #FF9A7A; --code-str: #9FD8B0; --code-dim: #8E7880;
+    --m-get: #9DBBFF; --m-get-bg: #1B2740; --m-put: #8FE0AE; --m-put-bg: #15301F;
+    --m-patch: #FFC77A; --m-patch-bg: #3A2A10; --m-post: #D3A8FF; --m-post-bg: #2C1A40;
+    --warn-bg: #3A2A10; --warn-fg: #FFD79A;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #140A0D; --surface: #1D1015; --fill: #26151B; --line: #3A1A23;
+  --ink: #F5ECEE; --ink-2: #E2C9CF; --muted: #A88F96;
+  --accent: #FF5A6E; --accent-deep: #FF8090; --accent-tint: #3A1820;
+  --code-bg: #0E0608; --code-fg: #F3E8EA; --code-key: #FF9A7A; --code-str: #9FD8B0; --code-dim: #8E7880;
+  --m-get: #9DBBFF; --m-get-bg: #1B2740; --m-put: #8FE0AE; --m-put-bg: #15301F;
+  --m-patch: #FFC77A; --m-patch-bg: #3A2A10; --m-post: #D3A8FF; --m-post-bg: #2C1A40;
+  --warn-bg: #3A2A10; --warn-fg: #FFD79A;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  background: var(--bg); color: var(--ink);
+  font: 15px/1.65 var(--font-body);
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 0 64px;
+}
+a { color: var(--accent-deep); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 4px; }
+code, .mono { font-family: var(--font-mono); font-size: 0.86em; }
+p code, li code, td code { background: var(--fill); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; word-break: break-word; }
+h1, h2, h3 { font-family: var(--font-head); color: var(--ink); text-wrap: balance; letter-spacing: -0.3px; }
+
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; grid-template-columns: 220px minmax(0, 1fr); gap: 48px; }
+@media (max-width: 900px) { .wrap { grid-template-columns: minmax(0, 1fr); gap: 0; } .toc { display: none; } }
+
+/* Header */
+.masthead { max-width: 1180px; margin: 0 auto; padding-block: 40px 28px; border-bottom: 1px solid var(--line); margin-bottom: 32px; }
+.eyebrow { font: 600 12px/1 var(--font-body); letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); }
+.masthead h1 { font-size: clamp(28px, 4vw, 40px); line-height: 1.15; margin: 12px 0 10px; }
+.masthead .lede { color: var(--ink-2); max-width: 68ch; margin: 0; }
+.facts { display: flex; flex-wrap: wrap; gap: 8px 28px; margin-top: 20px; font-size: 13px; color: var(--muted); }
+.facts b { color: var(--ink); font-weight: 600; }
+
+/* Contents rail */
+.toc { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 24px); align-self: start; font-size: 13.5px; }
+.toc p { font: 600 11px/1 var(--font-body); letter-spacing: 0.12em; text-transform: uppercase; color: var(--muted); margin: 0 0 12px; }
+.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; counter-reset: toc; }
+.toc a { display: block; padding: 5px 10px; border-radius: 6px; color: var(--ink-2); text-decoration: none; border-left: 2px solid transparent; }
+.toc a:hover { background: var(--fill); }
+.toc a.on { color: var(--accent-deep); border-left-color: var(--accent); background: var(--accent-tint); }
+
+main { min-width: 0; }
+section { padding-block: 8px 28px; scroll-margin-top: 16px; }
+section + section { border-top: 1px solid var(--line); padding-top: 28px; }
+h2 { font-size: 24px; margin: 0 0 12px; display: flex; align-items: baseline; gap: 12px; }
+h2 .n { font: 500 13px/1 var(--font-mono); color: var(--accent); }
+h3 { font-size: 17px; margin: 24px 0 8px; }
+p, li { max-width: 72ch; }
+ul, ol { padding-left: 20px; }
+li + li { margin-top: 4px; }
+
+/* Endpoint list */
+.endpoints { display: grid; gap: 8px; margin: 16px 0; }
+.ep { display: grid; grid-template-columns: 64px minmax(0, 1fr); gap: 4px 14px; align-items: baseline; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.ep .path { font: 500 13.5px/1.4 var(--font-mono); word-break: break-all; color: var(--ink); }
+.ep .use { grid-column: 2; color: var(--muted); font-size: 13.5px; }
+.ep.main { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-tint); }
+.verb { font: 600 11.5px/1 var(--font-mono); letter-spacing: 0.04em; padding: 5px 0; border-radius: 5px; text-align: center; }
+.verb.get { color: var(--m-get); background: var(--m-get-bg); }
+.verb.put { color: var(--m-put); background: var(--m-put-bg); }
+.verb.patch { color: var(--m-patch); background: var(--m-patch-bg); }
+.verb.post { color: var(--m-post); background: var(--m-post-bg); }
+.tag-main { font: 600 10.5px/1 var(--font-body); letter-spacing: 0.08em; text-transform: uppercase; color: var(--accent); margin-left: 8px; }
+
+.op { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 14px; margin: 8px 0 16px; }
+.op .verb { padding: 5px 9px; }
+.op .path { font: 500 14px/1.4 var(--font-mono); word-break: break-all; min-width: 0; }
+
+/* Tables */
+.tbl { overflow-x: auto; margin: 12px 0 18px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 13.5px; }
+th, td { text-align: left; vertical-align: top; padding: 9px 12px; border-bottom: 1px solid var(--line); }
+tr:last-child td { border-bottom: 0; }
+thead th { font: 600 11.5px/1.3 var(--font-body); letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); background: var(--fill); white-space: nowrap; }
+td:first-child code { white-space: nowrap; }
+.req { font: 600 11px/1 var(--font-body); color: var(--accent-deep); background: var(--accent-tint); border-radius: 999px; padding: 3px 8px; white-space: nowrap; }
+.opt { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.arrow { color: var(--muted); }
+
+/* Code */
+.code { position: relative; margin: 12px 0 18px; }
+.code .label { position: absolute; top: 0; left: 0; font: 500 11px/1 var(--font-mono); color: var(--code-dim); padding: 10px 14px; }
+pre { margin: 0; background: var(--code-bg); color: var(--code-fg); border-radius: 10px; padding: 32px 14px 14px; overflow-x: auto; font: 12.8px/1.6 var(--font-mono); tab-size: 2; }
+pre .k { color: var(--code-key); } pre .s { color: var(--code-str); } pre .c { color: var(--code-dim); }
+.copy { position: absolute; top: 6px; right: 6px; font: 500 12px/1 var(--font-body); color: var(--code-fg); background: transparent; border: 1px solid #ffffff2e; border-radius: 6px; padding: 6px 10px; cursor: pointer; }
+.copy:hover { background: #ffffff14; }
+
+/* Callouts */
+.note { background: var(--surface); border: 1px solid var(--line); border-left: 3px solid var(--accent); border-radius: 0 10px 10px 0; padding: 12px 16px; margin: 14px 0; max-width: 78ch; }
+.note p { margin: 0; }
+.note.warn { background: var(--warn-bg); color: var(--warn-fg); border-left-color: var(--m-patch); border-color: transparent; }
+.flow { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; margin: 16px 0; counter-reset: step; }
+.flow div { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; font-size: 13.5px; color: var(--ink-2); }
+.flow div::before { counter-increment: step; content: counter(step); display: block; font: 600 12px/1 var(--font-mono); color: var(--accent); margin-bottom: 8px; }
+.flow b { color: var(--ink); display: block; margin-bottom: 2px; }
+
+.checks { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; }
+.checks > div { background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 14px 18px; min-width: 0; }
+.checks h3 { margin-top: 0; }
+.checks ul { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+.checks li { position: relative; padding-left: 26px; }
+.checks li::before { content: ""; position: absolute; left: 0; top: 4px; width: 14px; height: 14px; border: 1.5px solid var(--muted); border-radius: 4px; }
+footer { max-width: 1180px; margin: 40px auto 0; padding-top: 16px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+</style>
+
+<header class="masthead">
+  <div class="eyebrow">Integration guide · for the ERP team</div>
+  <h1>PM Tools ERP CR Sync API</h1>
+  <p class="lede">ERP CR Management pushes its Change Requests into DWS PM Tools. ERP sends <b>its own values</b>: ERP statuses, segment and stage, High/Medium/Low, emails and codes. PM translates them, so ERP never needs PM's internal IDs or vocabulary.</p>
+  <div class="facts">
+    <span><b>Version</b> 1.0 · 12 Nov 2026</span>
+    <span><b>Direction</b> ERP → PM</span>
+    <span><b>Auth</b> client credentials, scope <code>cr:sync</code></span>
+    <span><b>Mapping source</b> CR System Integration Workbook</span>
+  </div>
+</header>
+
+<div class="wrap">
+  <nav class="toc" aria-label="Contents">
+    <p>Contents</p>
+    <ol>
+      <li><a href="#overview">Overview</a></li>
+      <li><a href="#auth">Authentication</a></li>
+      <li><a href="#upsert">Create or update a CR</a></li>
+      <li><a href="#fields">CR fields</a></li>
+      <li><a href="#response">Response and warnings</a></li>
+      <li><a href="#more">Other endpoints</a></li>
+      <li><a href="#errors">Errors, retries, ordering</a></li>
+      <li><a href="#mapping">Value mappings</a></li>
+      <li><a href="#golive">Go-live checklist</a></li>
+      <li><a href="#try">Try it</a></li>
+    </ol>
+  </nav>
+
+  <main>
+    <section id="overview">
+      <h2><span class="n">01</span>Overview</h2>
+      <div class="endpoints">
+        <div class="ep"><span class="verb post">POST</span><span class="path">/api/auth/client-token</span><span class="use">Get an access token (30 minutes)</span></div>
+        <div class="ep main"><span class="verb put">PUT</span><span class="path">/api/v1/integrations/erp/crs/{ticketNumber}<span class="tag-main">Main call</span></span><span class="use">Create or update a CR with its full current state, on every change in ERP</span></div>
+        <div class="ep"><span class="verb patch">PATCH</span><span class="path">/api/v1/integrations/erp/crs/{ticketNumber}</span><span class="use">Update a few fields of a CR PM already has (optional)</span></div>
+        <div class="ep"><span class="verb get">GET</span><span class="path">/api/v1/integrations/erp/crs/{ticketNumber}</span><span class="use">Read PM's copy of a CR, including its PM link</span></div>
+        <div class="ep"><span class="verb put">PUT</span><span class="path">/api/v1/integrations/erp/crs</span><span class="use">Batch of up to 200 full CRs: nightly reconciliation, first load</span></div>
+        <div class="ep"><span class="verb put">PUT</span><span class="path">/api/v1/integrations/erp/crs/{ticketNumber}/document</span><span class="use">Upload the CR document (one file, max 30 MB)</span></div>
+        <div class="ep"><span class="verb put">PUT</span><span class="path">/api/v1/integrations/erp/modules</span><span class="use">Send ERP's module master (id and name)</span></div>
+      </div>
+
+      <div class="tbl"><table>
+        <thead><tr><th>Environment</th><th>Base URL</th></tr></thead>
+        <tbody>
+          <tr><td>Staging</td><td><code>http://test-pm.kpndomain.com</code></td></tr>
+          <tr><td>Production</td><td><code>https://pm.energi-up.com</code></td></tr>
+        </tbody>
+      </table></div>
+      <p>Each environment has its own API client and secret. Never use a production secret on staging.</p>
+
+      <h3>How it works</h3>
+      <div class="flow">
+        <div><b>One key</b>Each CR is identified by its ERP Ticket Number, e.g. <code>#ERPO138381</code>.</div>
+        <div><b>Send the whole CR</b>On every change in ERP, PUT the full current CR. PM creates it the first time and updates it after.</div>
+        <div><b>Newest wins</b>Each message carries <code>occurredAt</code>. PM ignores anything older than what it already applied.</div>
+        <div><b>Nightly catch-up</b>A batch of all open CRs at 02:00 WIB corrects anything missed during the day.</div>
+      </div>
+    </section>
+
+    <section id="auth">
+      <h2><span class="n">02</span>Authentication</h2>
+      <p>The PM admin creates an API client for ERP with the scope <code>cr:sync</code> and sends you a <code>clientId</code> and <code>clientSecret</code>, one pair per environment.</p>
+      <div class="code"><span class="label">Request</span><button class="copy" type="button">Copy</button><pre>POST /api/auth/client-token
+Content-Type: application/json
+
+{ <span class="k">"clientId"</span>: <span class="s">"erp-cr-prod"</span>, <span class="k">"clientSecret"</span>: <span class="s">"&lt;secret&gt;"</span> }</pre></div>
+      <div class="code"><span class="label">Response 200</span><button class="copy" type="button">Copy</button><pre>{ <span class="k">"access_token"</span>: <span class="s">"eyJhbGciOi…"</span>, <span class="k">"token_type"</span>: <span class="s">"Bearer"</span>, <span class="k">"expires_in"</span>: 1800, <span class="k">"scope"</span>: <span class="s">"cr:sync"</span> }</pre></div>
+      <ul>
+        <li>Send <code>Authorization: Bearer &lt;access_token&gt;</code> on every call.</li>
+        <li>The token lasts <b>30 minutes</b> and there is no refresh token. Get a new one shortly before it expires, or when a call returns <code>401</code>.</li>
+        <li>A <code>cr:sync</code> client can call only the endpoints in this guide. Any other PM endpoint returns <code>403</code>.</li>
+      </ul>
+    </section>
+
+    <section id="upsert">
+      <h2><span class="n">03</span>Create or update a CR</h2>
+      <div class="op"><span class="verb put">PUT</span><span class="path">/api/v1/integrations/erp/crs/{ticketNumber}</span></div>
+      <ul>
+        <li><code>{ticketNumber}</code> is the ERP Ticket Number, <b>URL-encoded</b>: <code>#</code> becomes <code>%23</code>, so <code>#ERPO138381</code> → <code>/crs/%23ERPO138381</code>. Matching ignores upper/lower case and a leading <code>#</code>.</li>
+        <li>Call it on <b>every</b> change: created, signature added, stage changed, status changed, dates changed, closed or cancelled.</li>
+        <li>The body always holds the <b>full current CR</b>.</li>
+      </ul>
+      <div class="code"><span class="label">Request body</span><button class="copy" type="button">Copy</button><pre>{
+  <span class="k">"eventId"</span>: <span class="s">"6c1b0f0e-6a0e-4c2e-9d0a-5b6c1a2f9e11"</span>,
+  <span class="k">"eventType"</span>: <span class="s">"cr.stage_changed"</span>,
+  <span class="k">"occurredAt"</span>: <span class="s">"2026-11-12T03:15:00Z"</span>,
+  <span class="k">"cr"</span>: {
+    <span class="k">"ticketNumber"</span>: <span class="s">"#ERPO138381"</span>,
+    <span class="k">"crId"</span>: <span class="s">"CR000000123"</span>,
+    <span class="k">"url"</span>: <span class="s">"https://erp.example/cr/CR000000123"</span>,
+    <span class="k">"type"</span>: <span class="s">"Change Request"</span>,
+    <span class="k">"projectType"</span>: false,
+    <span class="k">"changeRequest"</span>: <span class="s">"&lt;p&gt;Add vendor tax field to ZMM001 …&lt;/p&gt;"</span>,
+    <span class="k">"note"</span>: <span class="s">"Needed before month-end closing"</span>,
+    <span class="k">"moduleId"</span>: <span class="s">"FI"</span>,
+    <span class="k">"moduleName"</span>: <span class="s">"Financial Accounting"</span>,
+    <span class="k">"tCode"</span>: <span class="s">"ZMM001"</span>,
+    <span class="k">"functionalDepartment"</span>: <span class="s">"SAP FICO Team"</span>,
+    <span class="k">"requesterDepartmentCode"</span>: <span class="s">"AP1"</span>,
+    <span class="k">"ownership"</span>: { <span class="k">"code"</span>: <span class="s">"OWN-01"</span>, <span class="k">"name"</span>: <span class="s">"Finance"</span> },
+    <span class="k">"impactArea"</span>: { <span class="k">"code"</span>: <span class="s">"IA-03"</span>, <span class="k">"name"</span>: <span class="s">"Payables"</span> },
+    <span class="k">"priority"</span>: <span class="s">"High"</span>,
+    <span class="k">"requesterEmail"</span>: <span class="s">"budi@kpn-corp.com"</span>,
+    <span class="k">"functionalEmail"</span>: <span class="s">"adinda.nisa@kpn-corp.com"</span>,
+    <span class="k">"deptHeadEmail"</span>: <span class="s">"head.finance@kpn-corp.com"</span>,
+    <span class="k">"deptHeadName"</span>: <span class="s">"Head Finance"</span>,
+    <span class="k">"dateCreation"</span>: <span class="s">"2026-11-02"</span>,
+    <span class="k">"targetResolved"</span>: <span class="s">"2026-12-15"</span>,
+    <span class="k">"createdAt"</span>: <span class="s">"2026-11-02T02:10:00Z"</span>,
+    <span class="k">"closedAt"</span>: null,
+    <span class="k">"status"</span>: <span class="s">"In Progress"</span>,
+    <span class="k">"segment"</span>: <span class="s">"FSD Creation &amp; Approval"</span>,
+    <span class="k">"stage"</span>: <span class="s">"Developer Review"</span>,
+    <span class="k">"crReference"</span>: <span class="s">"#ERPO130001"</span>
+  }
+}</pre></div>
+
+      <h3>Envelope fields</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>Field</th><th>Required</th><th>Description</th></tr></thead>
+        <tbody>
+          <tr><td><code>occurredAt</code></td><td><span class="req">Required</span></td><td>ISO 8601 time of the change in ERP. PM ignores a message whose <code>occurredAt</code> is not newer than the last one applied to that CR.</td></tr>
+          <tr><td><code>eventId</code></td><td><span class="opt">Recommended</span></td><td>Unique ID of this message (UUID). If ERP sends the same <code>eventId</code> again (a retry), PM returns its first answer and doesn't apply the message twice.</td></tr>
+          <tr><td><code>eventType</code></td><td><span class="opt">Optional</span></td><td>Free text for the log: <code>cr.created</code>, <code>cr.signed</code>, <code>cr.stage_changed</code>, <code>cr.status_changed</code>, <code>cr.closed</code>, <code>cr.cancelled</code>, <code>cr.reconcile</code>.</td></tr>
+          <tr><td><code>cr</code></td><td><span class="req">Required</span></td><td>The CR (next section).</td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="fields">
+      <h2><span class="n">04</span>CR fields</h2>
+      <p>"ERP panel" means the value is stored and shown read-only on the CR's detail page in PM.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>Field</th><th>On PUT</th><th>Format</th><th>PM field / effect</th></tr></thead>
+        <tbody>
+          <tr><td><code>ticketNumber</code></td><td><span class="req">Required</span></td><td>text ≤100, no comma</td><td><b>External ID</b>: the key. Must match the URL.</td></tr>
+          <tr><td><code>changeRequest</code></td><td><span class="req">Required</span></td><td>text / HTML</td><td><b>CR Name</b>: plain text, first 120 characters. Also added to <b>Description</b> after the Note.</td></tr>
+          <tr><td><code>note</code></td><td><span class="opt">Optional</span></td><td>text / HTML</td><td><b>Description</b> (first part) and <b>Remark</b></td></tr>
+          <tr><td><code>status</code></td><td><span class="req">Required</span></td><td><code>In Progress</code> · <code>Delayed</code> · <code>Completed</code> · <code>Cancelled</code></td><td><b>Status</b> (<a href="#mapping">mapping</a>)</td></tr>
+          <tr><td><code>segment</code></td><td><span class="req">Required</span></td><td>ERP segment name</td><td><b>Milestone</b>, together with <code>stage</code></td></tr>
+          <tr><td><code>stage</code></td><td><span class="req">Required</span></td><td>ERP stage name</td><td><b>Milestone</b> (<a href="#milestones">mapping</a>)</td></tr>
+          <tr><td><code>requesterEmail</code></td><td><span class="req">Required</span></td><td>email</td><td><b>Business Owner / Requestor</b> and <b>Business Users</b>, matched to a PM user by email</td></tr>
+          <tr><td><code>functionalEmail</code></td><td><span class="req">Required</span></td><td>email</td><td><b>IT PIC</b>, matched by email</td></tr>
+          <tr><td><code>dateCreation</code></td><td><span class="req">Required</span></td><td><code>YYYY-MM-DD</code></td><td><b>Plan Start Date</b></td></tr>
+          <tr><td><code>targetResolved</code></td><td><span class="req">Required</span></td><td><code>YYYY-MM-DD</code></td><td><b>Plan End Date</b></td></tr>
+          <tr><td><code>createdAt</code></td><td><span class="req">Required</span></td><td>ISO 8601 or <code>YYYY-MM-DD</code></td><td><b>Actual Start Date</b></td></tr>
+          <tr><td><code>closedAt</code></td><td><span class="opt">Optional</span></td><td>ISO 8601 / <code>YYYY-MM-DD</code> / <code>null</code></td><td><b>Actual End Date</b>. Send it when the ticket is closed.</td></tr>
+          <tr><td><code>priority</code></td><td><span class="opt">Once set</span></td><td><code>High</code> · <code>Medium</code> · <code>Low</code></td><td><b>Priority</b> P0 · P1 · P2. A new CR without one gets P2.</td></tr>
+          <tr><td><code>deptHeadEmail</code></td><td><span class="opt">Optional</span></td><td>email</td><td><b>IT Manager</b>. If PM has no user with this email, PM creates one, <b>inactive</b>.</td></tr>
+          <tr><td><code>deptHeadName</code></td><td><span class="opt">Optional</span></td><td>text</td><td>Name for that user, used only when PM has to create it</td></tr>
+          <tr><td><code>requesterDepartmentCode</code></td><td><span class="opt">Optional</span></td><td>text, e.g. <code>AP1</code></td><td><b>Department</b>: the PM department that holds this code</td></tr>
+          <tr><td><code>moduleId</code></td><td><span class="opt">Optional</span></td><td>ERP <code>modules.id</code></td><td><b>ERP Module</b>, and <b>System Impacted</b> through PM's module mapping (e.g. FI, CO → SAP FICO)</td></tr>
+          <tr><td><code>moduleName</code></td><td><span class="opt">Optional</span></td><td>text</td><td>Module name. If PM doesn't know the module yet, it is added.</td></tr>
+          <tr><td><code>tCode</code></td><td><span class="opt">Optional</span></td><td>text ≤255</td><td>T-Code (ERP panel)</td></tr>
+          <tr><td><code>functionalDepartment</code></td><td><span class="opt">Optional</span></td><td>text ≤255</td><td>Resolver / functional department (ERP panel)</td></tr>
+          <tr><td><code>ownership</code></td><td><span class="opt">Optional</span></td><td><code>{ code, name }</code></td><td>Ownership. New codes are added to PM's list.</td></tr>
+          <tr><td><code>impactArea</code></td><td><span class="opt">Optional</span></td><td><code>{ code, name }</code></td><td>Impact Area. New codes are added to PM's list.</td></tr>
+          <tr><td><code>crReference</code></td><td><span class="opt">Optional</span></td><td>Ticket Number of the related CR</td><td>CR Reference</td></tr>
+          <tr><td><code>crId</code></td><td><span class="opt">Optional</span></td><td>text</td><td>ERP CR ID (ERP panel)</td></tr>
+          <tr><td><code>url</code></td><td><span class="opt">Optional</span></td><td>URL</td><td>Link back to the CR in ERP (ERP panel)</td></tr>
+          <tr><td><code>type</code></td><td><span class="opt">Optional</span></td><td><code>Change Request</code> · <code>Configuration</code></td><td>Stored for reference. Phase 1: every ERP record becomes a PM CR.</td></tr>
+          <tr><td><code>projectType</code></td><td><span class="opt">Optional</span></td><td>boolean</td><td>Stored as a flag. Creating PM Projects from ERP comes later.</td></tr>
+        </tbody>
+      </table></div>
+      <div class="note"><p>A field set to <code>null</code> (or <code>""</code>) <b>clears</b> the PM field. An optional field left out of a PUT leaves PM unchanged.</p></div>
+    </section>
+
+    <section id="response">
+      <h2><span class="n">05</span>Response and warnings</h2>
+      <p><code>201 Created</code> for a new CR; <code>200 OK</code> otherwise.</p>
+      <div class="code"><span class="label">Response</span><button class="copy" type="button">Copy</button><pre>{
+  <span class="k">"action"</span>: <span class="s">"updated"</span>,
+  <span class="k">"ticketNumber"</span>: <span class="s">"#ERPO138381"</span>,
+  <span class="k">"initiativeId"</span>: <span class="s">"be9f61b0-3a61-4a9e-b8e7-b9e814ad7070"</span>,
+  <span class="k">"pmTicket"</span>: <span class="s">"CR12112026001"</span>,
+  <span class="k">"pmUrl"</span>: <span class="s">"https://pm.energi-up.com/#view/be9f61b0-…"</span>,
+  <span class="k">"changedFields"</span>: [<span class="s">"milestone"</span>],
+  <span class="k">"warnings"</span>: []
+}</pre></div>
+      <div class="tbl"><table>
+        <thead><tr><th><code>action</code></th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>created</code></td><td>New CR created in PM (<code>201</code>)</td></tr>
+          <tr><td><code>updated</code></td><td>Something changed. <code>changedFields</code> lists PM's field names.</td></tr>
+          <tr><td><code>unchanged</code></td><td>The message matched what PM already had</td></tr>
+          <tr><td><code>ignored_stale</code></td><td><code>occurredAt</code> is older than the last change applied. Nothing was done. Not an error; don't retry.</td></tr>
+        </tbody>
+      </table></div>
+      <ul>
+        <li><code>pmTicket</code> is PM's own CR number and <code>pmUrl</code> opens the CR in PM. ERP may store both to show a "View in PM" link.</li>
+        <li>A repeated <code>eventId</code> returns the first answer plus <code>"duplicateEvent": true</code>.</li>
+      </ul>
+
+      <h3>Warnings</h3>
+      <p>A warning means PM saved the CR but couldn't map one value, so that PM field was left unchanged. PM keeps the warnings with the CR and in its integration log, and the PM team fixes the mapping. <b>ERP doesn't need to retry:</b> the next message for that CR picks up the fixed mapping.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>Code</th><th>Field</th><th>Meaning</th></tr></thead>
+        <tbody>
+          <tr><td><code>USER_UNMAPPED</code></td><td><code>requesterEmail</code> / <code>functionalEmail</code></td><td>No active PM user with this email</td></tr>
+          <tr><td><code>USER_CREATED</code></td><td><code>deptHeadEmail</code></td><td>PM created an inactive user for the Dept Head</td></tr>
+          <tr><td><code>UNKNOWN_MODULE</code></td><td><code>moduleId</code></td><td>PM doesn't know this module and no <code>moduleName</code> was sent</td></tr>
+          <tr><td><code>UNMAPPED_MODULE</code></td><td><code>moduleId</code></td><td>No PM System Impacted is mapped to this module yet</td></tr>
+          <tr><td><code>UNMAPPED_DEPARTMENT</code></td><td><code>requesterDepartmentCode</code></td><td>No PM department holds this code</td></tr>
+          <tr><td><code>UNMAPPED_STAGE</code></td><td><code>stage</code></td><td>This segment/stage pair isn't in the <a href="#milestones">mapping</a></td></tr>
+        </tbody>
+      </table></div>
+    </section>
+
+    <section id="more">
+      <h2><span class="n">06</span>Other endpoints</h2>
+
+      <h3>Partial update (optional)</h3>
+      <div class="op"><span class="verb patch">PATCH</span><span class="path">/api/v1/integrations/erp/crs/{ticketNumber}</span></div>
+      <ul>
+        <li>Same body as PUT, but every <code>cr</code> field is optional; only the fields sent change. <code>occurredAt</code> is still required.</li>
+        <li>The CR must already exist in PM, otherwise <code>404</code>. Create CRs with PUT.</li>
+        <li><code>segment</code> and <code>stage</code> must be sent together.</li>
+        <li><b>Prefer PUT.</b> A lost PATCH is only corrected by the next full PUT or by the nightly batch.</li>
+      </ul>
+      <div class="code"><span class="label">Request body</span><button class="copy" type="button">Copy</button><pre>{ <span class="k">"eventId"</span>: <span class="s">"…"</span>, <span class="k">"occurredAt"</span>: <span class="s">"2026-11-20T08:00:00Z"</span>, <span class="k">"cr"</span>: { <span class="k">"segment"</span>: <span class="s">"Development and SIT"</span>, <span class="k">"stage"</span>: <span class="s">"SIT"</span> } }</pre></div>
+
+      <h3>Read PM's copy</h3>
+      <div class="op"><span class="verb get">GET</span><span class="path">/api/v1/integrations/erp/crs/{ticketNumber}</span></div>
+      <p>Returns PM's current view of the CR, mostly in PM terms. <code>404</code> when PM has no CR with this Ticket Number.</p>
+      <div class="code"><span class="label">Response 200</span><button class="copy" type="button">Copy</button><pre>{
+  <span class="k">"ticketNumber"</span>: <span class="s">"#ERPO138381"</span>, <span class="k">"initiativeId"</span>: <span class="s">"…"</span>, <span class="k">"pmTicket"</span>: <span class="s">"CR12112026001"</span>, <span class="k">"pmUrl"</span>: <span class="s">"…"</span>, <span class="k">"source"</span>: <span class="s">"ERP"</span>,
+  <span class="k">"lastOccurredAt"</span>: <span class="s">"2026-11-12T03:15:00.000Z"</span>,
+  <span class="k">"name"</span>: <span class="s">"…"</span>, <span class="k">"status"</span>: <span class="s">"On Track"</span>, <span class="k">"milestone"</span>: <span class="s">"FSD"</span>, <span class="k">"priority"</span>: <span class="s">"P0"</span>,
+  <span class="k">"planStartDate"</span>: <span class="s">"2026-11-02"</span>, <span class="k">"planEndDate"</span>: <span class="s">"2026-12-15"</span>, <span class="k">"actualStartDate"</span>: <span class="s">"2026-11-02"</span>, <span class="k">"actualEndDate"</span>: null,
+  <span class="k">"businessOwner"</span>: { <span class="k">"name"</span>: <span class="s">"…"</span>, <span class="k">"email"</span>: <span class="s">"…"</span>, <span class="k">"active"</span>: true },
+  <span class="k">"itPic"</span>: { … }, <span class="k">"itManagers"</span>: [ … ], <span class="k">"itPm"</span>: null,
+  <span class="k">"systemImpacted"</span>: [<span class="s">"SAP FICO"</span>], <span class="k">"department"</span>: <span class="s">"AP"</span>,
+  <span class="k">"erp"</span>: { <span class="k">"segment"</span>: <span class="s">"…"</span>, <span class="k">"stage"</span>: <span class="s">"…"</span>, <span class="k">"status"</span>: <span class="s">"In Progress"</span>, <span class="k">"moduleId"</span>: <span class="s">"FI"</span>, <span class="k">"tCode"</span>: <span class="s">"ZMM001"</span>, … },
+  <span class="k">"document"</span>: { <span class="k">"fileName"</span>: <span class="s">"CR.pdf"</span>, <span class="k">"sizeBytes"</span>: 123456, <span class="k">"uploadedAt"</span>: <span class="s">"…"</span> },
+  <span class="k">"warnings"</span>: []
+}</pre></div>
+
+      <h3>Batch (max 200)</h3>
+      <div class="op"><span class="verb put">PUT</span><span class="path">/api/v1/integrations/erp/crs</span></div>
+      <p>For the nightly reconciliation and the first load of existing CRs. Each item is the same object as the PUT body, including <code>cr.ticketNumber</code>.</p>
+      <div class="code"><span class="label">Request body</span><button class="copy" type="button">Copy</button><pre>{ <span class="k">"items"</span>: [ { <span class="k">"eventId"</span>: <span class="s">"…"</span>, <span class="k">"occurredAt"</span>: <span class="s">"…"</span>, <span class="k">"cr"</span>: { <span class="k">"ticketNumber"</span>: <span class="s">"#ERPO1"</span>, … } }, … ] }</pre></div>
+      <div class="code"><span class="label">Response 200</span><button class="copy" type="button">Copy</button><pre>{
+  <span class="k">"created"</span>: 1, <span class="k">"updated"</span>: 3, <span class="k">"failed"</span>: 1,
+  <span class="k">"results"</span>: [
+    { <span class="k">"index"</span>: 0, <span class="k">"httpStatus"</span>: 200, <span class="k">"action"</span>: <span class="s">"updated"</span>, <span class="k">"ticketNumber"</span>: <span class="s">"#ERPO1"</span>, … },
+    { <span class="k">"index"</span>: 1, <span class="k">"httpStatus"</span>: 400, <span class="k">"ticketNumber"</span>: <span class="s">"#ERPO2"</span>, <span class="k">"error"</span>: <span class="s">"cr.status must be In Progress, Delayed, Completed or Cancelled"</span> }
+  ]
+}</pre></div>
+      <p>The batch call returns <code>200</code> even when some items fail. Check each item's <code>httpStatus</code> and <code>error</code>; a failed item doesn't stop the others.</p>
+
+      <h3>CR document</h3>
+      <div class="op"><span class="verb put">PUT</span><span class="path">/api/v1/integrations/erp/crs/{ticketNumber}/document</span></div>
+      <ul>
+        <li><code>multipart/form-data</code>, one file in the field <b><code>file</code></b>, max <b>30 MB</b> (larger returns <code>413</code>).</li>
+        <li>The CR must exist; create it with PUT first.</li>
+        <li>ERP keeps one document per CR, so a new upload <b>replaces</b> the one sent before. Documents that PM users upload themselves are not touched.</li>
+      </ul>
+      <div class="code"><span class="label">curl</span><button class="copy" type="button">Copy</button><pre>curl -X PUT "https://pm.energi-up.com/api/v1/integrations/erp/crs/%23ERPO138381/document" \
+  -H "Authorization: Bearer $TOKEN" -F "file=@CR-ERPO138381.pdf"</pre></div>
+      <div class="code"><span class="label">Response 200</span><button class="copy" type="button">Copy</button><pre>{ <span class="k">"action"</span>: <span class="s">"added"</span>, <span class="k">"ticketNumber"</span>: <span class="s">"#ERPO138381"</span>, <span class="k">"initiativeId"</span>: <span class="s">"…"</span>, <span class="k">"documentId"</span>: <span class="s">"…"</span>, <span class="k">"fileName"</span>: <span class="s">"CR-ERPO138381.pdf"</span>, <span class="k">"sizeBytes"</span>: 523144 }</pre></div>
+      <p><code>action</code> is <code>added</code> or <code>replaced</code>.</p>
+
+      <h3>Module master</h3>
+      <div class="op"><span class="verb put">PUT</span><span class="path">/api/v1/integrations/erp/modules</span></div>
+      <p>Send ERP's module list once, then again whenever it changes. The PM admin uses it to map each module to a PM System Impacted (SAP FICO / SAP NON FICO).</p>
+      <div class="code"><span class="label">Request body</span><button class="copy" type="button">Copy</button><pre>{ <span class="k">"items"</span>: [ { <span class="k">"id"</span>: <span class="s">"FI"</span>, <span class="k">"name"</span>: <span class="s">"Financial Accounting"</span>, <span class="k">"description"</span>: null, <span class="k">"departmentId"</span>: <span class="s">"…"</span>, <span class="k">"isActive"</span>: true } ] }</pre></div>
+      <div class="code"><span class="label">Response 200</span><button class="copy" type="button">Copy</button><pre>{ <span class="k">"created"</span>: 1, <span class="k">"updated"</span>: 0, <span class="k">"unchanged"</span>: 0 }</pre></div>
+      <ul>
+        <li><code>id</code> is ERP <code>modules.id</code> and must never change.</li>
+        <li>A module that is no longer used should be sent with <code>isActive: false</code>. Modules missing from the list are not deleted.</li>
+      </ul>
+    </section>
+
+    <section id="errors">
+      <h2><span class="n">07</span>Errors, retries, ordering</h2>
+      <div class="tbl"><table>
+        <thead><tr><th>HTTP</th><th>Meaning</th><th>What ERP should do</th></tr></thead>
+        <tbody>
+          <tr><td><code>200</code> / <code>201</code></td><td>Done (read any <code>warnings</code>)</td><td>—</td></tr>
+          <tr><td><code>400</code></td><td>Invalid message; <code>error</code> names the field</td><td>Fix the data. Don't resend unchanged.</td></tr>
+          <tr><td><code>401</code></td><td>Token missing or expired</td><td>Get a new token and retry</td></tr>
+          <tr><td><code>403</code></td><td>Wrong scope or endpoint</td><td>Configuration problem: contact the PM admin</td></tr>
+          <tr><td><code>404</code></td><td>CR not in PM (PATCH, GET, document)</td><td>Send the full CR with PUT first</td></tr>
+          <tr><td><code>409</code></td><td>This Ticket Number is linked to a PM Project, not a CR</td><td>Contact the PM admin</td></tr>
+          <tr><td><code>413</code></td><td>Document larger than 30 MB</td><td>—</td></tr>
+          <tr><td><code>5xx</code></td><td>PM unavailable or slow</td><td>Retry (below)</td></tr>
+        </tbody>
+      </table></div>
+      <p>Error body: <code>{ "error": "text" }</code>.</p>
+      <ul>
+        <li><b>Retry</b> on <code>401</code> (after a new token) and on <code>5xx</code> or timeouts: wait 1 min, 5 min, 30 min, then 2 h; after that, alert. Re-send the <b>same <code>eventId</code></b>.</li>
+        <li><b>Order:</b> messages may arrive late or out of order. PM compares <code>occurredAt</code> and keeps only the newest state, so ERP doesn't need a strict queue. Fill <code>occurredAt</code> from the time of the change, not the time of sending.</li>
+        <li><b>Timeout:</b> 30 seconds per call.</li>
+        <li><b>Nightly reconciliation (02:00 WIB):</b> through the batch endpoint, send every CR that isn't Completed or Cancelled, plus those closed in the last 30 days. Use <code>"eventType": "cr.reconcile"</code> and the CR's latest change time as <code>occurredAt</code>.</li>
+      </ul>
+    </section>
+
+    <section id="mapping">
+      <h2><span class="n">08</span>Value mappings</h2>
+      <p>Applied by PM, from the CR System Integration Workbook.</p>
+      <h3>Status</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>ERP <code>status</code></th><th>PM Status</th></tr></thead>
+        <tbody>
+          <tr><td>In Progress</td><td>On Track</td></tr>
+          <tr><td>Delayed</td><td>Delayed</td></tr>
+          <tr><td>Completed</td><td>Live</td></tr>
+          <tr><td>Cancelled</td><td>Cancelled</td></tr>
+        </tbody>
+      </table></div>
+      <p>ERP owns the status: every message sets it again. Any other value returns <code>400</code>.</p>
+
+      <h3 id="milestones">Milestone, from segment + stage</h3>
+      <p>Names are compared ignoring upper/lower case and extra spaces or tabs.</p>
+      <div class="tbl"><table>
+        <thead><tr><th>ERP segment</th><th>ERP stage</th><th>PM Milestone</th></tr></thead>
+        <tbody>
+          <tr><td>Preparation</td><td>User Initiation</td><td>User Initiate</td></tr>
+          <tr><td>Preparation</td><td>CR Creation</td><td>CR Created</td></tr>
+          <tr><td>Preparation</td><td>CR Signed - Section 2</td><td>CR Signed sec 2</td></tr>
+          <tr><td>Preparation</td><td>CR Signed - Section 3</td><td>CR Signed Sec 3</td></tr>
+          <tr><td>FSD Creation &amp; Approval</td><td>FSD Creation · Developer Review · FSD Approval</td><td>FSD</td></tr>
+          <tr><td>Development and SIT</td><td>Development</td><td>Development</td></tr>
+          <tr><td>Development and SIT</td><td>SIT</td><td>SIT</td></tr>
+          <tr><td>Development and SIT</td><td>Extended Development</td><td>Development - Extended</td></tr>
+          <tr><td>Development and SIT</td><td>Extended SIT</td><td>SIT</td></tr>
+          <tr><td>Development and SIT</td><td>Update FSD Change Request</td><td>Signed Changes</td></tr>
+          <tr><td>Development and SIT</td><td>Extended Developer Review</td><td>SIT</td></tr>
+          <tr><td>UAT</td><td><i>any stage</i></td><td>UAT</td></tr>
+          <tr><td>GO-Live</td><td>GO-LIVE</td><td>Live (Warranty Period)</td></tr>
+        </tbody>
+      </table></div>
+      <ul>
+        <li><b>Fully Live</b> (after the warranty period) and <b>Changes</b> are set in PM only. ERP never overwrites Fully Live.</li>
+        <li>An unknown segment/stage leaves the milestone unchanged and returns <code>UNMAPPED_STAGE</code>. Please tell the PM team before introducing a new stage.</li>
+      </ul>
+
+      <h3>People</h3>
+      <ul>
+        <li>Users are matched by <b>email</b>, ignoring upper/lower case. Send the address PM uses: PM has users on both <code>@kpn-corp.com</code> and <code>@energi-up.com</code>.</li>
+        <li><b>Requester</b> → Business Owner and Business Users. <b>Functional</b> → IT PIC. <b>Dept Head</b> → IT Manager. IT PM is managed in PM only.</li>
+        <li>If the Dept Head has no PM account, PM creates one, <b>inactive</b>. It shows on the CR, and the person can sign in to PM only after the PM admin activates it.</li>
+      </ul>
+
+      <h3>Priority</h3>
+      <p>High → P0 · Medium → P1 · Low → P2</p>
+    </section>
+
+    <section id="golive">
+      <h2><span class="n">09</span>Go-live checklist</h2>
+      <div class="checks">
+        <div>
+          <h3>ERP team</h3>
+          <ul>
+            <li>Store the PM client credentials per environment.</li>
+            <li>PUT the CR on every change, with <code>eventId</code> and <code>occurredAt</code>.</li>
+            <li>Upload the CR document after creating the CR, and when it changes.</li>
+            <li>Send the module master, and again when modules change.</li>
+            <li>Retry on <code>401</code> and <code>5xx</code>; log <code>warnings</code>.</li>
+            <li>Run the nightly reconciliation batch.</li>
+            <li>Optional: show a "View in PM" link from <code>pmUrl</code>.</li>
+          </ul>
+        </div>
+        <div>
+          <h3>PM team</h3>
+          <ul>
+            <li>Create the <code>cr:sync</code> API client for staging and production.</li>
+            <li>Map ERP modules to System Impacted (Master DWS Application).</li>
+            <li>Enter requester-department codes (Departments → ERP codes).</li>
+            <li>Check that IT PIC and requester emails exist in PM.</li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="try">
+      <h2><span class="n">10</span>Try it on staging</h2>
+      <div class="code"><span class="label">bash</span><button class="copy" type="button">Copy</button><pre><span class="c"># 1. Get a token</span>
+TOKEN=$(curl -s -X POST http://test-pm.kpndomain.com/api/auth/client-token \
+  -H "Content-Type: application/json" \
+  -d '{"clientId":"&lt;id&gt;","clientSecret":"&lt;secret&gt;"}' | jq -r .access_token)
+
+<span class="c"># 2. Create a test CR</span>
+curl -X PUT "http://test-pm.kpndomain.com/api/v1/integrations/erp/crs/%23ERPOTEST1" \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"eventId":"test-1","occurredAt":"2026-11-12T03:00:00Z","cr":{"ticketNumber":"#ERPOTEST1","changeRequest":"Test CR","status":"In Progress","segment":"Preparation","stage":"CR Creation","requesterEmail":"&lt;pm user email&gt;","functionalEmail":"&lt;pm user email&gt;","dateCreation":"2026-11-12","targetResolved":"2026-12-12","createdAt":"2026-11-12T03:00:00Z"}}'
+
+<span class="c"># 3. Read it back</span>
+curl "http://test-pm.kpndomain.com/api/v1/integrations/erp/crs/%23ERPOTEST1" -H "Authorization: Bearer $TOKEN"</pre></div>
+    </section>
+  </main>
+</div>
+
+<footer>DWS PM Tools · ERP CR Sync API v1.0 · Questions: the PM Tools team (DWS IT).</footer>
+
+<script>
+document.querySelectorAll('.copy').forEach((btn) => {
+  btn.addEventListener('click', () => {
+    const pre = btn.parentElement.querySelector('pre');
+    const text = pre.innerText;
+    const done = (label) => { btn.textContent = label; setTimeout(() => { btn.textContent = 'Copy'; }, 1500); };
+    const fallback = () => {
+      const r = document.createRange(); r.selectNodeContents(pre);
+      const s = window.getSelection(); s.removeAllRanges(); s.addRange(r);
+      done('Selected');
+    };
+    try {
+      navigator.clipboard.writeText(text).then(() => done('Copied'), fallback);
+    } catch (_) { fallback(); }
+  });
+});
+// Highlight the section in view in the contents rail.
+const links = [...document.querySelectorAll('.toc a')];
+const byId = new Map(links.map((a) => [a.getAttribute('href').slice(1), a]));
+if ('IntersectionObserver' in window) {
+  const io = new IntersectionObserver((entries) => {
+    entries.forEach((e) => {
+      if (e.isIntersecting) {
+        links.forEach((a) => a.classList.remove('on'));
+        byId.get(e.target.id)?.classList.add('on');
+      }
+    });
+  }, { rootMargin: '-20% 0px -70% 0px' });
+  document.querySelectorAll('main section[id]').forEach((s) => io.observe(s));
+}
+</script>

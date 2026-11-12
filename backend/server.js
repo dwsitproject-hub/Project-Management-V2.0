@@ -49,6 +49,7 @@ import { crsRouter as apiV1CrsRouter, initiativesRouter as apiV1InitiativesRoute
 import dwsApplicationsRouter from './routes/dws-applications.js';
 import departmentsRouter from './routes/departments.js';
 import erpModulesRouter from './routes/erp-modules.js';
+import erpIntegrationRouter from './routes/erp-integration.js';
 import managementDashboardRouter from './routes/management-dashboard.js';
 import ssoRouter from './routes/sso.js';
 import hubSdkRouter from './routes/hub-sdk.js';
@@ -76,6 +77,8 @@ app.use('/api/documents', documentsRouter);
 app.use('/api/profile', authenticateToken, profileRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/meeting-notes', meetingNotesRouter);
+// ERP CR sync (scope cr:sync). Longer timeout: batches and 30 MB documents.
+app.use('/api/v1/integrations/erp', authenticateToken, requestTimeout(30000), erpIntegrationRouter);
 app.use('/api/v1/crs', authenticateToken, requestTimeout(5000), apiV1CrsRouter);
 app.use('/api/v1/initiatives', authenticateToken, requestTimeout(5000), apiV1InitiativesRouter);
 app.use('/api/dws-applications', authenticateToken, dwsApplicationsRouter);

@@ -13,6 +13,12 @@ function splitIds(raw) {
   if (raw == null || raw === '') return [];
   return String(raw).split(',').map((v) => v.trim()).filter(Boolean);
 }
+/** JSON TEXT column -> object (null when empty or unreadable). */
+function parseJson(raw) {
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch { return null; }
+}
 let schemaReady = null; // promise of the one-time schema set-up in this process
 
 // Lock id for the schema set-up, so two nodes starting together don't run the DDL at
@@ -39,6 +45,8 @@ async function runSchemaSetup() {
         "id" TEXT PRIMARY KEY,
         "name" TEXT NOT NULL
       );
+      -- ERP requester-department codes that map to this department (e.g. "AP1"), comma-separated.
+      ALTER TABLE "departments" ADD COLUMN IF NOT EXISTS "externalIds" TEXT;
       CREATE TABLE IF NOT EXISTS "users" (
         "id" TEXT PRIMARY KEY,
         "name" TEXT NOT NULL,
@@ -128,6 +136,13 @@ async function runSchemaSetup() {
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "tCode" TEXT;                -- ERP t_code (free text)
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "functionalDepartment" TEXT; -- ERP functional_department (department name)
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "crReference" TEXT;          -- ERP cr_reference (ticket number); has_reference = filled in
+      -- ERP CR sync (routes/erp-integration.js): which system feeds this CR, when it was
+      -- last applied (ERP occurredAt), ERP-only details as JSON, Ownership / Impact Area codes.
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "externalSource" TEXT;
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "externalSyncedAt" TEXT;
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "externalData" TEXT;
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "ownershipCode" TEXT;        -- "erpOptions" kind=ownership
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "impactAreaCode" TEXT;       -- "erpOptions" kind=impactArea
       CREATE TABLE IF NOT EXISTS "changeRequests" (
         "initiativeId" TEXT PRIMARY KEY,
         "crSubmissionStart" TEXT,
@@ -511,6 +526,16 @@ async function runSchemaSetup() {
       ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "createdAt" TEXT;
       ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "updatedAt" TEXT;
 
+      -- Value lists that exist only in ERP and are captured from the CRs ERP sends:
+      -- kind = 'ownership' | 'impactArea'. "id" = kind + ':' + code.
+      CREATE TABLE IF NOT EXISTS "erpOptions" (
+        "id" TEXT PRIMARY KEY,
+        "kind" TEXT NOT NULL,
+        "code" TEXT NOT NULL,
+        "name" TEXT,
+        "updatedAt" TEXT
+      );
+
       -- Bumped by every write() that changes something. Each node compares it with the
       -- version its cache was loaded at, so a save on one node is seen on all of them.
       CREATE TABLE IF NOT EXISTS "storeMeta" (
@@ -696,6 +721,7 @@ async function readFromDb() {
     'meetingNoteEmailLog',
     'meetingNoteHistory',
     'erpModules',
+    'erpOptions',
   ];
   // Query all tables at once (each on its own pooled connection): against a remote DB
   // the ~23 sequential round-trips were most of a cold read.
@@ -758,6 +784,11 @@ async function readFromDb() {
         tCode: row.tCode || row.tcode || null,
         functionalDepartment: row.functionalDepartment || row.functionaldepartment || null,
         crReference: row.crReference || row.crreference || null,
+        externalSource: row.externalSource || row.externalsource || null,
+        externalSyncedAt: row.externalSyncedAt || row.externalsyncedat || null,
+        externalData: parseJson(row.externalData ?? row.externaldata),
+        ownershipCode: row.ownershipCode || row.ownershipcode || null,
+        impactAreaCode: row.impactAreaCode || row.impactareacode || null,
         createdAt: row.createdAt || row.createdat || null,
         updatedAt: row.updatedAt || row.updatedat || null
       }));
@@ -872,6 +903,17 @@ async function readFromDb() {
         providerMessageId: row.providerMessageId || row.providermessageid || null,
         errorMessage: row.errorMessage || row.errormessage || null,
       }));
+    } else if (table === 'departments') {
+      data[table] = res.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        externalIds: splitIds(row.externalIds ?? row.externalids),
+      }));
+    } else if (table === 'erpOptions') {
+      data[table] = res.rows.map((row) => ({
+        id: row.id, kind: row.kind, code: row.code, name: row.name || null,
+        updatedAt: row.updatedAt || row.updatedat || null,
+      }));
     } else if (table === 'erpModules') {
       data[table] = res.rows.map((row) => ({
         id: row.id,
@@ -951,7 +993,7 @@ async function write(data) {
 // `data[source]` into one parameter array per row (same coercions as before).
 const arr = (v) => (Array.isArray(v) ? v.join(',') : (v || null));
 const TABLE_SPECS = [
-  { table: 'departments', cols: ['id', 'name'], row: (d) => [d.id, d.name] },
+  { table: 'departments', cols: ['id', 'name', 'externalIds'], row: (d) => [d.id, d.name, arr(d.externalIds)] },
   {
     table: 'users',
     cols: ['id', 'name', 'email', 'role', 'type', 'departmentId', 'active', 'passwordHash', 'isAdmin', 'emailActivated', 'activationToken', 'activationTokenExpiry', 'resetToken', 'resetTokenExpiry', 'teamMemberIds', 'hubUserId'],
@@ -965,7 +1007,7 @@ const TABLE_SPECS = [
   },
   {
     table: 'initiatives',
-    cols: ['id', 'type', 'name', 'ticket', 'description', 'businessImpact', 'priority', 'businessOwnerId', 'businessUserIds', 'departmentId', 'itPicId', 'itPicIds', 'itPmId', 'itManagerIds', 'systemImpactedIds', 'status', 'milestone', 'crMilestonePhase', 'startDate', 'endDate', 'planStartDate', 'planEndDate', 'remark', 'documentationLink', 'externalIds', 'erpModuleId', 'tCode', 'functionalDepartment', 'crReference', 'createdAt', 'updatedAt'],
+    cols: ['id', 'type', 'name', 'ticket', 'description', 'businessImpact', 'priority', 'businessOwnerId', 'businessUserIds', 'departmentId', 'itPicId', 'itPicIds', 'itPmId', 'itManagerIds', 'systemImpactedIds', 'status', 'milestone', 'crMilestonePhase', 'startDate', 'endDate', 'planStartDate', 'planEndDate', 'remark', 'documentationLink', 'externalIds', 'erpModuleId', 'tCode', 'functionalDepartment', 'crReference', 'externalSource', 'externalSyncedAt', 'externalData', 'ownershipCode', 'impactAreaCode', 'createdAt', 'updatedAt'],
     row: (i) => [
       i.id, i.type, i.name, i.ticket || null, i.description || null, i.businessImpact || null, i.priority || null,
       i.businessOwnerId || null, arr(i.businessUserIds), i.departmentId || null,
@@ -974,6 +1016,8 @@ const TABLE_SPECS = [
       i.status || null, i.milestone || null, i.crMilestonePhase || null, i.startDate || null, i.endDate || null,
       i.planStartDate || null, i.planEndDate || null, i.remark || null, i.documentationLink || null,
       arr(i.externalIds), i.erpModuleId || null, i.tCode || null, i.functionalDepartment || null, i.crReference || null,
+      i.externalSource || null, i.externalSyncedAt || null, i.externalData ? JSON.stringify(i.externalData) : null,
+      i.ownershipCode || null, i.impactAreaCode || null,
       i.createdAt || null, i.updatedAt || null,
     ],
   },
@@ -1069,6 +1113,11 @@ const TABLE_SPECS = [
     table: 'erpModules',
     cols: ['id', 'name', 'description', 'erpDepartmentId', 'isActive', 'createdAt', 'updatedAt'],
     row: (m) => [m.id, m.name, m.description || null, m.erpDepartmentId || null, m.isActive !== false, m.createdAt || null, m.updatedAt || null],
+  },
+  {
+    table: 'erpOptions',
+    cols: ['id', 'kind', 'code', 'name', 'updatedAt'],
+    row: (o) => [o.id, o.kind, o.code, o.name || null, o.updatedAt || null],
   },
 ];
 const CHANGE_ITEM_COLS = ['id', 'changeHistoryId', 'field', 'oldValue', 'newValue', 'changedAt'];
