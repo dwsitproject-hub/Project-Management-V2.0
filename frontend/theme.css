@@ -1018,3 +1018,9 @@ nav.dash-nav { justify-content: flex-start; width: auto; }
 }
 .mgmt-dashboard .mgmt-section[class*="mgmt-section--"] tbody tr:hover,
 .mgmt-dashboard .mgmt-box[class*="mgmt-box--"] tbody tr:hover { background: color-mix(in srgb, var(--sec-tint) 45%, #fff); }
+
+/* External IDs (ERP mapping): chips + form hint */
+.ext-ids { display: flex; flex-wrap: wrap; gap: 6px; }
+.ext-ids .muted { margin: 0; }
+.chip.ext-id { font-family: var(--font-family-mono); font-size: 12px; }
+input[name="externalIds"] + small { display: block; margin-top: 4px; font-size: 12px; }

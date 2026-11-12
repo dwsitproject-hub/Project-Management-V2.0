@@ -3,10 +3,29 @@ import store from '../store.js';
 import crypto from 'crypto';
 import { requireAdmin } from '../middleware/auth.js';
 import { normalizeCrMilestonePhase } from '../crTaskTemplates.js';
+import { normalizeExternalIds, findExternalIdConflict } from '../externalIds.js';
 
 const router = express.Router();
 
 const now = () => new Date().toISOString();
+
+// Validate body.externalIds (e.g. ERP module codes) for application `selfId`. Sends the
+// error response and returns null when invalid; otherwise returns the clean list.
+function readExternalIds(req, res, data, selfId) {
+  const result = normalizeExternalIds(req.body?.externalIds);
+  if (result.error) {
+    res.status(400).json({ error: result.error });
+    return null;
+  }
+  const clash = findExternalIdConflict(data.dwsApplications, result.ids, selfId);
+  if (clash) {
+    res.status(409).json({
+      error: `External ID "${clash.externalId}" is already used by "${clash.row.systemName}"`,
+    });
+    return null;
+  }
+  return result.ids;
+}
 
 // Admin-only master data management
 router.use(requireAdmin);
@@ -68,6 +87,8 @@ router.post('/', async (req, res) => {
   }
   const data = await store.read();
   if (!data.dwsApplications) data.dwsApplications = [];
+  const externalIds = readExternalIds(req, res, data, null);
+  if (!externalIds) return;
 
   const id = crypto.randomUUID();
   const ts = now();
@@ -78,6 +99,7 @@ router.post('/', async (req, res) => {
     stagingUrl: stagingUrl ? String(stagingUrl).trim() : null,
     githubUrl: githubUrl ? String(githubUrl).trim() : null,
     deploymentSteps: deploymentSteps ? String(deploymentSteps).trim() : null,
+    externalIds,
     createdAt: ts,
     updatedAt: ts,
   });
@@ -94,6 +116,13 @@ router.put('/:id', async (req, res) => {
   const data = await store.read();
   const idx = (data.dwsApplications || []).findIndex((a) => a.id === id);
   if (idx === -1) return res.status(404).json({ error: 'Not found' });
+  // externalIds is optional on update: leaving it out keeps the stored list, so the
+  // current Master DWS form (which doesn't send it yet) can't wipe it.
+  let externalIds = data.dwsApplications[idx].externalIds || [];
+  if (req.body && 'externalIds' in req.body) {
+    externalIds = readExternalIds(req, res, data, id);
+    if (!externalIds) return;
+  }
 
   data.dwsApplications[idx] = {
     ...data.dwsApplications[idx],
@@ -102,6 +131,7 @@ router.put('/:id', async (req, res) => {
     stagingUrl: stagingUrl ? String(stagingUrl).trim() : null,
     githubUrl: githubUrl ? String(githubUrl).trim() : null,
     deploymentSteps: deploymentSteps ? String(deploymentSteps).trim() : null,
+    externalIds,
     updatedAt: now(),
   };
   await store.write(data);

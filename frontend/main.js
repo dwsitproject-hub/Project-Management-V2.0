@@ -2507,6 +2507,7 @@ function formatActivityFieldLabelGlobal(field) {
     planStartDate: 'Plan Start Date',
     planEndDate: 'Plan End Date',
     documentationLink: 'Project Doc Link',
+    externalIds: 'External IDs',
   };
   if (mapping[field]) return mapping[field];
   return String(field).charAt(0).toUpperCase() + String(field).slice(1).replace(/([A-Z])/g, ' $1').trim();
@@ -3471,7 +3472,8 @@ async function renderList() {
       endDate: 'Actual End Date',
       planStartDate: 'Plan Start Date',
       planEndDate: 'Plan End Date',
-      documentationLink: 'Project Doc Link'
+      documentationLink: 'Project Doc Link',
+      externalIds: 'External IDs'
     };
     if (mapping[field]) return mapping[field];
     return field.charAt(0).toUpperCase() + field.slice(1).replace(/([A-Z])/g, ' $1').trim();
@@ -4001,6 +4003,25 @@ function formRow(label, inputHtml) {
   return `<div class="form-row"><label>${label}</label><div>${inputHtml}</div></div>`;
 }
 
+// External IDs: identifiers of the matching record in another system (ERP CR Ticket
+// Number on an initiative, ERP module codes on a DWS application). The API returns an
+// array and accepts a comma-separated text, so the forms use one plain text input.
+function externalIdList(raw) {
+  if (Array.isArray(raw)) return raw.map((v) => String(v).trim()).filter(Boolean);
+  return String(raw || '').split(',').map((v) => v.trim()).filter(Boolean);
+}
+
+function externalIdsInput(raw, placeholder, hint) {
+  return `<input name="externalIds" value="${escapeHtml(externalIdList(raw).join(', '))}" placeholder="${escapeHtml(placeholder)}" autocomplete="off" />
+    <small class="muted">${escapeHtml(hint)}</small>`;
+}
+
+/** Chips for display; `empty` is shown when there are none. */
+function externalIdChips(raw, empty = '') {
+  const ids = externalIdList(raw);
+  return ids.length ? ids.map((id) => `<span class="chip ext-id">${escapeHtml(id)}</span>`).join(' ') : empty;
+}
+
 // Helper function to create searchable single-select dropdown
 function createSearchableSelect(name, options, selectedValue = '', placeholder = 'Select...', allowNone = false) {
   const selectedOption = options.find(opt => opt.id === selectedValue);
@@ -4267,6 +4288,7 @@ function commonFields(initiative = null, defaultType = 'Project', nameLabel = 'I
     formRow('Plan End Date', `<input type="date" name="planEndDate" value="${initiative?.planEndDate?.slice(0,10) || ''}" />`),
     formRow('Remark', `<textarea name="remark" class="long-text">${initiative ? (initiative.remark || '').replace(/</g, '&lt;').replace(/>/g, '&gt;') : ''}</textarea>`),
     formRow('Project Doc Link', `<input name="documentationLink" type="url" value="${initiative?.documentationLink || ''}" />`),
+    formRow('External IDs', externalIdsInput(initiative?.externalIds, 'e.g. #ERPO138381', 'ERP Ticket Number(s) of the matching ERP record, separated by commas. Each ID can belong to one initiative only.')),
     formRow('Documents', `<input type="file" name="documents" id="documents" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.png,.jpg,.jpeg,.zip,.rar" />
       <div id="filePreview" style="margin-top: 10px;"></div>
       <small style="color: #666;">You can select multiple files. Files larger than 300KB will be automatically compressed (images) or may require manual compression (PDF, Word, Excel).</small>`)
@@ -4553,7 +4575,8 @@ async function renderNew(defaultType = 'Project') {
       planStartDate: obj.planStartDate || null,
       planEndDate: obj.planEndDate || null,
       remark: obj.remark || null,
-      documentationLink: obj.documentationLink || null
+      documentationLink: obj.documentationLink || null,
+      externalIds: externalIdList(obj.externalIds)
     };
     // CR dates removed - no longer used
     if (obj.type === 'CR') {
@@ -4779,7 +4802,8 @@ async function renderView(id) {
       endDate: 'Actual End Date',
       planStartDate: 'Plan Start Date',
       planEndDate: 'Plan End Date',
-      documentationLink: 'Project Doc Link'
+      documentationLink: 'Project Doc Link',
+      externalIds: 'External IDs'
     };
     if (mapping[field]) return mapping[field];
     return field.charAt(0).toUpperCase() + field.slice(1).replace(/([A-Z])/g, ' $1').trim();
@@ -4911,6 +4935,7 @@ async function renderView(id) {
           <div><div class="muted">Cycle Time (Age Start to End)</div><div><strong>${cycleTime !== null ? cycleTime + ' days' : 'N/A'}</strong></div></div>
           <div><div class="muted">Total Age</div><div><strong>${totalAge !== null ? totalAge + ' days' : 'N/A'}</strong></div></div>
           ${i.type === 'CR' ? `<div><div class="muted">System Impacted</div><div>${escapeHtml(dwsSystemNamesFromInitiative(i) || '')}</div></div>` : ''}
+          <div><div class="muted">External IDs</div><div class="ext-ids">${externalIdChips(i.externalIds, '<span class="muted">—</span>')}</div></div>
           <div style="grid-column: 1 / -1"><div class="muted">Description</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.description || '')}</div></div>
           <div style="grid-column: 1 / -1"><div class="muted">Business Impact</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.businessImpact || '')}</div></div>
           <div style="grid-column: 1 / -1"><div class="muted">Remark</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.remark || '')}</div></div>
@@ -5385,6 +5410,7 @@ async function renderView(id) {
         ${formRow('Business Impact', `<textarea name="businessImpact" class="long-text" required style="min-height: 100px;">${(i.businessImpact || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea>`)}
         ${formRow('Remark', `<textarea name="remark" class="long-text" style="min-height: 80px;">${(i.remark || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea>`)}
         ${formRow('Project Doc Link', `<input name="documentationLink" type="url" value="${i.documentationLink || ''}" />`)}
+        ${formRow('External IDs', externalIdsInput(i.externalIds, 'e.g. #ERPO138381', 'ERP Ticket Number(s) of the matching ERP record, separated by commas. Each ID can belong to one initiative only.'))}
         
         <!-- Project Team Section -->
         <div style="margin-top: 24px; padding: 20px; background: var(--gray-50); border-radius: 8px;">
@@ -5446,6 +5472,7 @@ async function renderView(id) {
       planEndDate: obj.planEndDate || null,
       remark: obj.remark || null,
         documentationLink: obj.documentationLink || null,
+        externalIds: externalIdList(obj.externalIds),
         changedBy: currentUser?.id || 'Unknown'
       };
       
@@ -6903,6 +6930,7 @@ async function renderEdit(id) {
       planEndDate: obj.planEndDate || null,
       remark: obj.remark || null,
       documentationLink: obj.documentationLink || null,
+      externalIds: externalIdList(obj.externalIds),
       changedBy: currentUser?.id || 'Unknown'
     };
     // CR dates removed - no longer used
@@ -11383,7 +11411,7 @@ async function renderMasterDwsApplications() {
         </label>
         <div class="dws-list" id="dws-list">
           ${apps.map((a) => `
-            <button type="button" class="dws-item" data-id="${escape(a.id)}" data-search="${escape(String(a.systemName || '').toLowerCase())}" aria-pressed="false">
+            <button type="button" class="dws-item" data-id="${escape(a.id)}" data-search="${escape([a.systemName, ...externalIdList(a.externalIds)].join(' ').toLowerCase())}" aria-pressed="false">
               <span class="dws-icon" style="background:${colorFor(a.systemName)}">${escape(abbr(a.systemName))}</span>
               <span class="dws-item-text">
                 <span class="dws-item-name">${escape(a.systemName)}</span>
@@ -11409,6 +11437,7 @@ async function renderMasterDwsApplications() {
           ${formRow('System Staging URL', `<input name="stagingUrl" type="url" value="${escape(existing?.stagingUrl || '')}" placeholder="https://..." />`)}
           ${formRow('Github URL', `<textarea name="githubUrl" rows="3" style="width:100%;resize:vertical;" placeholder="Repository link or description...">${escape(existing?.githubUrl || '')}</textarea>`)}
           ${formRow('Deployment Steps', `<textarea name="deploymentSteps" rows="5" style="width:100%;resize:vertical;" placeholder="Step-by-step deployment instructions for this application...">${escape(existing?.deploymentSteps || '')}</textarea>`)}
+          ${formRow('External IDs', externalIdsInput(existing?.externalIds, 'e.g. FI, CO', 'ERP module codes that map to this application, separated by commas. Each code can belong to one application only.'))}
           <div style="display:flex; gap: 12px;">
             <button type="submit" class="primary">${mode === 'create' ? 'Create' : 'Save'}</button>
             <button type="button" id="btn-cancel">Cancel</button>
@@ -11432,6 +11461,7 @@ async function renderMasterDwsApplications() {
         stagingUrl: fd.get('stagingUrl') || null,
         githubUrl: (fd.get('githubUrl') || '').trim() || null,
         deploymentSteps: (fd.get('deploymentSteps') || '').trim() || null,
+        externalIds: externalIdList(fd.get('externalIds')),
       };
       try {
         if (mode === 'create') {
@@ -11599,6 +11629,10 @@ async function renderMasterDwsApplications() {
         ${linkCard('Production', a.productionUrl)}
         ${linkCard('Staging', a.stagingUrl)}
         ${ghSingleUrl ? linkCard('GitHub', gh) : `<div class="dws-link ${gh ? '' : 'is-empty'}"><span class="dws-link-k">GitHub</span><span class="dws-link-v dws-wrap">${gh ? linkify(gh) : 'Not set'}</span></div>`}
+      </div>
+      <div class="dws-block">
+        <h3>External IDs</h3>
+        <div class="ext-ids">${externalIdChips(a.externalIds, '<p class="muted">No ERP module codes mapped yet. Use Edit to add them.</p>')}</div>
       </div>
       <div class="dws-block">
         <h3>Deployment steps</h3>

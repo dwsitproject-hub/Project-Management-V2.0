@@ -5,6 +5,7 @@ import { queueCrCreationEmail } from '../services/cr-email-queue.js';
 import { resolveDocumentPath } from '../services/uploads.js';
 import { initiativeTriggersCrCreationEmail } from '../services/cr-email-eligibility.js';
 import fs from 'fs/promises';
+import { normalizeExternalIds, findExternalIdConflict } from '../externalIds.js';
 import {
   CR_TASK_DEFINITIONS,
   getCrAssigneeIdFromBody,
@@ -29,6 +30,24 @@ const uuid = () => crypto.randomUUID();
 
 function requiresCrFullyLiveEndDate(type, status, milestone) {
   return type === 'CR' && crRequiresFullyLiveEndDate(status, milestone);
+}
+
+// Validate body.externalIds (IDs of the matching ERP record) for initiative `selfId`.
+// An external ID may belong to one initiative only. Sends the error response and
+// returns null when invalid; otherwise returns the clean list.
+function readExternalIds(req, res, data, selfId) {
+  const result = normalizeExternalIds(req.body?.externalIds);
+  if (result.error) {
+    res.status(400).json({ error: result.error });
+    return null;
+  }
+  const clash = findExternalIdConflict(data.initiatives, result.ids, selfId);
+  if (clash) {
+    const label = clash.row.ticket ? `${clash.row.ticket} – ${clash.row.name}` : clash.row.name;
+    res.status(409).json({ error: `External ID "${clash.externalId}" is already used by ${clash.row.type} "${label}"` });
+    return null;
+  }
+  return result.ids;
 }
 
 // Generate ticket number for CR in format: CRDDMMYYYYRunningNumber
@@ -159,7 +178,8 @@ router.get('/', async (req, res) => {
     rows = rows.filter(r => 
       (r.name || '').toLowerCase().includes(qLower) ||
       (r.description || '').toLowerCase().includes(qLower) ||
-      (r.ticket || '').toLowerCase().includes(qLower)
+      (r.ticket || '').toLowerCase().includes(qLower) ||
+      (r.externalIds || []).some((x) => String(x).toLowerCase().includes(qLower))
     );
   }
   if (type) rows = rows.filter(r => r.type === type);
@@ -324,7 +344,9 @@ router.post('/', async (req, res) => {
     type,name,ticket,description,businessImpact,priority,businessOwnerId,businessUserIds,departmentId,itPicId,itPicIds,itPmId,itManagerIds,systemImpactedIds,status,milestone,startDate,endDate,planStartDate,planEndDate,remark,documentationLink
   } = req.body;
   const data = await store.read();
-  
+  const externalIds = readExternalIds(req, res, data, null);
+  if (!externalIds) return;
+
   // Convert arrays to comma-separated strings for storage
   const businessUserIdsStr = Array.isArray(businessUserIds) ? businessUserIds.join(',') : (businessUserIds || null);
   const itPicIdsStr = Array.isArray(itPicIds) ? itPicIds.join(',') : (itPicIds || null);
@@ -354,8 +376,9 @@ router.post('/', async (req, res) => {
     systemImpactedIds: systemImpactedIdsStr,
     status,milestone: finalMilestone,
     crMilestonePhase: null,
-    startDate,endDate: endDate||null,planStartDate: planStartDate||null,planEndDate: planEndDate||null,remark: remark||null,documentationLink: documentationLink||null, 
-    createdAt, updatedAt 
+    startDate,endDate: endDate||null,planStartDate: planStartDate||null,planEndDate: planEndDate||null,remark: remark||null,documentationLink: documentationLink||null,
+    externalIds,
+    createdAt, updatedAt
   });
   if (type === 'CR') {
     const cr = req.body.cr || {};
@@ -443,7 +466,13 @@ router.put('/:id', async (req, res) => {
   const initiative = data.initiatives[idx];
   const changes = [];
   const updatedAt = now();
-  const allowed = ['name','ticket','description','businessImpact','priority','businessOwnerId','businessUserIds','departmentId','itPicId','itPicIds','itPmId','itManagerIds','systemImpactedIds','status','milestone','startDate','endDate','planStartDate','planEndDate','remark','documentationLink'];
+  // externalIds is optional: leaving it out keeps the stored list (the edit form doesn't send it yet).
+  if ('externalIds' in req.body) {
+    const externalIds = readExternalIds(req, res, data, initiative.id);
+    if (!externalIds) return;
+    req.body.externalIds = externalIds;
+  }
+  const allowed = ['name','ticket','description','businessImpact','priority','businessOwnerId','businessUserIds','departmentId','itPicId','itPicIds','itPmId','itManagerIds','systemImpactedIds','status','milestone','startDate','endDate','planStartDate','planEndDate','remark','documentationLink','externalIds'];
   
   // Track changes and update fields
   for (const k of allowed) {
@@ -459,7 +488,7 @@ router.put('/:id', async (req, res) => {
       }
       
       // Convert arrays to comma-separated strings for storage
-      if ((k === 'businessUserIds' || k === 'itPicIds' || k === 'itManagerIds' || k === 'systemImpactedIds') && Array.isArray(newValue)) {
+      if ((k === 'businessUserIds' || k === 'itPicIds' || k === 'itManagerIds' || k === 'systemImpactedIds' || k === 'externalIds') && Array.isArray(newValue)) {
         newValue = newValue.length > 0 ? newValue.join(',') : null;
       }
       
@@ -470,7 +499,7 @@ router.put('/:id', async (req, res) => {
       
       // Normalize values for comparison (handle null, undefined, empty string)
       // For array fields (comma-separated strings), normalize by sorting and trimming
-      const isArrayField = k === 'businessUserIds' || k === 'itPicIds' || k === 'itManagerIds' || k === 'systemImpactedIds';
+      const isArrayField = k === 'businessUserIds' || k === 'itPicIds' || k === 'itManagerIds' || k === 'systemImpactedIds' || k === 'externalIds';
       
       let oldVal, newVal;
       if (isArrayField) {
@@ -515,7 +544,9 @@ router.put('/:id', async (req, res) => {
         console.log(`[Change Tracking] Detected change for ${k}: "${oldVal}" -> "${newVal}"`);
         changes.push({
           field: k,
-          oldValue: initiative[k] || null,
+          // Multi-value fields come from store.read() as arrays; log them as the same
+          // comma-separated text as newValue (an array would be saved as '{"a","b"}').
+          oldValue: (Array.isArray(initiative[k]) ? initiative[k].join(',') : initiative[k]) || null,
           newValue: newValue || null,
           changedAt: updatedAt,
           changedBy: req.body.changedBy || 'Unknown'

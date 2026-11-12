@@ -7,6 +7,12 @@ const databaseUrl =
   'postgres://postgres:postgres123@localhost:5544/project_management_v2';
 
 const pool = new Pool({ connectionString: databaseUrl });
+
+/** Comma-separated TEXT column -> trimmed, non-empty array ([] when NULL). */
+function splitIds(raw) {
+  if (raw == null || raw === '') return [];
+  return String(raw).split(',').map((v) => v.trim()).filter(Boolean);
+}
 let schemaReady = null; // promise of the one-time schema set-up in this process
 
 // Lock id for the schema set-up, so two nodes starting together don't run the DDL at
@@ -114,6 +120,9 @@ async function runSchemaSetup() {
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "documentationLink" TEXT;
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "createdAt" TEXT;
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "updatedAt" TEXT;
+      -- Identifiers of the matching record(s) in an external system (e.g. ERP CR Ticket
+      -- Number), comma-separated like the other *Ids columns.
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "externalIds" TEXT;
       CREATE TABLE IF NOT EXISTS "changeRequests" (
         "initiativeId" TEXT PRIMARY KEY,
         "crSubmissionStart" TEXT,
@@ -344,6 +353,9 @@ async function runSchemaSetup() {
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "deploymentSteps" TEXT;
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "createdAt" TEXT;
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "updatedAt" TEXT;
+      -- External system codes that map to this application (e.g. ERP SAP module codes
+      -- "FI,CO" for SAP FICO), comma-separated.
+      ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "externalIds" TEXT;
 
       CREATE TABLE IF NOT EXISTS "managementDashboard" (
         "id" TEXT PRIMARY KEY,
@@ -714,6 +726,7 @@ async function readFromDb() {
         planEndDate: row.planEndDate || row.planenddate || null,
         remark: row.remark || null,
         documentationLink: row.documentationLink || row.documentationlink || null,
+        externalIds: splitIds(row.externalIds ?? row.externalids),
         createdAt: row.createdAt || row.createdat || null,
         updatedAt: row.updatedAt || row.updatedat || null
       }));
@@ -757,6 +770,7 @@ async function readFromDb() {
         stagingUrl: row.stagingUrl || row.stagingurl || null,
         githubUrl: row.githubUrl || row.githuburl || null,
         deploymentSteps: row.deploymentSteps || row.deploymentsteps || null,
+        externalIds: splitIds(row.externalIds ?? row.externalids),
         createdAt: row.createdAt || row.createdat,
         updatedAt: row.updatedAt || row.updatedat,
       }));
@@ -910,7 +924,7 @@ const TABLE_SPECS = [
   },
   {
     table: 'initiatives',
-    cols: ['id', 'type', 'name', 'ticket', 'description', 'businessImpact', 'priority', 'businessOwnerId', 'businessUserIds', 'departmentId', 'itPicId', 'itPicIds', 'itPmId', 'itManagerIds', 'systemImpactedIds', 'status', 'milestone', 'crMilestonePhase', 'startDate', 'endDate', 'planStartDate', 'planEndDate', 'remark', 'documentationLink', 'createdAt', 'updatedAt'],
+    cols: ['id', 'type', 'name', 'ticket', 'description', 'businessImpact', 'priority', 'businessOwnerId', 'businessUserIds', 'departmentId', 'itPicId', 'itPicIds', 'itPmId', 'itManagerIds', 'systemImpactedIds', 'status', 'milestone', 'crMilestonePhase', 'startDate', 'endDate', 'planStartDate', 'planEndDate', 'remark', 'documentationLink', 'externalIds', 'createdAt', 'updatedAt'],
     row: (i) => [
       i.id, i.type, i.name, i.ticket || null, i.description || null, i.businessImpact || null, i.priority || null,
       i.businessOwnerId || null, arr(i.businessUserIds), i.departmentId || null,
@@ -918,7 +932,7 @@ const TABLE_SPECS = [
       arr(i.itPicIds), i.itPmId || null, arr(i.itManagerIds), arr(i.systemImpactedIds),
       i.status || null, i.milestone || null, i.crMilestonePhase || null, i.startDate || null, i.endDate || null,
       i.planStartDate || null, i.planEndDate || null, i.remark || null, i.documentationLink || null,
-      i.createdAt || null, i.updatedAt || null,
+      arr(i.externalIds), i.createdAt || null, i.updatedAt || null,
     ],
   },
   {
@@ -964,8 +978,8 @@ const TABLE_SPECS = [
   },
   {
     table: 'dwsApplications',
-    cols: ['id', 'systemName', 'productionUrl', 'stagingUrl', 'githubUrl', 'deploymentSteps', 'createdAt', 'updatedAt'],
-    row: (a) => [a.id, a.systemName, a.productionUrl || null, a.stagingUrl || null, a.githubUrl || null, a.deploymentSteps || null, a.createdAt, a.updatedAt],
+    cols: ['id', 'systemName', 'productionUrl', 'stagingUrl', 'githubUrl', 'deploymentSteps', 'externalIds', 'createdAt', 'updatedAt'],
+    row: (a) => [a.id, a.systemName, a.productionUrl || null, a.stagingUrl || null, a.githubUrl || null, a.deploymentSteps || null, arr(a.externalIds), a.createdAt, a.updatedAt],
   },
   {
     table: 'accessRules',
