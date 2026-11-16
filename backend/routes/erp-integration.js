@@ -1,15 +1,16 @@
 // ERP CR sync API: ERP CR Management pushes its CRs into PM.
 // Contract: docs/ERP-CR-SYNC-API.md (for the ERP team). Design: docs/ERP-CR-INTEGRATION-DESIGN.md.
 //
-//   PUT   /api/v1/integrations/erp/crs/:ticketNumber            create or update, full CR state
-//   PATCH /api/v1/integrations/erp/crs/:ticketNumber            update some fields of an existing CR
-//   GET   /api/v1/integrations/erp/crs/:ticketNumber            PM's view of a CR
-//   PUT   /api/v1/integrations/erp/crs                          batch of full states (max 200)
-//   PUT   /api/v1/integrations/erp/crs/:ticketNumber/document   the ERP CR document (one file, max 30 MB)
+//   PUT   /api/v1/integrations/erp/crs/:crId             create or update, full CR state
+//   PATCH /api/v1/integrations/erp/crs/:crId             update some fields of an existing CR
+//   GET   /api/v1/integrations/erp/crs/:crId             PM's view of a CR
+//   PUT   /api/v1/integrations/erp/crs                   batch of full states (max 200)
+//   PUT   /api/v1/integrations/erp/crs/:crId/document    the ERP CR document (one file, max 30 MB)
 //   PUT   /api/v1/integrations/erp/modules                      ERP module master (add / rename / deactivate)
 //
-// Access: API clients with scope `cr:sync`; PM admins (for testing). The CR is found by
-// its ERP Ticket Number in initiatives.externalIds. ERP sends ERP values (statuses,
+// Access: API clients with scope `cr:sync`; PM admins (for testing). v1.1: the CR is found
+// by ERP's CR ID (change_requests.id), kept hidden in initiatives.externalIds; ERP's Ticket
+// Number (not unique in ERP) is shown as the CR's Ticket. ERP sends ERP values (statuses,
 // segment/stage, High/Medium/Low, emails, codes); this file translates them to PM's.
 // Every call is logged in "erpIntegrationEvents" (outside the in-memory store, so the
 // log can grow without slowing every read). A repeated eventId returns the first answer.
@@ -55,6 +56,7 @@ function ensureEventsTable() {
         "id" TEXT PRIMARY KEY,
         "eventId" TEXT,
         "ticketNumber" TEXT,
+        "crId" TEXT,
         "eventType" TEXT,
         "endpoint" TEXT,
         "clientId" TEXT,
@@ -66,6 +68,7 @@ function ensureEventsTable() {
         "response" TEXT,
         "payload" TEXT
       );
+      ALTER TABLE "erpIntegrationEvents" ADD COLUMN IF NOT EXISTS "crId" TEXT;
       CREATE INDEX IF NOT EXISTS "erpIntegrationEvents_eventId" ON "erpIntegrationEvents" ("eventId");
       CREATE INDEX IF NOT EXISTS "erpIntegrationEvents_ticket" ON "erpIntegrationEvents" ("ticketNumber");
     `).catch((e) => { eventsTableReady = null; throw e; });
@@ -89,14 +92,14 @@ async function earlierAnswers(eventIds) {
   return out;
 }
 
-async function logEvent(req, { eventId, ticketNumber, eventType, httpStatus, response, error, payload }) {
+async function logEvent(req, { eventId, crId, ticketNumber, eventType, httpStatus, response, error, payload }) {
   try {
     await ensureEventsTable();
     await store.pool.query(
-      `INSERT INTO "erpIntegrationEvents"("id","eventId","ticketNumber","eventType","endpoint","clientId","receivedAt","httpStatus","action","warnings","error","response","payload")
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+      `INSERT INTO "erpIntegrationEvents"("id","eventId","ticketNumber","crId","eventType","endpoint","clientId","receivedAt","httpStatus","action","warnings","error","response","payload")
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [
-        uuid(), eventId || null, ticketNumber || null, eventType || null, `${req.method} ${req.baseUrl}${req.path}`,
+        uuid(), eventId || null, ticketNumber || null, crId || null, eventType || null, `${req.method} ${req.baseUrl}${req.path}`,
         req.user?.clientId || req.user?.email || null, new Date().toISOString(), httpStatus,
         response?.action || null, response?.warnings?.length ? JSON.stringify(response.warnings) : null,
         error || null, response ? JSON.stringify(response) : null,
@@ -154,13 +157,13 @@ function readOccurredAt(body) {
   return d.toISOString();
 }
 
-const REQUIRED_FULL = [
-  'ticketNumber', 'changeRequest', 'status', 'segment', 'stage',
-  'requesterEmail', 'functionalEmail', 'dateCreation', 'targetResolved', 'createdAt',
-];
+// Required on a full PUT (v1.1). Requester, Functional and Target Resolved are optional:
+// a missing value gives a warning, not a 400 (ERP has old CRs without them).
+const REQUIRED_FULL = ['crId', 'changeRequest', 'status', 'segment', 'stage', 'dateCreation', 'createdAt'];
 
-function findCr(data, ticketNumber) {
-  const key = idKey(ticketNumber);
+/** The CR whose hidden key (initiatives.externalIds) is this ERP CR ID. */
+function findCr(data, crId) {
+  const key = idKey(crId);
   return (data.initiatives || []).find((i) => (i.externalIds || []).some((x) => idKey(x) === key)) || null;
 }
 
@@ -181,34 +184,101 @@ function pmUrl(initiativeId) {
 
 // Fields compared for the Change History entry ERP updates leave.
 const HISTORY_FIELDS = [
-  'name', 'description', 'remark', 'priority', 'status', 'milestone', 'departmentId', 'businessOwnerId',
+  'ticket', 'name', 'description', 'remark', 'priority', 'status', 'milestone', 'departmentId', 'businessOwnerId',
   'businessUserIds', 'itPicId', 'itPicIds', 'itManagerIds', 'systemImpactedIds', 'startDate', 'endDate',
   'planStartDate', 'planEndDate', 'erpModuleId', 'tCode', 'functionalDepartment', 'crReference',
-  'ownershipCode', 'impactAreaCode',
+  'ownershipCode', 'impactAreaCode', 'erpProgress',
 ];
-const asText = (v) => (Array.isArray(v) ? v.join(',') : v) || null;
+const asText = (v) => (v == null ? null : (Array.isArray(v) ? v.join(',') : String(v)) || null);
+
+// ---------------------------------------------------------------- segments --------
+const STAGE_STATUSES = new Set(['inactive', 'active', 'completed']);
+const numOrNull = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
+
+/** cr.segments -> clean snapshot (throws InputError on a bad shape). Accepts `bobot` for `weight`. */
+function readSegments(raw) {
+  if (!Array.isArray(raw)) throw new InputError('cr.segments must be a list');
+  if (raw.length > 50) throw new InputError('cr.segments may have at most 50 segments');
+  const text = (v, what, max = MAX_TEXT) => {
+    if (v == null) return null;
+    if (typeof v !== 'string' && typeof v !== 'number') throw new InputError(`${what} must be text`);
+    const s = String(v).trim();
+    if (s.length > max) throw new InputError(`${what} may be at most ${max} characters`);
+    return s || null;
+  };
+  const status = (v, what) => {
+    const s = v == null ? null : String(v).trim().toLowerCase();
+    if (s && !STAGE_STATUSES.has(s)) throw new InputError(`${what} must be inactive, active or completed`);
+    return s;
+  };
+  const date = (v, what) => {
+    const d = toPmDate(v);
+    if (d === 'invalid') throw new InputError(`${what} is not a valid date`);
+    return d ?? null;
+  };
+  return raw.map((seg, i) => {
+    if (!seg || typeof seg !== 'object') throw new InputError(`cr.segments[${i}] must be an object`);
+    const name = text(seg.name, `cr.segments[${i}].name`);
+    if (!name) throw new InputError(`cr.segments[${i}].name is required`);
+    const stages = seg.stages == null ? [] : seg.stages;
+    if (!Array.isArray(stages)) throw new InputError(`cr.segments[${i}].stages must be a list`);
+    if (stages.length > 100) throw new InputError(`cr.segments[${i}].stages may have at most 100 stages`);
+    return {
+      sequence: numOrNull(seg.sequence),
+      name,
+      weight: numOrNull(seg.weight ?? seg.bobot),
+      status: status(seg.status, `cr.segments[${i}].status`),
+      progress: numOrNull(seg.progress),
+      stages: stages.map((st, j) => {
+        const where = `cr.segments[${i}].stages[${j}]`;
+        if (!st || typeof st !== 'object') throw new InputError(`${where} must be an object`);
+        const stName = text(st.name, `${where}.name`);
+        if (!stName) throw new InputError(`${where}.name is required`);
+        const subs = st.subStages == null ? null : st.subStages;
+        if (subs != null && !Array.isArray(subs)) throw new InputError(`${where}.subStages must be a list`);
+        return {
+          sequence: numOrNull(st.sequence),
+          name: stName,
+          type: text(st.type, `${where}.type`),
+          stageCode: text(st.stageCode, `${where}.stageCode`),
+          status: status(st.status, `${where}.status`),
+          startDate: date(st.startDate, `${where}.startDate`),
+          endDate: date(st.endDate, `${where}.endDate`),
+          progress: numOrNull(st.progress),
+          iteration: numOrNull(st.iteration),
+          subStages: subs ? subs.slice(0, 50).map((sb, k) => ({
+            name: text(sb?.name, `${where}.subStages[${k}].name`) || `Team ${k + 1}`,
+            status: status(sb?.status, `${where}.subStages[${k}].status`),
+            progress: numOrNull(sb?.progress),
+          })) : null,
+        };
+      }),
+    };
+  });
+}
 
 // ---------------------------------------------------------------- core ------------
 /**
  * Apply one ERP message to `data` (in memory). mode = 'full' (PUT: create or update with
  * the whole CR) or 'partial' (PATCH: only the fields sent, CR must exist).
+ * The CR is keyed by ERP's CR ID (v1.1); the Ticket Number is shown as PM's Ticket.
  * Returns the response body. Throws InputError for a bad message.
  */
-function applyCr(data, body, mode, ticketFromPath) {
+function applyCr(data, body, mode, crIdFromPath) {
   if (!body || typeof body !== 'object') throw new InputError('Body must be a JSON object');
   const cr = body.cr;
   if (!cr || typeof cr !== 'object' || Array.isArray(cr)) throw new InputError('cr (object) is required');
   const occurredAt = readOccurredAt(body);
 
-  if (ticketFromPath != null) {
-    if (has(cr, 'ticketNumber') && idKey(cr.ticketNumber) !== idKey(ticketFromPath)) {
-      throw new InputError('cr.ticketNumber does not match the Ticket Number in the URL');
+  if (crIdFromPath != null) {
+    if (has(cr, 'crId') && cr.crId != null && idKey(cr.crId) !== idKey(crIdFromPath)) {
+      throw new InputError('cr.crId does not match the CR ID in the URL');
     }
-    if (!has(cr, 'ticketNumber')) cr.ticketNumber = ticketFromPath;
+    if (!has(cr, 'crId') || cr.crId == null) cr.crId = crIdFromPath;
   }
-  const ticketNumber = optText(cr, 'ticketNumber', 100);
-  if (!ticketNumber) throw new InputError('cr.ticketNumber is required');
-  if (ticketNumber.includes(',')) throw new InputError('cr.ticketNumber may not contain a comma');
+  const crId = optText(cr, 'crId', 100);
+  if (!crId) throw new InputError('cr.crId is required (ERP change_requests.id)');
+  if (crId.includes(',')) throw new InputError('cr.crId may not contain a comma');
 
   if (mode === 'full') {
     const missing = REQUIRED_FULL.filter((k) => cr[k] == null || String(cr[k]).trim() === '');
@@ -216,16 +286,17 @@ function applyCr(data, body, mode, ticketFromPath) {
   }
   if (has(cr, 'segment') !== has(cr, 'stage')) throw new InputError('cr.segment and cr.stage must be sent together');
   validateCr(cr); // every check that can reject the message, before anything is changed
+  const segments = has(cr, 'segments') && cr.segments != null ? readSegments(cr.segments) : undefined;
 
-  let initiative = findCr(data, ticketNumber);
+  let initiative = findCr(data, crId);
   if (initiative && initiative.type !== 'CR') {
-    throw new InputError(`Ticket Number ${ticketNumber} is linked to a PM ${initiative.type}, not a CR`, 409);
+    throw new InputError(`ERP CR ${crId} is linked to a PM ${initiative.type}, not a CR`, 409);
   }
-  if (!initiative && mode === 'partial') throw new InputError(`No CR with Ticket Number ${ticketNumber} in PM (create it with PUT first)`, 404);
+  if (!initiative && mode === 'partial') throw new InputError(`No CR with ERP CR ID ${crId} in PM (create it with PUT first)`, 404);
   if (initiative?.externalSyncedAt && occurredAt <= initiative.externalSyncedAt) {
     return {
-      action: 'ignored_stale', ticketNumber, initiativeId: initiative.id, pmTicket: initiative.ticket || null,
-      pmUrl: pmUrl(initiative.id), warnings: [],
+      action: 'ignored_stale', crId, ticketNumber: initiative.externalData?.ticketNumber ?? null, initiativeId: initiative.id,
+      pmTicket: initiative.ticket || null, pmUrl: pmUrl(initiative.id), warnings: [],
       message: `An ERP change from ${initiative.externalSyncedAt} was already applied; this one (${occurredAt}) is older.`,
     };
   }
@@ -236,12 +307,18 @@ function applyCr(data, body, mode, ticketFromPath) {
   const now = new Date().toISOString();
   const prevErp = initiative?.externalData || {};
   const erp = { ...prevErp }; // ERP-only details kept on the CR (externalData)
+  erp.crId = crId;
+
+  // ---- Ticket: ERP's Ticket Number, or the CR ID when ERP has none (v1.1)
+  if (has(cr, 'ticketNumber')) {
+    const t = optText(cr, 'ticketNumber', 100);
+    set.ticket = t || crId;
+    erp.ticketNumber = t;
+  }
 
   // ---- texts: CR Name, Description (Note + Change Request), Remark (Note)
   if (has(cr, 'changeRequest')) {
-    const html = optText(cr, 'changeRequest', MAX_RICH_TEXT);
-    const text = htmlToText(html);
-    if (!text) throw new InputError('cr.changeRequest has no text');
+    const text = htmlToText(optText(cr, 'changeRequest', MAX_RICH_TEXT));
     set.name = crNameFrom(text);
     erp.changeRequestText = text;
   }
@@ -257,7 +334,7 @@ function applyCr(data, body, mode, ticketFromPath) {
   for (const k of ['tCode', 'functionalDepartment', 'crReference']) {
     if (has(cr, k)) set[k] = optText(cr, k);
   }
-  for (const k of ['crId', 'url', 'type']) {
+  for (const k of ['url', 'type']) {
     if (has(cr, k)) erp[k] = optText(cr, k, k === 'url' ? 1000 : MAX_TEXT);
   }
   if (has(cr, 'projectType')) erp.projectType = cr.projectType === true || cr.projectType === 'true' || cr.projectType === 'Yes';
@@ -266,7 +343,6 @@ function applyCr(data, body, mode, ticketFromPath) {
   // ---- module -> ERP Module + System Impacted
   if (has(cr, 'moduleId')) {
     const moduleId = optText(cr, 'moduleId');
-    if (moduleId && moduleId.includes(',')) throw new InputError('cr.moduleId may not contain a comma');
     if (!moduleId) {
       set.erpModuleId = null;
     } else {
@@ -291,7 +367,7 @@ function applyCr(data, body, mode, ticketFromPath) {
     }
   }
 
-  // ---- requester department -> Department
+  // ---- requester department -> Department (ERP sends null until it stores it, N15)
   if (has(cr, 'requesterDepartmentCode')) {
     const code = optText(cr, 'requesterDepartmentCode');
     if (!code) set.departmentId = null;
@@ -302,47 +378,46 @@ function applyCr(data, body, mode, ticketFromPath) {
     }
   }
 
-  // ---- Ownership / Impact Area (captured from ERP)
-  for (const [k, kind, col] of [['ownership', 'ownership', 'ownershipCode'], ['impactArea', 'impactArea', 'impactAreaCode']]) {
-    if (!has(cr, k)) continue;
-    const v = cr[k];
-    if (v == null) { set[col] = null; continue; }
-    if (typeof v !== 'object' || Array.isArray(v)) throw new InputError(`cr.${k} must be an object { code, name }`);
+  // ---- Ownership / Impact Area(s) (captured from ERP)
+  const capture = (kind, v) => {
     const code = optText(v, 'code');
-    if (!code) throw new InputError(`cr.${k}.code is required`);
     const name = has(v, 'name') ? optText(v, 'name') : null;
     if (!data.erpOptions) data.erpOptions = [];
     const id = `${kind}:${code}`;
     const opt = data.erpOptions.find((o) => o.id === id);
     if (!opt) data.erpOptions.push({ id, kind, code, name: name || code, updatedAt: now });
     else if (name && opt.name !== name) { opt.name = name; opt.updatedAt = now; }
-    set[col] = code;
+    return code;
+  };
+  if (has(cr, 'ownership')) set.ownershipCode = cr.ownership == null ? null : capture('ownership', cr.ownership);
+  if (has(cr, 'impactAreas')) {
+    const codes = [...new Set((cr.impactAreas || []).map((v) => capture('impactArea', v)))];
+    set.impactAreaCode = codes.length ? codes.join(',') : null;
+  } else if (has(cr, 'impactArea')) {
+    set.impactAreaCode = cr.impactArea == null ? null : capture('impactArea', cr.impactArea);
   }
 
-  // ---- priority / status
+  // ---- priority / status / progress
   if (has(cr, 'priority')) {
     const raw = optText(cr, 'priority');
-    if (raw) {
-      const p = mapPriority(raw);
-      if (!p) throw new InputError('cr.priority must be High, Medium or Low');
-      set.priority = p;
-    }
+    if (raw) set.priority = mapPriority(raw);
   }
   if (has(cr, 'status')) {
-    const s = mapStatus(cr.status);
-    if (!s) throw new InputError('cr.status must be In Progress, Delayed, Completed or Cancelled');
-    set.status = s;
+    set.status = mapStatus(cr.status);
     erp.status = String(cr.status).trim();
   }
+  if (has(cr, 'progress')) set.erpProgress = numOrNull(cr.progress);
 
-  // ---- milestone from (segment, stage)
+  // ---- milestone from (segment, stage[, stageType])
   if (has(cr, 'segment')) {
     const segment = optText(cr, 'segment');
     const stage = optText(cr, 'stage');
+    const stageType = has(cr, 'stageType') ? optText(cr, 'stageType') : null;
     const stageChanged = !initiative || prevErp.segment !== segment || prevErp.stage !== stage;
     erp.segment = segment;
     erp.stage = stage;
-    const m = mapMilestone(segment, stage);
+    erp.stageType = stageType;
+    const m = mapMilestone(segment, stage, stageType);
     if (!m) {
       warn('UNMAPPED_STAGE', 'cr.stage', `${segment} / ${stage}`, `Unknown segment/stage; Milestone left unchanged. Known segments: ${KNOWN_SEGMENTS.join(', ')}`);
     } else if (initiative && initiative.milestone === 'Fully Live' && m === 'Live (Warranty Period)') {
@@ -354,26 +429,25 @@ function applyCr(data, body, mode, ticketFromPath) {
     }
   }
 
-  // ---- people
-  if (has(cr, 'requesterEmail')) {
-    const email = optText(cr, 'requesterEmail');
-    const u = findUserByEmail(data, email, { activeOnly: true });
-    if (u) { set.businessOwnerId = u.id; set.businessUserIds = [u.id]; }
-    else if (email) warn('USER_UNMAPPED', 'cr.requesterEmail', email, 'No active PM user with this email; Business Owner / Business Users left unchanged');
-    erp.requesterEmail = email;
-  }
-  if (has(cr, 'functionalEmail')) {
-    const email = optText(cr, 'functionalEmail');
-    const u = findUserByEmail(data, email, { activeOnly: true });
-    if (u) { set.itPicId = u.id; set.itPicIds = [u.id]; }
-    else if (email) warn('USER_UNMAPPED', 'cr.functionalEmail', email, 'No active PM user with this email; IT PIC left unchanged');
-    erp.functionalEmail = email;
-  }
+  // ---- people (optional in v1.1: missing -> warning, field left unchanged)
+  const person = (k, apply, label) => {
+    const sent = has(cr, k);
+    const email = sent ? optText(cr, k) : null;
+    if (email) {
+      const u = findUserByEmail(data, email, { activeOnly: true });
+      if (u) apply(u);
+      else warn('USER_UNMAPPED', `cr.${k}`, email, `No active PM user with this email; ${label} left unchanged`);
+    } else if (sent || mode === 'full') {
+      warn('USER_UNMAPPED', `cr.${k}`, undefined, `Not sent; ${label} left unchanged`);
+    }
+    if (sent) erp[k] = email;
+  };
+  person('requesterEmail', (u) => { set.businessOwnerId = u.id; set.businessUserIds = [u.id]; }, 'Business Owner / Business Users');
+  person('functionalEmail', (u) => { set.itPicId = u.id; set.itPicIds = [u.id]; }, 'IT PIC');
   if (has(cr, 'deptHeadEmail')) {
     const email = optText(cr, 'deptHeadEmail');
     if (!email) set.itManagerIds = [];
     else {
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new InputError('cr.deptHeadEmail is not a valid email');
       let u = findUserByEmail(data, email, { activeOnly: false });
       if (!u) {
         // Created inactive: DWS Hub SSO signs in any existing, non-inactive user with a
@@ -399,6 +473,16 @@ function applyCr(data, body, mode, ticketFromPath) {
   for (const [k, col] of dates) {
     if (has(cr, k)) set[col] = pmDate(cr, k);
   }
+  if ((mode === 'full' && !has(cr, 'targetResolved')) || (has(cr, 'targetResolved') && !set.planEndDate)) {
+    warn('MISSING_FIELD', 'cr.targetResolved', undefined, 'Not sent; Plan End Date left empty');
+  }
+
+  // ---- progress structure (display-only snapshot, replaced on every message)
+  if (segments !== undefined) {
+    erp.erpProgress = { progress: has(cr, 'progress') ? numOrNull(cr.progress) : (prevErp.erpProgress?.progress ?? null), asOf: occurredAt, segments };
+  } else if (has(cr, 'progress') && erp.erpProgress) {
+    erp.erpProgress = { ...erp.erpProgress, progress: numOrNull(cr.progress), asOf: occurredAt };
+  }
 
   erp.lastWarnings = warnings;
   erp.occurredAt = occurredAt;
@@ -409,12 +493,15 @@ function applyCr(data, body, mode, ticketFromPath) {
   if (!initiative) {
     const id = uuid();
     initiative = {
-      id, type: 'CR', name: set.name, ticket: generateCrTicket(data), description: null, businessImpact: null,
+      id, type: 'CR', name: set.name, ticket: crId, description: null, businessImpact: null,
       priority: 'P2', businessOwnerId: null, businessUserIds: [], departmentId: null, itPicId: null, itPicIds: [],
       itPmId: null, itManagerIds: [], systemImpactedIds: [], status: null, milestone: null, crMilestonePhase: null,
       startDate: null, endDate: null, planStartDate: null, planEndDate: null, remark: null, documentationLink: null,
-      externalIds: [ticketNumber], erpModuleId: null, tCode: null, functionalDepartment: null, crReference: null,
-      ownershipCode: null, impactAreaCode: null, createdAt: now,
+      externalIds: [crId], erpModuleId: null, tCode: null, functionalDepartment: null, crReference: null,
+      ownershipCode: null, impactAreaCode: null, erpProgress: null,
+      // PM's "Create Date" = when the CR was created in ERP (not the day it first synced),
+      // so ages like "Created to Start" are meaningful.
+      createdAt: erpCreatedAt(cr.createdAt) || now,
     };
     if (!set.milestone) set.milestone = 'CR Created';
     Object.assign(initiative, set);
@@ -424,13 +511,13 @@ function applyCr(data, body, mode, ticketFromPath) {
       initiativeId: id, crSubmissionStart: initiative.planStartDate || null, crSubmissionEnd: null,
       developmentStart: null, developmentEnd: null, sitStart: null, sitEnd: null, uatStart: null, uatEnd: null, liveDate: null,
     });
+    // With the stage structure, tasks are created from ERP's stages (only the ones this CR
+    // has); without it, the default CR task list.
+    const defs = segments !== undefined
+      ? CR_TASK_DEFINITIONS.filter((t) => ['User Initiate', 'CR Created', 'Fully Live'].includes(t.milestone))
+      : CR_TASK_DEFINITIONS;
     if (!data.tasks) data.tasks = [];
-    for (const t of CR_TASK_DEFINITIONS) {
-      data.tasks.push({
-        id: uuid(), initiativeId: id, name: t.name, description: null, startDate: null, endDate: null,
-        assigneeId: initiative.itPicId || null, status: 'not started', milestone: t.milestone, createdAt: now, updatedAt: null,
-      });
-    }
+    for (const t of defs) data.tasks.push(newTask(id, t.name, t.milestone, initiative.itPicId, now));
     action = 'created';
   } else {
     for (const [k, v] of Object.entries(set)) {
@@ -457,11 +544,12 @@ function applyCr(data, body, mode, ticketFromPath) {
     if (!data.changeHistory) data.changeHistory = [];
     data.changeHistory.push({ id: uuid(), initiativeId: initiative.id, changes, timestamp: now, changedBy: CHANGED_BY });
   }
-  syncTasks(data, initiative, now);
+  if (erp.erpProgress?.segments) syncTasksFromStages(data, initiative, erp.erpProgress.segments, now, warnings);
+  else syncTasks(data, initiative, now);
 
   return {
-    action, ticketNumber, initiativeId: initiative.id, pmTicket: initiative.ticket || null, pmUrl: pmUrl(initiative.id),
-    changedFields: action === 'created' ? undefined : changes.map((c) => c.field), warnings,
+    action, crId, ticketNumber: erp.ticketNumber ?? null, initiativeId: initiative.id, pmTicket: initiative.ticket || null,
+    pmUrl: pmUrl(initiative.id), changedFields: action === 'created' ? undefined : changes.map((c) => c.field), warnings,
   };
 }
 
@@ -471,10 +559,10 @@ function applyCr(data, body, mode, ticketFromPath) {
  */
 function validateCr(cr) {
   const textFields = {
-    crId: MAX_TEXT, type: MAX_TEXT, url: 1000, changeRequest: MAX_RICH_TEXT, note: MAX_RICH_TEXT, moduleId: MAX_TEXT,
-    moduleName: MAX_TEXT, tCode: MAX_TEXT, functionalDepartment: MAX_TEXT, crReference: MAX_TEXT,
+    crId: 100, ticketNumber: 100, type: MAX_TEXT, url: 1000, changeRequest: MAX_RICH_TEXT, note: MAX_RICH_TEXT,
+    moduleId: MAX_TEXT, moduleName: MAX_TEXT, tCode: MAX_TEXT, functionalDepartment: MAX_TEXT, crReference: MAX_TEXT,
     requesterDepartmentCode: MAX_TEXT, priority: MAX_TEXT, status: MAX_TEXT, segment: MAX_TEXT, stage: MAX_TEXT,
-    requesterEmail: MAX_TEXT, functionalEmail: MAX_TEXT, deptHeadEmail: MAX_TEXT, deptHeadName: MAX_TEXT,
+    stageType: MAX_TEXT, requesterEmail: MAX_TEXT, functionalEmail: MAX_TEXT, deptHeadEmail: MAX_TEXT, deptHeadName: MAX_TEXT,
   };
   for (const [k, max] of Object.entries(textFields)) if (has(cr, k)) optText(cr, k, max);
   if (has(cr, 'changeRequest') && !htmlToText(cr.changeRequest)) throw new InputError('cr.changeRequest has no text');
@@ -484,19 +572,43 @@ function validateCr(cr) {
   for (const k of ['dateCreation', 'targetResolved', 'createdAt', 'closedAt']) if (has(cr, k)) pmDate(cr, k);
   const head = has(cr, 'deptHeadEmail') ? optText(cr, 'deptHeadEmail') : null;
   if (head && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(head)) throw new InputError('cr.deptHeadEmail is not a valid email');
-  for (const k of ['ownership', 'impactArea']) {
-    if (!has(cr, k) || cr[k] == null) continue;
-    const v = cr[k];
-    if (typeof v !== 'object' || Array.isArray(v)) throw new InputError(`cr.${k} must be an object { code, name }`);
+  if (has(cr, 'progress') && cr.progress != null) {
+    const p = Number(cr.progress);
+    if (!Number.isFinite(p) || p < 0 || p > 100) throw new InputError('cr.progress must be a number from 0 to 100');
+  }
+  const option = (v, where) => {
+    if (typeof v !== 'object' || v == null || Array.isArray(v)) throw new InputError(`${where} must be an object { code, name }`);
     for (const f of ['code', 'name']) {
-      if (v[f] != null && typeof v[f] !== 'string' && typeof v[f] !== 'number') throw new InputError(`cr.${k}.${f} must be text`);
-      if (String(v[f] ?? '').trim().length > MAX_TEXT) throw new InputError(`cr.${k}.${f} may be at most ${MAX_TEXT} characters`);
+      if (v[f] != null && typeof v[f] !== 'string' && typeof v[f] !== 'number') throw new InputError(`${where}.${f} must be text`);
+      if (String(v[f] ?? '').trim().length > MAX_TEXT) throw new InputError(`${where}.${f} may be at most ${MAX_TEXT} characters`);
     }
-    if (!String(v.code ?? '').trim()) throw new InputError(`cr.${k}.code is required`);
+    if (String(v.code ?? '').includes(',')) throw new InputError(`${where}.code may not contain a comma`);
+    if (!String(v.code ?? '').trim()) throw new InputError(`${where}.code is required`);
+  };
+  for (const k of ['ownership', 'impactArea']) if (has(cr, k) && cr[k] != null) option(cr[k], `cr.${k}`);
+  if (has(cr, 'impactAreas') && cr.impactAreas != null) {
+    if (!Array.isArray(cr.impactAreas)) throw new InputError('cr.impactAreas must be a list of { code, name }');
+    if (cr.impactAreas.length > 50) throw new InputError('cr.impactAreas may have at most 50 items');
+    cr.impactAreas.forEach((v, i) => option(v, `cr.impactAreas[${i}]`));
   }
 }
 
-// CR tasks follow the milestone: tasks of passed milestones -> done; Cancelled -> cancel.
+/** ERP createdAt (ISO timestamp or YYYY-MM-DD) -> ISO timestamp, or null. */
+function erpCreatedAt(v) {
+  if (v == null || v === '') return null;
+  const s = String(v).trim();
+  const d = new Date(/^\d{4}-\d{2}-\d{2}$/.test(s) ? `${s}T00:00:00+07:00` : s);
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
+function newTask(initiativeId, name, milestone, assigneeId, now) {
+  return {
+    id: uuid(), initiativeId, name, description: null, startDate: null, endDate: null,
+    assigneeId: assigneeId || null, status: 'not started', milestone, createdAt: now, updatedAt: null,
+  };
+}
+
+// No stage structure: CR tasks follow the milestone (passed milestones -> done; Cancelled -> cancel).
 function syncTasks(data, initiative, now) {
   const tasks = (data.tasks || []).filter((t) => t.initiativeId === initiative.id);
   if (!tasks.length) return;
@@ -514,18 +626,67 @@ function syncTasks(data, initiative, now) {
   }
 }
 
-// Same format as routes/initiatives.js generateCRTicketNumber: CR + DDMMYYYY + 3-digit run.
-function generateCrTicket(data) {
-  const d = new Date();
-  const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Jakarta', day: '2-digit', month: '2-digit', year: 'numeric' }).formatToParts(d);
-  const get = (t) => parts.find((p) => p.type === t).value;
-  const prefix = `${get('day')}${get('month')}${get('year')}`;
-  let max = 0;
-  for (const i of data.initiatives || []) {
-    const m = i.type === 'CR' && i.ticket ? String(i.ticket).match(/^CR(\d{8})(\d+)$/) : null;
-    if (m && m[1] === prefix) max = Math.max(max, parseInt(m[2], 10));
+/**
+ * With ERP's stage structure: one PM task per PM milestone, fed by every ERP stage that maps
+ * to it (docs/ERP-CR-INTEGRATION-DESIGN.md §4.6). Status: all completed -> done; any started
+ * -> in progress; else not started (a stage ERP sends back reopens its task).
+ * Dates: earliest start; latest end once all are completed. Tasks are created on demand.
+ */
+function syncTasksFromStages(data, initiative, segments, now, warnings) {
+  if (!data.tasks) data.tasks = [];
+  const groups = new Map(); // milestone -> stages
+  const unmapped = new Set();
+  for (const seg of segments) {
+    for (const st of seg.stages || []) {
+      const m = mapMilestone(seg.name, st.name, st.type);
+      if (!m) { unmapped.add(`${seg.name} / ${st.name}`); continue; }
+      if (!groups.has(m)) groups.set(m, []);
+      groups.get(m).push(st);
+    }
   }
-  return `CR${prefix}${String(max + 1).padStart(3, '0')}`;
+  for (const pair of unmapped) {
+    warnings.push({ code: 'UNMAPPED_STAGE', field: 'cr.segments', value: pair, message: 'Stage not in the mapping; no PM task fed from it' });
+  }
+  const cancelled = initiative.status === 'Cancelled';
+  const tasks = data.tasks.filter((t) => t.initiativeId === initiative.id);
+  const patch = (t, values) => {
+    let changed = false;
+    for (const [k, v] of Object.entries(values)) if ((t[k] ?? null) !== (v ?? null)) { t[k] = v; changed = true; }
+    if (changed) t.updatedAt = now;
+  };
+
+  for (const [milestone, stages] of groups) {
+    let task = tasks.find((t) => t.milestone === milestone);
+    if (!task) {
+      task = newTask(initiative.id, milestone, milestone, initiative.itPicId, now);
+      data.tasks.push(task);
+      tasks.push(task);
+    }
+    const allDone = stages.every((s) => s.status === 'completed');
+    const anyStarted = stages.some((s) => s.status === 'active' || s.status === 'completed');
+    let status = allDone ? 'done' : anyStarted ? 'in progress' : 'not started';
+    if (cancelled && status !== 'done') status = 'cancel';
+    const starts = stages.map((s) => s.startDate).filter(Boolean).sort();
+    const ends = stages.map((s) => s.endDate).filter(Boolean).sort();
+    const detail = stages.map((s) => {
+      const mark = s.status === 'completed' ? '✔' : s.status === 'active' ? `${Math.round(s.progress ?? 0)}%` : '–';
+      return `${s.name} ${mark}${s.iteration > 1 ? ` (×${s.iteration})` : ''}`;
+    }).join(', ');
+    patch(task, {
+      status,
+      startDate: anyStarted ? (starts[0] || null) : null,
+      endDate: allDone ? (ends[ends.length - 1] || null) : null,
+      description: `From ERP: ${detail}`,
+    });
+  }
+
+  // Milestones without an ERP stage: User Initiate / CR Created happened before or at
+  // creation in ERP -> done. Fully Live stays PM-owned. Others: cancel when the CR is cancelled.
+  for (const t of tasks) {
+    if (groups.has(t.milestone)) continue;
+    if (t.milestone === 'User Initiate' || t.milestone === 'CR Created') patch(t, { status: 'done' });
+    else if (cancelled && t.milestone !== 'Fully Live' && !['done', 'cancel'].includes(String(t.status || '').toLowerCase())) patch(t, { status: 'cancel' });
+  }
 }
 
 function sendError(res, e) {
@@ -536,9 +697,12 @@ function sendError(res, e) {
 
 // ---------------------------------------------------------------- routes ----------
 async function handleOne(req, res, mode) {
-  const ticket = req.params.ticketNumber;
+  const crId = req.params.crId;
   const body = req.body || {};
-  const meta = { eventId: body.eventId ? String(body.eventId) : null, ticketNumber: ticket, eventType: body.eventType || null, payload: body };
+  const meta = {
+    eventId: body.eventId ? String(body.eventId) : null, crId, ticketNumber: body.cr?.ticketNumber ?? null,
+    eventType: body.eventType || null, payload: body,
+  };
   try {
     if (meta.eventId) {
       const earlier = (await earlierAnswers([meta.eventId])).get(meta.eventId);
@@ -546,12 +710,11 @@ async function handleOne(req, res, mode) {
     }
     const out = await withErpLock(async () => {
       const data = await store.read();
-      const result = applyCr(data, body, mode, ticket);
+      const result = applyCr(data, body, mode, crId);
       if (result.action !== 'ignored_stale') await store.write(data);
       return result;
     });
-    const status = out.action === 'created' ? 201 : 200;
-    res.status(status).json(out);
+    res.status(out.action === 'created' ? 201 : 200).json(out);
     logEvent(req, { ...meta, httpStatus: 200, response: out });
   } catch (e) {
     sendError(res, e);
@@ -559,22 +722,24 @@ async function handleOne(req, res, mode) {
   }
 }
 
-router.put('/crs/:ticketNumber', (req, res) => handleOne(req, res, 'full'));
-router.patch('/crs/:ticketNumber', (req, res) => handleOne(req, res, 'partial'));
+router.put('/crs/:crId', (req, res) => handleOne(req, res, 'full'));
+router.patch('/crs/:crId', (req, res) => handleOne(req, res, 'partial'));
 
-router.get('/crs/:ticketNumber', async (req, res) => {
+router.get('/crs/:crId', async (req, res) => {
   try {
     const data = await store.read();
-    const i = findCr(data, req.params.ticketNumber);
-    if (!i) return res.status(404).json({ error: `No CR with Ticket Number ${req.params.ticketNumber} in PM` });
+    const i = findCr(data, req.params.crId);
+    if (!i) return res.status(404).json({ error: `No CR with ERP CR ID ${req.params.crId} in PM` });
     const user = (id) => {
       const u = (data.users || []).find((x) => x.id === id);
       return u ? { name: u.name, email: u.email, active: u.active !== false } : null;
     };
     const apps = new Map((data.dwsApplications || []).map((a) => [a.id, a.systemName]));
-    const erpDoc = i.externalData?.documentId ? (data.documents || []).find((d) => d.id === i.externalData.documentId) : null;
+    const x = i.externalData || {};
+    const erpDoc = x.documentId ? (data.documents || []).find((d) => d.id === x.documentId) : null;
     res.json({
-      ticketNumber: (i.externalIds || [])[0] || req.params.ticketNumber,
+      crId: x.crId || (i.externalIds || [])[0] || req.params.crId,
+      ticketNumber: x.ticketNumber ?? null,
       initiativeId: i.id,
       pmTicket: i.ticket || null,
       pmUrl: pmUrl(i.id),
@@ -584,6 +749,7 @@ router.get('/crs/:ticketNumber', async (req, res) => {
       status: i.status,
       milestone: i.milestone,
       priority: i.priority,
+      erpProgress: i.erpProgress ?? null,
       planStartDate: i.planStartDate || null,
       planEndDate: i.planEndDate || null,
       actualStartDate: i.startDate || null,
@@ -594,13 +760,17 @@ router.get('/crs/:ticketNumber', async (req, res) => {
       itPm: user(i.itPmId),
       systemImpacted: (i.systemImpactedIds || []).map((id) => apps.get(id)).filter(Boolean),
       department: (data.departments || []).find((d) => d.id === i.departmentId)?.name || null,
-      erp: i.externalData ? {
-        segment: i.externalData.segment || null, stage: i.externalData.stage || null, status: i.externalData.status || null,
+      erp: {
+        segment: x.segment || null, stage: x.stage || null, stageType: x.stageType || null, status: x.status || null,
         moduleId: i.erpModuleId || null, tCode: i.tCode || null, functionalDepartment: i.functionalDepartment || null,
-        crReference: i.crReference || null, ownershipCode: i.ownershipCode || null, impactAreaCode: i.impactAreaCode || null,
-      } : null,
+        crReference: i.crReference || null, ownershipCode: i.ownershipCode || null,
+        impactAreaCodes: String(i.impactAreaCode || '').split(',').filter(Boolean),
+        segments: x.erpProgress?.segments || null,
+      },
+      tasks: (data.tasks || []).filter((t) => t.initiativeId === i.id)
+        .map((t) => ({ milestone: t.milestone, status: t.status, startDate: t.startDate || null, endDate: t.endDate || null })),
       document: erpDoc ? { fileName: erpDoc.fileName, sizeBytes: erpDoc.sizeBytes, uploadedAt: erpDoc.uploadedAt } : null,
-      warnings: i.externalData?.lastWarnings || [],
+      warnings: x.lastWarnings || [],
     });
   } catch (e) {
     sendError(res, e);
@@ -622,11 +792,11 @@ router.put('/crs', async (req, res) => {
         if (eventId && earlier.has(eventId)) { out.push({ index, httpStatus: 200, ...earlier.get(eventId), duplicateEvent: true }); continue; }
         try {
           const r = applyCr(data, it, 'full', null);
-          if (r.action !== 'ignored_stale' && r.action !== 'unchanged') dirty = true;
+          if (r.action !== 'ignored_stale') dirty = true;
           out.push({ index, httpStatus: r.action === 'created' ? 201 : 200, ...r });
         } catch (e) {
           if (!(e instanceof InputError)) throw e;
-          out.push({ index, httpStatus: e.status, ticketNumber: it?.cr?.ticketNumber || null, error: e.message });
+          out.push({ index, httpStatus: e.status, crId: it?.cr?.crId ?? null, ticketNumber: it?.cr?.ticketNumber ?? null, error: e.message });
         }
       }
       if (dirty) await store.write(data);
@@ -637,7 +807,7 @@ router.put('/crs', async (req, res) => {
       if (r.duplicateEvent) continue;
       const it = items[i] || {};
       logEvent(req, {
-        eventId: it.eventId ? String(it.eventId) : null, ticketNumber: r.ticketNumber, eventType: it.eventType || 'batch',
+        eventId: it.eventId ? String(it.eventId) : null, crId: r.crId, ticketNumber: r.ticketNumber, eventType: it.eventType || 'batch',
         httpStatus: r.error ? r.httpStatus : 200, response: r.error ? undefined : r, error: r.error, payload: it,
       });
     }
@@ -657,19 +827,19 @@ const upload = multer({
   limits: { fileSize: 30 * 1024 * 1024, files: 1 },
 });
 
-router.put('/crs/:ticketNumber/document', (req, res) => {
+router.put('/crs/:crId/document', (req, res) => {
   upload.single('file')(req, res, async (err) => {
     if (err) {
       const tooBig = err.code === 'LIMIT_FILE_SIZE';
       return res.status(tooBig ? 413 : 400).json({ error: tooBig ? 'File is larger than 30 MB' : err.message });
     }
     if (!req.file) return res.status(400).json({ error: 'Send the file as multipart/form-data field "file"' });
-    const ticket = req.params.ticketNumber;
+    const crId = req.params.crId;
     try {
       const out = await withErpLock(async () => {
         const data = await store.read();
-        const i = findCr(data, ticket);
-        if (!i) throw new InputError(`No CR with Ticket Number ${ticket} in PM (create it with PUT first)`, 404);
+        const i = findCr(data, crId);
+        if (!i) throw new InputError(`No CR with ERP CR ID ${crId} in PM (create it with PUT first)`, 404);
         if (!data.documents) data.documents = [];
         const now = new Date().toISOString();
         // ERP holds one document per CR: the new file replaces the one ERP sent before.
@@ -687,14 +857,14 @@ router.put('/crs/:ticketNumber/document', (req, res) => {
           const p = await resolveDocumentPath(old.filePath);
           if (p) await fs.unlink(p).catch(() => {});
         }
-        return { action: old ? 'replaced' : 'added', ticketNumber: ticket, initiativeId: i.id, documentId: doc.id, fileName: doc.fileName, sizeBytes: doc.sizeBytes };
+        return { action: old ? 'replaced' : 'added', crId, initiativeId: i.id, documentId: doc.id, fileName: doc.fileName, sizeBytes: doc.sizeBytes };
       });
       res.json(out);
-      logEvent(req, { ticketNumber: ticket, eventType: 'document', httpStatus: 200, response: out, payload: { fileName: req.file.originalname, sizeBytes: req.file.size } });
+      logEvent(req, { crId, eventType: 'document', httpStatus: 200, response: out, payload: { fileName: req.file.originalname, sizeBytes: req.file.size } });
     } catch (e) {
       await fs.unlink(req.file.path).catch(() => {});
       sendError(res, e);
-      logEvent(req, { ticketNumber: ticket, eventType: 'document', httpStatus: e instanceof InputError ? e.status : 500, error: e.message });
+      logEvent(req, { crId, eventType: 'document', httpStatus: e instanceof InputError ? e.status : 500, error: e.message });
     }
   });
 });

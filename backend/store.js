@@ -142,7 +142,8 @@ async function runSchemaSetup() {
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "externalSyncedAt" TEXT;
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "externalData" TEXT;
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "ownershipCode" TEXT;        -- "erpOptions" kind=ownership
-      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "impactAreaCode" TEXT;       -- "erpOptions" kind=impactArea
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "impactAreaCode" TEXT;       -- "erpOptions" kind=impactArea (comma-separated: ERP may send several)
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "erpProgress" DOUBLE PRECISION; -- ERP CR progress 0-100 (sum of completed segment weights)
       CREATE TABLE IF NOT EXISTS "changeRequests" (
         "initiativeId" TEXT PRIMARY KEY,
         "crSubmissionStart" TEXT,
@@ -789,6 +790,7 @@ async function readFromDb() {
         externalData: parseJson(row.externalData ?? row.externaldata),
         ownershipCode: row.ownershipCode || row.ownershipcode || null,
         impactAreaCode: row.impactAreaCode || row.impactareacode || null,
+        erpProgress: (row.erpProgress ?? row.erpprogress) == null ? null : Number(row.erpProgress ?? row.erpprogress),
         createdAt: row.createdAt || row.createdat || null,
         updatedAt: row.updatedAt || row.updatedat || null
       }));
@@ -1007,7 +1009,7 @@ const TABLE_SPECS = [
   },
   {
     table: 'initiatives',
-    cols: ['id', 'type', 'name', 'ticket', 'description', 'businessImpact', 'priority', 'businessOwnerId', 'businessUserIds', 'departmentId', 'itPicId', 'itPicIds', 'itPmId', 'itManagerIds', 'systemImpactedIds', 'status', 'milestone', 'crMilestonePhase', 'startDate', 'endDate', 'planStartDate', 'planEndDate', 'remark', 'documentationLink', 'externalIds', 'erpModuleId', 'tCode', 'functionalDepartment', 'crReference', 'externalSource', 'externalSyncedAt', 'externalData', 'ownershipCode', 'impactAreaCode', 'createdAt', 'updatedAt'],
+    cols: ['id', 'type', 'name', 'ticket', 'description', 'businessImpact', 'priority', 'businessOwnerId', 'businessUserIds', 'departmentId', 'itPicId', 'itPicIds', 'itPmId', 'itManagerIds', 'systemImpactedIds', 'status', 'milestone', 'crMilestonePhase', 'startDate', 'endDate', 'planStartDate', 'planEndDate', 'remark', 'documentationLink', 'externalIds', 'erpModuleId', 'tCode', 'functionalDepartment', 'crReference', 'externalSource', 'externalSyncedAt', 'externalData', 'ownershipCode', 'impactAreaCode', 'erpProgress', 'createdAt', 'updatedAt'],
     row: (i) => [
       i.id, i.type, i.name, i.ticket || null, i.description || null, i.businessImpact || null, i.priority || null,
       i.businessOwnerId || null, arr(i.businessUserIds), i.departmentId || null,
@@ -1018,6 +1020,7 @@ const TABLE_SPECS = [
       arr(i.externalIds), i.erpModuleId || null, i.tCode || null, i.functionalDepartment || null, i.crReference || null,
       i.externalSource || null, i.externalSyncedAt || null, i.externalData ? JSON.stringify(i.externalData) : null,
       i.ownershipCode || null, i.impactAreaCode || null,
+      i.erpProgress == null || i.erpProgress === '' ? null : Number(i.erpProgress),
       i.createdAt || null, i.updatedAt || null,
     ],
   },

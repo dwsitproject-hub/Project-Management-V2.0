@@ -591,9 +591,9 @@ const __listSoftRefreshSeq = { list: 0, crlist: 0 };
 
 // ===== List pages (Projects / CRs): pipeline, quick views, live summary =====
 const CR_PHASES = [
-  ['Initiation', ['User Initiate', 'CR Created', 'CR Signed sec 2', 'CR Signed Sec 3']],
+  ['Initiation', ['User Initiate', 'CR Created', 'CR - Section 1', 'CR Signed sec 2', 'CR Signed Sec 3']],
   ['Design', ['FSD']],
-  ['Build', ['Development', 'Changes', 'Signed Changes', 'Development - Extended']],
+  ['Build', ['Development', 'Configuration', 'Changes', 'Signed Changes', 'Development - Extended']],
   ['Test', ['SIT', 'UAT']],
   ['Live', ['Live (Warranty Period)', 'Fully Live']],
 ];
@@ -2459,10 +2459,12 @@ function computeTaskAgingDays(startDateStr, endDateStr) {
 const CR_MILESTONE_UI_OPTIONS = [
   'User Initiate',
   'CR Created',
+  'CR - Section 1',
   'CR Signed sec 2',
   'CR Signed Sec 3',
   'FSD',
   'Development',
+  'Configuration',
   'Changes',
   'Signed Changes',
   'Development - Extended',
@@ -2515,7 +2517,8 @@ function formatActivityFieldLabelGlobal(field) {
     planStartDate: 'Plan Start Date',
     planEndDate: 'Plan End Date',
     documentationLink: 'Project Doc Link',
-    externalIds: 'External IDs',
+    externalIds: 'ERP CR ID',
+    erpProgress: 'ERP Progress',
     erpModuleId: 'ERP Module',
     tCode: 'T-Code',
     functionalDepartment: 'Functional Department',
@@ -2726,7 +2729,7 @@ function initiativeRow(i, crData = null, colVisibility = null) {
     <td class="col-name" style="display: ${colVisibility['col-name'] !== false ? 'table-cell' : 'none'}"><strong><a href="#view/${i.id}">${i.name}</a></strong></td>
     <td class="col-priority" style="display: ${colVisibility['col-priority'] !== false ? 'table-cell' : 'none'}"><span class="priority-badge priority-${priorityClass}">${i.priority}</span></td>
     <td class="col-status" style="display: ${colVisibility['col-status'] !== false ? 'table-cell' : 'none'}"><span class="status-badge status-${statusClass}">${i.status}</span></td>
-    <td class="col-milestone" style="display: ${colVisibility['col-milestone'] !== false ? 'table-cell' : 'none'}"><span class="ms-cell"><span>${escapeHtml(normalizeCrMilestoneForDisplay(i))}</span>${milestoneRailHtml(normalizeCrMilestoneForDisplay(i), i.type === 'CR' ? CR_MILESTONE_UI_OPTIONS : PROJECT_MILESTONES, i.status)}</span></td>
+    <td class="col-milestone" style="display: ${colVisibility['col-milestone'] !== false ? 'table-cell' : 'none'}"><span class="ms-cell"><span>${escapeHtml(normalizeCrMilestoneForDisplay(i))}${erpProgressBadge(i)}</span>${milestoneRailHtml(normalizeCrMilestoneForDisplay(i), i.type === 'CR' ? CR_MILESTONE_UI_OPTIONS : PROJECT_MILESTONES, i.status)}</span></td>
     <td class="col-department" style="display: ${colVisibility['col-department'] !== false ? 'table-cell' : 'none'}">${dep}</td>
     <td class="col-system-impacted" style="display: ${colVisibility['col-system-impacted'] !== false ? 'table-cell' : 'none'}" title="${escapeHtml(dwsSystemNamesFromInitiative(i))}">${escapeHtml(dwsSystemNamesFromInitiative(i))}</td>
     <td class="col-owner" style="display: ${colVisibility['col-owner'] !== false ? 'table-cell' : 'none'}">${bo}</td>
@@ -3486,7 +3489,8 @@ async function renderList() {
       planStartDate: 'Plan Start Date',
       planEndDate: 'Plan End Date',
       documentationLink: 'Project Doc Link',
-      externalIds: 'External IDs',
+      externalIds: 'ERP CR ID',
+    erpProgress: 'ERP Progress',
       erpModuleId: 'ERP Module',
       tCode: 'T-Code',
       functionalDepartment: 'Functional Department',
@@ -4103,6 +4107,62 @@ function erpCrFieldsFromForm(obj) {
   return { erpModuleId: t(obj.erpModuleId), tCode: t(obj.tCode), functionalDepartment: t(obj.functionalDepartment), crReference: t(obj.crReference) };
 }
 
+/** Small "ERP 40%" badge for CRs synced from ERP that report a progress (CR list). */
+function erpProgressBadge(i) {
+  if (!i || i.erpProgress == null || i.erpProgress === '') return '';
+  const p = Math.round(Number(i.erpProgress));
+  return Number.isFinite(p) ? ` <span class="erp-badge" title="Progress reported by ERP">ERP ${p}%</span>` : '';
+}
+
+/**
+ * Read-only "ERP progress" panel on a CR synced from ERP: segments (weight, %), their stages
+ * (status, dates, %, repeats) and developer teams. ERP owns this data; PM only shows it.
+ */
+function erpProgressPanel(i) {
+  if (!i || i.externalSource !== 'ERP') return '';
+  const x = i.externalData || {};
+  const snap = x.erpProgress || null;
+  const segs = (snap && Array.isArray(snap.segments)) ? snap.segments : [];
+  const pct = (v) => (v == null || v === '' || !Number.isFinite(Number(v)) ? null : Math.max(0, Math.min(100, Math.round(Number(v)))));
+  const total = pct(i.erpProgress != null ? i.erpProgress : snap && snap.progress);
+  const statusLabel = { completed: 'Done', active: 'In progress', inactive: 'Not started' };
+  const cls = (v) => (['completed', 'active', 'inactive'].includes(v) ? v : 'inactive');
+  const link = x.url && /^https?:\/\//i.test(x.url) ? `<a href="${escapeHtml(x.url)}" target="_blank" rel="noopener">View in ERP ↗</a>` : '';
+  const head = `
+    <div class="erp-panel-head">
+      <strong>ERP progress</strong>
+      ${total != null ? `<span class="erp-total">${total}%</span>` : ''}
+      <span class="muted">${x.segment ? escapeHtml(`${x.segment} / ${x.stage || ''}`) : ''}</span>
+      <span class="erp-panel-link">${link}</span>
+    </div>`;
+  if (!segs.length) {
+    return `<div class="erp-panel" style="grid-column: 1 / -1">${head}<p class="muted">ERP hasn't sent its stage details for this CR yet.</p></div>`;
+  }
+  const body = segs.map((sg) => {
+    const sp = pct(sg.status === 'completed' ? 100 : sg.progress) || 0;
+    const stages = (sg.stages || []).map((st) => {
+      const stp = pct(st.status === 'completed' ? 100 : st.progress);
+      const dates = [st.startDate, st.endDate].filter(Boolean).map((d) => String(d).slice(0, 10)).join(' → ');
+      const teams = (st.subStages || []).map((t) => `${escapeHtml(t.name)} ${pct(t.progress) ?? 0}%`).join(' · ');
+      return `<li class="erp-stage erp-${cls(st.status)}">
+        <span class="erp-stage-name">${escapeHtml(st.name)}${st.iteration > 1 ? ` <span class="muted">×${escapeHtml(String(st.iteration))}</span>` : ''}</span>
+        <span class="muted">${escapeHtml(statusLabel[st.status] || st.status || '')}${stp != null && st.status === 'active' ? ` · ${stp}%` : ''}${dates ? ` · ${escapeHtml(dates)}` : ''}</span>
+        ${teams ? `<span class="erp-teams">${teams}</span>` : ''}
+      </li>`;
+    }).join('');
+    return `<div class="erp-seg erp-${cls(sg.status)}">
+      <div class="erp-seg-row">
+        <span class="erp-seg-name">${escapeHtml(sg.name)}${sg.weight != null ? ` <span class="muted">· weight ${escapeHtml(String(sg.weight))}</span>` : ''}</span>
+        <span class="erp-seg-pct">${sp}%</span>
+      </div>
+      <div class="erp-bar"><span style="width: ${sp}%"></span></div>
+      ${stages ? `<ul class="erp-stages">${stages}</ul>` : ''}
+    </div>`;
+  }).join('');
+  return `<div class="erp-panel" style="grid-column: 1 / -1">${head}<div class="erp-segs">${body}</div>
+    <p class="muted erp-note">From ERP${snap.asOf ? `, as of ${escapeHtml(String(snap.asOf).slice(0, 16).replace('T', ' '))} UTC` : ''}. Read-only: ERP updates it.</p></div>`;
+}
+
 // Helper function to create searchable single-select dropdown
 function createSearchableSelect(name, options, selectedValue = '', placeholder = 'Select...', allowNone = false) {
   const selectedOption = options.find(opt => opt.id === selectedValue);
@@ -4369,7 +4429,6 @@ function commonFields(initiative = null, defaultType = 'Project', nameLabel = 'I
     formRow('Plan End Date', `<input type="date" name="planEndDate" value="${initiative?.planEndDate?.slice(0,10) || ''}" />`),
     formRow('Remark', `<textarea name="remark" class="long-text">${initiative ? (initiative.remark || '').replace(/</g, '&lt;').replace(/>/g, '&gt;') : ''}</textarea>`),
     formRow('Project Doc Link', `<input name="documentationLink" type="url" value="${initiative?.documentationLink || ''}" />`),
-    formRow('External IDs', externalIdsInput(initiative?.externalIds, 'e.g. #ERPO138381', 'ERP Ticket Number(s) of the matching ERP record, separated by commas. Each ID can belong to one initiative only.')),
     formRow('Documents', `<input type="file" name="documents" id="documents" multiple accept=".pdf,.doc,.docx,.xls,.xlsx,.txt,.png,.jpg,.jpeg,.zip,.rar" />
       <div id="filePreview" style="margin-top: 10px;"></div>
       <small style="color: #666;">You can select multiple files. Files larger than 300KB will be automatically compressed (images) or may require manual compression (PDF, Word, Excel).</small>`)
@@ -4657,7 +4716,6 @@ async function renderNew(defaultType = 'Project') {
       planEndDate: obj.planEndDate || null,
       remark: obj.remark || null,
       documentationLink: obj.documentationLink || null,
-      externalIds: externalIdList(obj.externalIds),
       ...(obj.type === 'CR' ? erpCrFieldsFromForm(obj) : {})
     };
     // CR dates removed - no longer used
@@ -4885,7 +4943,8 @@ async function renderView(id) {
       planStartDate: 'Plan Start Date',
       planEndDate: 'Plan End Date',
       documentationLink: 'Project Doc Link',
-      externalIds: 'External IDs',
+      externalIds: 'ERP CR ID',
+    erpProgress: 'ERP Progress',
       erpModuleId: 'ERP Module',
       tCode: 'T-Code',
       functionalDepartment: 'Functional Department',
@@ -5022,12 +5081,13 @@ async function renderView(id) {
           <div><div class="muted">Cycle Time (Age Start to End)</div><div><strong>${cycleTime !== null ? cycleTime + ' days' : 'N/A'}</strong></div></div>
           <div><div class="muted">Total Age</div><div><strong>${totalAge !== null ? totalAge + ' days' : 'N/A'}</strong></div></div>
           ${i.type === 'CR' ? `<div><div class="muted">System Impacted</div><div>${escapeHtml(dwsSystemNamesFromInitiative(i) || '')}</div></div>` : ''}
-          <div><div class="muted">External IDs</div><div class="ext-ids">${externalIdChips(i.externalIds, '<span class="muted">—</span>')}</div></div>
+          ${i.externalSource === 'ERP' ? `<div><div class="muted">ERP CR ID</div><div class="mono">${escapeHtml((i.externalData && i.externalData.crId) || (i.externalIds || [])[0] || '')}</div></div>` : ''}
           ${i.type === 'CR' ? `
           <div><div class="muted">ERP Module</div><div>${escapeHtml(erpModuleLabel(i.erpModuleId)) || '<span class="muted">—</span>'}</div></div>
           <div><div class="muted">T-Code</div><div>${escapeHtml(i.tCode || '') || '<span class="muted">—</span>'}</div></div>
           <div><div class="muted">Functional Department</div><div>${escapeHtml(i.functionalDepartment || '') || '<span class="muted">—</span>'}</div></div>
           <div><div class="muted">CR Reference</div><div>${escapeHtml(i.crReference || '') || '<span class="muted">—</span>'}</div></div>` : ''}
+          ${erpProgressPanel(i)}
           <div style="grid-column: 1 / -1"><div class="muted">Description</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.description || '')}</div></div>
           <div style="grid-column: 1 / -1"><div class="muted">Business Impact</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.businessImpact || '')}</div></div>
           <div style="grid-column: 1 / -1"><div class="muted">Remark</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.remark || '')}</div></div>
@@ -5502,7 +5562,6 @@ async function renderView(id) {
         ${formRow('Business Impact', `<textarea name="businessImpact" class="long-text" required style="min-height: 100px;">${(i.businessImpact || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea>`)}
         ${formRow('Remark', `<textarea name="remark" class="long-text" style="min-height: 80px;">${(i.remark || '').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</textarea>`)}
         ${formRow('Project Doc Link', `<input name="documentationLink" type="url" value="${i.documentationLink || ''}" />`)}
-        ${formRow('External IDs', externalIdsInput(i.externalIds, 'e.g. #ERPO138381', 'ERP Ticket Number(s) of the matching ERP record, separated by commas. Each ID can belong to one initiative only.'))}
         
         <!-- Project Team Section -->
         <div style="margin-top: 24px; padding: 20px; background: var(--gray-50); border-radius: 8px;">
@@ -5564,7 +5623,6 @@ async function renderView(id) {
       planEndDate: obj.planEndDate || null,
       remark: obj.remark || null,
         documentationLink: obj.documentationLink || null,
-        externalIds: externalIdList(obj.externalIds),
         ...(i.type === 'CR' ? erpCrFieldsFromForm(obj) : {}),
         changedBy: currentUser?.id || 'Unknown'
       };
@@ -7023,7 +7081,6 @@ async function renderEdit(id) {
       planEndDate: obj.planEndDate || null,
       remark: obj.remark || null,
       documentationLink: obj.documentationLink || null,
-      externalIds: externalIdList(obj.externalIds),
       ...(i.type === 'CR' ? erpCrFieldsFromForm(obj) : {}),
       changedBy: currentUser?.id || 'Unknown'
     };
