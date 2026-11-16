@@ -29,7 +29,8 @@ server {
     }
 
     # Allow larger file uploads (15MB to account for files before compression)
-    client_max_body_size 15M;
+    # Uploads: ERP CR documents can be up to 30 MB (ERP CR sync API); PM screens allow 10 MB.
+    client_max_body_size 31M;
 
     # Proxy API requests to backend
     # TESTING: Update this to your testing/staging backend URL
