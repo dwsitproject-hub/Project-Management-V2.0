@@ -11261,7 +11261,7 @@ async function renderAdminRoles() {
 // ---------------------------------------------------------------------------
 
 /** Small form dialog with one text field. Resolves with the trimmed value, or null. */
-function textInputDialog({ title, label, value = '', confirmText = 'Save', hint = '' }) {
+function textInputDialog({ title, label, value = '', confirmText = 'Save', hint = '', allowEmpty = false, maxLength = 100 }) {
   return new Promise((resolve) => {
     const modal = document.createElement('div');
     modal.className = 'modal confirm-dialog';
@@ -11269,7 +11269,7 @@ function textInputDialog({ title, label, value = '', confirmText = 'Save', hint 
       <div class="modal-content" role="dialog" aria-modal="true" aria-labelledby="tid-title">
         <h3 class="confirm-title" id="tid-title">${escapeHtml(title)}</h3>
         <label class="dm-field"><span>${escapeHtml(label)}</span>
-          <input type="text" maxlength="100" value="${escapeHtml(value)}" autocomplete="off"></label>
+          <input type="text" maxlength="${Number(maxLength) || 100}" value="${escapeHtml(value)}" autocomplete="off"></label>
         ${hint ? `<p class="confirm-message" style="margin-top:8px;">${escapeHtml(hint)}</p>` : ''}
         <div class="modal-actions">
           <button type="button" class="btn-secondary" data-action="cancel">Cancel</button>
@@ -11278,7 +11278,7 @@ function textInputDialog({ title, label, value = '', confirmText = 'Save', hint 
       </div>`;
     const input = modal.querySelector('input');
     const finish = (v) => { document.removeEventListener('keydown', onKey); modal.remove(); resolve(v); };
-    const submit = () => { const v = input.value.trim().replace(/\s+/g, ' '); if (v) finish(v); else input.focus(); };
+    const submit = () => { const v = input.value.trim().replace(/\s+/g, ' '); if (v || allowEmpty) finish(v); else input.focus(); };
     const onKey = (e) => {
       if (e.key === 'Escape') finish(null);
       if (e.key === 'Enter') submit();
@@ -11327,7 +11327,7 @@ async function renderDepartmentMaster() {
           <span class="muted" id="dm-count" style="margin-left:auto;">${rows.length} departments</span>
         </div>
         <table class="dm-table">
-          <thead><tr><th>Department</th><th class="num-col">Projects</th><th class="num-col">CRs</th><th class="num-col">Users</th><th class="dm-actions"><span class="sr-only">Actions</span></th></tr></thead>
+          <thead><tr><th>Department</th><th title="ERP requester-department codes that map to this department (ERP CR sync)">ERP codes</th><th class="num-col">Projects</th><th class="num-col">CRs</th><th class="num-col">Users</th><th class="dm-actions"><span class="sr-only">Actions</span></th></tr></thead>
           <tbody>
             ${rows.map((r) => {
               const used = r.projects + r.crs + r.users;
@@ -11339,15 +11339,17 @@ async function renderDepartmentMaster() {
                     ${r.shownAs !== r.name ? `<span class="muted" title="Stored name; PM shows it as “${escapeHtml(r.shownAs)}”">Stored as “${escapeHtml(r.name)}”</span>` : ''}
                   </span>
                 </th>
+                <td><div class="ext-ids">${externalIdChips(r.externalIds, '<span class="muted">—</span>')}</div></td>
                 <td class="num-col">${num(r.projects)}</td>
                 <td class="num-col">${num(r.crs)}</td>
                 <td class="num-col">${num(r.users)}</td>
                 <td class="dm-actions">
                   <button type="button" class="dm-edit btn-sm" data-id="${escapeHtml(r.id)}">Rename</button>
+                  <button type="button" class="dm-codes btn-sm" data-id="${escapeHtml(r.id)}">ERP codes</button>
                   <button type="button" class="dm-delete icon-btn icon-btn-sm danger-text" data-id="${escapeHtml(r.id)}" aria-label="Delete ${escapeHtml(r.shownAs)}" title="Delete"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
                 </td>
               </tr>`;
-            }).join('') || '<tr><td colspan="5" class="muted">No departments yet.</td></tr>'}
+            }).join('') || '<tr><td colspan="6" class="muted">No departments yet.</td></tr>'}
           </tbody>
         </table>
         <p class="panel-empty" id="dm-empty" hidden>No departments match your search.</p>
@@ -11393,6 +11395,30 @@ async function renderDepartmentMaster() {
           await fetchJSON(`/api/departments/${encodeURIComponent(r.id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
           notify(`Department renamed: ${r.name} → ${name}`, 'success');
           await load(); await refreshLookups(); draw();
+        } catch (e) {
+          if (!(e instanceof AuthRedirectError)) notify(e.message, 'error');
+        }
+      };
+    });
+
+    app.querySelectorAll('.dm-codes').forEach((btn) => {
+      btn.onclick = async () => {
+        const r = rows.find((x) => x.id === btn.dataset.id);
+        const current = externalIdList(r.externalIds).join(', ');
+        const value = await textInputDialog({
+          title: `ERP codes — ${r.shownAs}`,
+          label: 'ERP requester-department codes',
+          value: current,
+          hint: 'Codes ERP sends for this department (e.g. AP1), separated by commas. A code can belong to one department only. Leave empty to remove all.',
+          confirmText: 'Save',
+          allowEmpty: true,
+          maxLength: 1000,
+        });
+        if (value == null || value.trim() === current) return;
+        try {
+          await fetchJSON(`/api/departments/${encodeURIComponent(r.id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ externalIds: value }) });
+          notify(`ERP codes saved for ${r.shownAs}`, 'success');
+          await load(); draw();
         } catch (e) {
           if (!(e instanceof AuthRedirectError)) notify(e.message, 'error');
         }

@@ -11,9 +11,26 @@ import express from 'express';
 import crypto from 'crypto';
 import store from '../store.js';
 import { normalizeDepartmentName } from '../departmentGroups.js';
+import { normalizeExternalIds, findExternalIdConflict } from '../externalIds.js';
 
 const router = express.Router();
 const MAX_NAME = 100;
+
+// body.externalIds = ERP requester-department codes (e.g. "AP1"). A code may belong to one
+// department only. Sends the error response and returns null when invalid.
+function readExternalIds(req, res, data, selfId) {
+  const result = normalizeExternalIds(req.body?.externalIds);
+  if (result.error) {
+    res.status(400).json({ error: result.error });
+    return null;
+  }
+  const clash = findExternalIdConflict(data.departments, result.ids, selfId);
+  if (clash) {
+    res.status(409).json({ error: `External ID "${clash.externalId}" is already used by department "${clash.row.name}"` });
+    return null;
+  }
+  return result.ids;
+}
 
 const cleanName = (v) => String(v ?? '').trim().replace(/\s+/g, ' ');
 const shownKey = (name) => normalizeDepartmentName(cleanName(name)).toLowerCase();
@@ -42,7 +59,7 @@ function nameProblem(data, name, exceptId) {
 router.get('/', async (_req, res) => {
   const data = await store.read();
   const rows = (data.departments || [])
-    .map((d) => ({ id: d.id, name: d.name, shownAs: normalizeDepartmentName(d.name), ...usage(data, d.id) }))
+    .map((d) => ({ id: d.id, name: d.name, shownAs: normalizeDepartmentName(d.name), externalIds: d.externalIds || [], ...usage(data, d.id) }))
     .sort((a, b) => a.shownAs.localeCompare(b.shownAs) || a.name.localeCompare(b.name));
   res.json(rows);
 });
@@ -53,7 +70,9 @@ router.post('/', async (req, res) => {
     const data = await store.read();
     const problem = nameProblem(data, name);
     if (problem) return res.status(400).json({ error: problem });
-    const dept = { id: crypto.randomUUID(), name };
+    const externalIds = readExternalIds(req, res, data, null);
+    if (!externalIds) return;
+    const dept = { id: crypto.randomUUID(), name, externalIds };
     if (!data.departments) data.departments = [];
     data.departments.push(dept);
     await store.write(data);
@@ -67,17 +86,23 @@ router.post('/', async (req, res) => {
 
 router.put('/:id', async (req, res) => {
   try {
-    const name = cleanName(req.body?.name);
     const data = await store.read();
     const dept = (data.departments || []).find((d) => d.id === req.params.id);
     if (!dept) return res.status(404).json({ error: 'Department not found' });
+    // Both fields are optional on update: leaving one out keeps the stored value.
+    const name = req.body && 'name' in req.body ? cleanName(req.body.name) : dept.name;
     const problem = nameProblem(data, name, dept.id);
     if (problem) return res.status(400).json({ error: problem });
+    if (req.body && 'externalIds' in req.body) {
+      const externalIds = readExternalIds(req, res, data, dept.id);
+      if (!externalIds) return;
+      dept.externalIds = externalIds;
+    }
     const old = dept.name;
     dept.name = name;
     await store.write(data);
-    console.log(`[DEPARTMENTS] renamed "${old}" -> "${name}" by ${req.user.email || req.user.id}`);
-    res.json({ id: dept.id, name: dept.name, shownAs: normalizeDepartmentName(dept.name) });
+    console.log(`[DEPARTMENTS] saved "${old}" -> "${name}" by ${req.user.email || req.user.id}`);
+    res.json({ id: dept.id, name: dept.name, shownAs: normalizeDepartmentName(dept.name), externalIds: dept.externalIds || [] });
   } catch (e) {
     console.error('[departments PUT]', e);
     res.status(500).json({ error: 'Failed to rename department' });

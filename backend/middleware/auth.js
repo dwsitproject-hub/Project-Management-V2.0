@@ -31,6 +31,11 @@ export async function authenticateToken(req, res, next) {
       if (!apiClient || apiClient.active === false) {
         return res.status(401).json({ error: 'API client not found or inactive' });
       }
+      // Integration clients may only use the public integration API, never the routes
+      // behind the PM screens (which check no scopes and would let them edit anything).
+      if (!String(req.originalUrl || '').startsWith('/api/v1/')) {
+        return res.status(403).json({ error: 'API clients may only call /api/v1 endpoints' });
+      }
 
       req.user = {
         type: 'client',
