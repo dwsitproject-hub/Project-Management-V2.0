@@ -7,6 +7,12 @@ const databaseUrl =
   'postgres://postgres:postgres123@localhost:5544/project_management_v2';
 
 const pool = new Pool({ connectionString: databaseUrl });
+
+/** Comma-separated TEXT column -> trimmed, non-empty array ([] when NULL). */
+function splitIds(raw) {
+  if (raw == null || raw === '') return [];
+  return String(raw).split(',').map((v) => v.trim()).filter(Boolean);
+}
 let schemaReady = null; // promise of the one-time schema set-up in this process
 
 // Lock id for the schema set-up, so two nodes starting together don't run the DDL at
@@ -114,6 +120,14 @@ async function runSchemaSetup() {
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "documentationLink" TEXT;
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "createdAt" TEXT;
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "updatedAt" TEXT;
+      -- Identifiers of the matching record(s) in an external system (e.g. ERP CR Ticket
+      -- Number), comma-separated like the other *Ids columns.
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "externalIds" TEXT;
+      -- CR fields from the ERP CR system (ERP change_requests columns of the same meaning).
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "erpModuleId" TEXT;          -- ERP module_id -> "erpModules"."id"
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "tCode" TEXT;                -- ERP t_code (free text)
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "functionalDepartment" TEXT; -- ERP functional_department (department name)
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "crReference" TEXT;          -- ERP cr_reference (ticket number); has_reference = filled in
       CREATE TABLE IF NOT EXISTS "changeRequests" (
         "initiativeId" TEXT PRIMARY KEY,
         "crSubmissionStart" TEXT,
@@ -344,6 +358,9 @@ async function runSchemaSetup() {
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "deploymentSteps" TEXT;
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "createdAt" TEXT;
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "updatedAt" TEXT;
+      -- External system codes that map to this application (e.g. ERP SAP module codes
+      -- "FI,CO" for SAP FICO), comma-separated.
+      ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "externalIds" TEXT;
 
       CREATE TABLE IF NOT EXISTS "managementDashboard" (
         "id" TEXT PRIMARY KEY,
@@ -472,6 +489,27 @@ async function runSchemaSetup() {
       ALTER TABLE "meetingNoteHistory" ADD COLUMN IF NOT EXISTS "newValue" TEXT;
       ALTER TABLE "meetingNoteHistory" ADD COLUMN IF NOT EXISTS "changedBy" TEXT;
       ALTER TABLE "meetingNoteHistory" ADD COLUMN IF NOT EXISTS "changedAt" TEXT;
+
+      -- ERP CR system's module master (ERP "modules"), kept as a reference copy. "id" is
+      -- ERP's modules.id: the value ERP sends on a CR and the External ID that
+      -- dwsApplications.externalIds holds to map a module to a System Impacted.
+      -- Deliberately no foreign keys (ERP cascades deletes to its CRs; PM must not), and
+      -- "erpDepartmentId" is ERP's departments.id, kept for reference only.
+      CREATE TABLE IF NOT EXISTS "erpModules" (
+        "id" TEXT PRIMARY KEY,
+        "name" TEXT NOT NULL,
+        "description" TEXT,
+        "erpDepartmentId" TEXT,
+        "isActive" BOOLEAN DEFAULT TRUE,
+        "createdAt" TEXT,
+        "updatedAt" TEXT
+      );
+      ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "name" TEXT;
+      ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "description" TEXT;
+      ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "erpDepartmentId" TEXT;
+      ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "isActive" BOOLEAN DEFAULT TRUE;
+      ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "createdAt" TEXT;
+      ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "updatedAt" TEXT;
 
       -- Bumped by every write() that changes something. Each node compares it with the
       -- version its cache was loaded at, so a save on one node is seen on all of them.
@@ -657,6 +695,7 @@ async function readFromDb() {
     'meetingNoteActionItems',
     'meetingNoteEmailLog',
     'meetingNoteHistory',
+    'erpModules',
   ];
   // Query all tables at once (each on its own pooled connection): against a remote DB
   // the ~23 sequential round-trips were most of a cold read.
@@ -714,6 +753,11 @@ async function readFromDb() {
         planEndDate: row.planEndDate || row.planenddate || null,
         remark: row.remark || null,
         documentationLink: row.documentationLink || row.documentationlink || null,
+        externalIds: splitIds(row.externalIds ?? row.externalids),
+        erpModuleId: row.erpModuleId || row.erpmoduleid || null,
+        tCode: row.tCode || row.tcode || null,
+        functionalDepartment: row.functionalDepartment || row.functionaldepartment || null,
+        crReference: row.crReference || row.crreference || null,
         createdAt: row.createdAt || row.createdat || null,
         updatedAt: row.updatedAt || row.updatedat || null
       }));
@@ -757,6 +801,7 @@ async function readFromDb() {
         stagingUrl: row.stagingUrl || row.stagingurl || null,
         githubUrl: row.githubUrl || row.githuburl || null,
         deploymentSteps: row.deploymentSteps || row.deploymentsteps || null,
+        externalIds: splitIds(row.externalIds ?? row.externalids),
         createdAt: row.createdAt || row.createdat,
         updatedAt: row.updatedAt || row.updatedat,
       }));
@@ -826,6 +871,16 @@ async function readFromDb() {
         deliveryStatus: row.deliveryStatus || row.deliverystatus || null,
         providerMessageId: row.providerMessageId || row.providermessageid || null,
         errorMessage: row.errorMessage || row.errormessage || null,
+      }));
+    } else if (table === 'erpModules') {
+      data[table] = res.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        description: row.description || null,
+        erpDepartmentId: row.erpDepartmentId || row.erpdepartmentid || null,
+        isActive: row.isActive ?? row.isactive ?? true,
+        createdAt: row.createdAt || row.createdat || null,
+        updatedAt: row.updatedAt || row.updatedat || null,
       }));
     } else if (table === 'meetingNoteHistory') {
       data[table] = res.rows.map(row => ({
@@ -910,7 +965,7 @@ const TABLE_SPECS = [
   },
   {
     table: 'initiatives',
-    cols: ['id', 'type', 'name', 'ticket', 'description', 'businessImpact', 'priority', 'businessOwnerId', 'businessUserIds', 'departmentId', 'itPicId', 'itPicIds', 'itPmId', 'itManagerIds', 'systemImpactedIds', 'status', 'milestone', 'crMilestonePhase', 'startDate', 'endDate', 'planStartDate', 'planEndDate', 'remark', 'documentationLink', 'createdAt', 'updatedAt'],
+    cols: ['id', 'type', 'name', 'ticket', 'description', 'businessImpact', 'priority', 'businessOwnerId', 'businessUserIds', 'departmentId', 'itPicId', 'itPicIds', 'itPmId', 'itManagerIds', 'systemImpactedIds', 'status', 'milestone', 'crMilestonePhase', 'startDate', 'endDate', 'planStartDate', 'planEndDate', 'remark', 'documentationLink', 'externalIds', 'erpModuleId', 'tCode', 'functionalDepartment', 'crReference', 'createdAt', 'updatedAt'],
     row: (i) => [
       i.id, i.type, i.name, i.ticket || null, i.description || null, i.businessImpact || null, i.priority || null,
       i.businessOwnerId || null, arr(i.businessUserIds), i.departmentId || null,
@@ -918,6 +973,7 @@ const TABLE_SPECS = [
       arr(i.itPicIds), i.itPmId || null, arr(i.itManagerIds), arr(i.systemImpactedIds),
       i.status || null, i.milestone || null, i.crMilestonePhase || null, i.startDate || null, i.endDate || null,
       i.planStartDate || null, i.planEndDate || null, i.remark || null, i.documentationLink || null,
+      arr(i.externalIds), i.erpModuleId || null, i.tCode || null, i.functionalDepartment || null, i.crReference || null,
       i.createdAt || null, i.updatedAt || null,
     ],
   },
@@ -964,8 +1020,8 @@ const TABLE_SPECS = [
   },
   {
     table: 'dwsApplications',
-    cols: ['id', 'systemName', 'productionUrl', 'stagingUrl', 'githubUrl', 'deploymentSteps', 'createdAt', 'updatedAt'],
-    row: (a) => [a.id, a.systemName, a.productionUrl || null, a.stagingUrl || null, a.githubUrl || null, a.deploymentSteps || null, a.createdAt, a.updatedAt],
+    cols: ['id', 'systemName', 'productionUrl', 'stagingUrl', 'githubUrl', 'deploymentSteps', 'externalIds', 'createdAt', 'updatedAt'],
+    row: (a) => [a.id, a.systemName, a.productionUrl || null, a.stagingUrl || null, a.githubUrl || null, a.deploymentSteps || null, arr(a.externalIds), a.createdAt, a.updatedAt],
   },
   {
     table: 'accessRules',
@@ -1008,6 +1064,11 @@ const TABLE_SPECS = [
     table: 'meetingNoteHistory',
     cols: ['id', 'meetingNoteId', 'version', 'field', 'oldValue', 'newValue', 'changedBy', 'changedAt'],
     row: (h) => [h.id, h.meetingNoteId, h.version || 1, h.field, h.oldValue || null, h.newValue || null, h.changedBy || 'Unknown', h.changedAt],
+  },
+  {
+    table: 'erpModules',
+    cols: ['id', 'name', 'description', 'erpDepartmentId', 'isActive', 'createdAt', 'updatedAt'],
+    row: (m) => [m.id, m.name, m.description || null, m.erpDepartmentId || null, m.isActive !== false, m.createdAt || null, m.updatedAt || null],
   },
 ];
 const CHANGE_ITEM_COLS = ['id', 'changeHistoryId', 'field', 'oldValue', 'newValue', 'changedAt'];
