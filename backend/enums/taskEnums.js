@@ -1,7 +1,7 @@
 /**
  * Task Status and Milestone Enums with case-insensitive normalization
  */
-import { CR_TASK_DEFINITIONS } from '../crTaskTemplates.js';
+import { CR_TASK_DEFINITIONS, CR_MILESTONE_PHASES } from '../crTaskTemplates.js';
 import {
   PROJECT_MILESTONES,
   PROJECT_MILESTONE_LIVE_WARRANTY,
@@ -9,7 +9,9 @@ import {
   PROJECT_MILESTONE_LEGACY_LIVE,
 } from '../projectMilestones.js';
 
-const CR_TASK_MILESTONE_VALUES = [...new Set(CR_TASK_DEFINITIONS.map((t) => t.milestone))];
+// Every CR milestone can carry a task: ERP-synced CRs get tasks for CR - Section 1, Configuration,
+// Signed Changes, Development - Extended… on demand (routes/erp-integration.js).
+const CR_TASK_MILESTONE_VALUES = [...new Set([...CR_TASK_DEFINITIONS.map((t) => t.milestone), ...CR_MILESTONE_PHASES])];
 const CR_TASK_MILESTONE_BY_LOWER = Object.fromEntries(
   CR_TASK_MILESTONE_VALUES.map((m) => [m.toLowerCase(), m])
 );

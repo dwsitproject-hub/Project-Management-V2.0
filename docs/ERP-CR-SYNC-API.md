@@ -1,5 +1,7 @@
 # PM Tools — ERP CR Sync API (Integration Guide for the ERP team)
 
+> ⚠️ **Replaced by v1.1:** see `docs/ERP-CR-SYNC-API-v1.1-ERP-BRIEF.md`. In v1.1 the key is ERP's **CR ID** (`/crs/{crId}`), not the Ticket Number, and several fields changed. Don't build against this v1.0 guide.
+
 | | |
 |---|---|
 | Version | 1.0 (12 Nov 2026) |

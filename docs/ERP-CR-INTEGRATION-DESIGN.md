@@ -1,12 +1,27 @@
-# ERP ⇄ Downstream CR Integration — Design (Draft v0.4)
+# ERP ⇄ Downstream CR Integration — Design (Draft v0.6)
 
 | | |
 |---|---|
 | Status | Draft. The mapping follows the **CR System Integration Workbook** (updated 11 Nov 2026). Items marked **OPEN** are not settled yet. |
-| Date | 11 Nov 2026 |
-| Inputs | `docs/CR System Integration Workbook.xlsx` (**source of truth for the mapping**), `docs/Integrasi CR ERP - Downstream (Bahan Diskusi) v2.pptx` (meeting 28 Oct 2026) |
+| Date | 16 Nov 2026 |
+| Inputs | `docs/CR System Integration Workbook.xlsx` (**source of truth for the mapping**), `docs/Integrasi CR ERP - Downstream (Bahan Diskusi) v2.pptx` (meeting 28 Oct 2026), `docs/hierarki-segment-stage.md` (ERP's Segment → Stage → Detail Stage → Sub Stage → Detail Sub Stage hierarchy) |
 | Systems | **ERP CR Management** (upstream) → **DWS PM Tools** (downstream, pm.energi-up.com) |
 
+> **Built 16 Nov (API v1.1) on branch `feature/erp-sync-v1.1`, together with v0.6. Not merged or deployed yet.**
+> - Code: `backend/routes/erp-integration.js`, `backend/services/erp-cr-mapper.js`
+> - Tests: `tests/erp-cr-sync.test.mjs`
+> - UI: ERP progress panel and ERP % badge
+> - Not built: read-only ERP fields in the PM edit form, a filter on ERP %, and the admin page for the stage mapping
+> - Also: ERP CRs take PM's Create Date from ERP's `createdAt`
+>
+> v0.7 (16 Nov) — decided after ERP's answers. Key = ERP CR ID (hidden); the ERP Ticket Number goes into PM's Ticket field. Requester, Functional and Target are optional. `impactAreas[]` added. Staging HTTP risk accepted. See §10 "after ERP's answers". ERP brief: `docs/ERP-CR-SYNC-API-v1.1-ERP-BRIEF.md`.
+>
+> v0.6 (16 Nov) — decided, **not built yet**: alignment with ERP's segment/stage hierarchy. The deployed API (v1.0, SIT `bd0884d`) still uses the v0.5 milestone table.
+> - Two new PM CR milestones: **CR - Section 1** and **Configuration** (§4.2).
+> - Mapping fixes: the plural segment name "FSD Creation & Approvals", any stage under Go-Live, and extended stages matched by an optional `stageType` (§4.2).
+> - ERP sends an optional progress structure (CR %, segments → stages → developer teams). PM keeps it as a read-only snapshot and fills its CR tasks from it (§4.6).
+> - Detail Stage and Detail Sub Stage entries are **not** copied; the CR links to ERP instead (§4.6).
+>
 > v0.5 (12 Nov) — built. Branches `feature/erp-external-ids` and `feature/erp-cr-sync-api`; the ERP-facing contract is `docs/ERP-CR-SYNC-API.md`.
 > Differences from this design:
 > - Resolver department is stored as text (`functionalDepartment`, ERP's column), not a PM table.
@@ -70,20 +85,21 @@ sequenceDiagram
 | 1 | Type (CR / Configuration) | **Type** = `CR` (both ERP types); ERP value kept in `externalData.erpType` | Phase 1 handles CRs only (decided 11 Nov) | "ok" |
 | 2 | Change Request (rich text, ≤5,000 chars) | **CR Name** (`name`) | HTML converted to plain text and **cut to 120 characters** (ending "…"). The full text goes into Description, after the Note. | ok; 120-char limit decided 11 Nov |
 | 3 | Note | **Description** | The Note, then the full Change Request text as plain text (CR Name holds only the first 120 characters) | ok |
-| 4 | Ticket Number | **External ID** (new: `initiatives.externalIds`) | Integration key; shown and searchable. PM keeps its own `ticket` (`CRDDMMYYYYNNN`). | DWS adds the "External ID" field |
+| 4 | Ticket Number | **Ticket** (`initiatives.ticket`, PM's existing field) | **v0.7:** shown as the CR's ticket (list column, detail page, search). For ERP CRs, PM does **not** generate its own `CR…` number. When ERP sends no ticket, the Ticket shows the ERP CR ID. Optional, and not unique (ERP lets several CRs share a ticket). | Was "External ID" (v0.2–v0.6); changed 16 Nov because ERP tickets aren't unique (N1 / K1) |
+| 4b | CR ID (`CR000000123`) | **Hidden matching key** (stored in `initiatives.externalIds`) | **v0.7:** unique and never changes, so PM finds the CR by it. Not shown on the CR screens (the "External IDs" field is removed from the CR form and detail page); shown only in the ERP info panel. | Decided 16 Nov |
 | 5 | Module, T-Code | **System Impacted** (`systemImpactedIds`) | Through **`dwsApplications.externalIds`** (new) | DWS adds External ID on Master DWS Application |
 | 6a | Department (resolver department) | **Resolver Department** (new) | New PM master table + `initiatives.resolverDepartmentId` | DWS creates a new table |
-| 6b | — (ERP is adding a requester department) | **Department** (`departmentId`, the requester department) | Through **`departments.externalId`** (new). Example: `AP1` → AP. | ERP creates a new table |
-| 7a | Ownership, Impact Area | **Ownership / Impact Area** (new) | New PM tables `ownerships` and `impactAreas`, plus `initiatives.ownershipId` and `initiatives.impactAreaId`. PM has no list of its own: the values are **captured from ERP**. Each code + name ERP sends is added (or renamed) automatically (§4.5). | DWS creates a new table; values come from ERP (11 Nov) |
+| 6b | — (ERP is adding a requester department) | **Department** (`departmentId`, the requester department) | Through **`departments.externalId`** (new). Example: `AP1` → AP. **v0.7:** ERP sends `requesterDepartmentCode: null` until it stores the requester's department. ERP's `change_requests.department_id` is the *module's* department and must not be sent here (N15). | ERP creates a new table |
+| 7a | Ownership, Impact Area | **Ownership / Impact Area** (new) | New PM tables `ownerships` and `impactAreas`, plus `initiatives.ownershipId` and `initiatives.impactAreaId`. PM has no list of its own: the values are **captured from ERP**. Each code + name ERP sends is added (or renamed) automatically (§4.5). **v0.7:** a CR can have **several Impact Areas** in ERP, so PM accepts `impactAreas: [{code, name}, …]` (the single `impactArea` still works), keeps all codes and lists them on the CR (N4; refine later). | DWS creates a new table; values come from ERP (11 Nov) |
 | 7b | — (ERP is adding Business Impact) | **Business Impact** | PM-owned free text. Not sent by ERP in Phase 1. | ERP creates a new table |
 | 8 | Priority (set in Preparation) | **Priority** | High→`P0`, Medium→`P1`, Low→`P2`. Default `P2` until ERP sends it. | confirmed |
-| 9 | Requester email | **Business Owner / Requestor** (`businessOwnerId`) | Matched against `users.email` | ERP sends the email only |
-| 10 | Functional email | **IT PIC** (`itPicId`, `itPicIds`) | Matched by email against the IT PIC list | same as row 9 |
+| 9 | Requester email | **Business Owner / Requestor** (`businessOwnerId`) | Matched against `users.email`. **v0.7: optional**: when missing, a warning, not a `400` (N3). | ERP sends the email only |
+| 10 | Functional email | **IT PIC** (`itPicId`, `itPicIds`) | Matched by email against the IT PIC list. **v0.7: optional**: when missing, a warning (N3). | same as row 9 |
 | 11 | Requester email | **Business Users** (`businessUserIds`) | The requester is added to Business Users | same as row 9 |
 | — | — | **IT PM** (`itPmId`) | Always left alone (managed in DWS) | let it null |
 | — | Dept Head email (+ name) | **IT Manager** (`itManagerIds`) | Matched by email. **If there is no PM user, one is created** as an inactive placeholder (§4.4). | ERP sends the Dept Head email; upsert decided 11 Nov |
 | 12 | Date Creation | **Plan Start Date** | | ok |
-| 13 | Target Resolved | **Plan End Date** | | ok |
+| 13 | Target Resolved | **Plan End Date** | **v0.7: optional**: when missing, a warning (N3) | ok |
 | 14 | Create_at | **Actual Start Date** (`startDate`) | | ok |
 | — | Closed_Ticket | **Actual End Date** (`endDate`) | Also required by PM when Live + Fully Live | ok |
 | 15 | Status | **Status** | §4.1 | "Status" tab |
@@ -115,37 +131,71 @@ PM statuses are a fixed list (`Not Started, On Hold, On Track, At Risk, Delayed,
 
 **Rule (decided 11 Nov):** ERP owns the status. The table is applied as written on every sync: ERP `In Progress` always sets `On Track`, even if PM showed On Hold or At Risk. For ERP-linked CRs the Status field is read-only in PM, so On Hold, At Risk and Not Started are never used for them.
 
-### 4.2 Milestone (workbook "Milestone" tab, updated 11 Nov)
+### 4.2 Milestone (workbook "Milestone" tab, updated 11 Nov; ERP hierarchy decisions 16 Nov)
 PM looks up the milestone from the pair **(ERP segment, ERP stage)**. The same stage name can mean different things in different segments: for example, `Update FSD Change Request` maps to Signed Changes under Development and SIT, but to UAT under UAT.
 
-| ERP segment | ERP stage | PM milestone |
-|---|---|---|
-| Preparation | User Initiation | User Initiate |
-| Preparation | CR Creation | CR Created |
-| Preparation | CR Signed – Section 2 | CR Signed sec 2 |
-| Preparation | CR Signed – Section 3 | CR Signed Sec 3 |
-| FSD Creation & Approval | FSD Creation | FSD |
-| FSD Creation & Approval | Developer Review | FSD |
-| FSD Creation & Approval | FSD Approval | FSD |
-| Development and SIT | Development | Development |
-| Development and SIT | SIT | SIT *(confirmed 11 Nov; the workbook row said Development)* |
-| Development and SIT | Extended Development | Development - Extended |
-| Development and SIT | Extended SIT | SIT |
-| Development and SIT | Update FSD Change Request | Signed Changes |
-| Development and SIT | Extended Developer Review | SIT |
-| UAT | *any stage* (UAT, Transport, Extended Development / SIT / UAT / Developer Review, Update FSD Change Request) | UAT |
-| GO-Live | GO-LIVE | Live (Warranty Period) |
-| — (no ERP stage) | — | Fully Live: set in PM by IT after the warranty period |
-| — (no ERP stage) | — | Changes: PM only, set by hand |
+ERP's real structure is described in `docs/hierarki-segment-stage.md`. Its stage names differ from the workbook in places, so rows marked **v0.6** were added on 16 Nov. They are **not built yet**; until then those names return `UNMAPPED_STAGE`.
+
+| ERP segment | ERP stage | PM milestone | |
+|---|---|---|---|
+| Preparation | User Initiation | User Initiate | v0.5 |
+| Preparation | CR Creation | CR Created | v0.5 |
+| Preparation | CR Verification *(ERP lists it from an August example; to be confirmed by their query)* | CR Created | **v0.7** |
+| Preparation | **CR - Section 1** | **CR - Section 1** *(new PM milestone; Section 1 is not User Initiation. ERP confirms it is a separate stage, added 9 Sep 2026; older CRs don't have it)* | **v0.6** |
+| Preparation | CR Signed – Section 2 | CR Signed sec 2 | v0.5 |
+| Preparation | CR Signed – Section 3 | CR Signed Sec 3 | v0.5 |
+| FSD Creation & Approval**s** | FSD Creation · Developer Review · FSD Approval | FSD | v0.5; the plural segment name is accepted from **v0.6** |
+| Development and SIT | Development | Development | v0.5 |
+| Development and SIT | SIT | SIT *(confirmed 11 Nov; the workbook row said Development)* | v0.5 |
+| Development and SIT | Extended Development | Development - Extended | v0.5 |
+| Development and SIT | Extended SIT | SIT | v0.5 |
+| Development and SIT | Update FSD Change Request | Signed Changes | v0.5 |
+| Development and SIT | Extended Developer Review | SIT | v0.5 |
+| Development and SIT | Update FSD Change Request Approval *(legacy: CRs extended before 21 Aug 2026)* | Signed Changes | **v0.7** |
+| **Configuration** (config CRs) | *any stage* | **Configuration** *(new PM milestone; kept separate from Development)* | **v0.6** |
+| UAT | *any stage* (UAT, Transport, Extended Development / SIT / UAT / Developer Review, Update FSD Change Request) | UAT | v0.5 |
+| Go-Live | ***any stage*** | Live (Warranty Period) | v0.5 matched only `GO-LIVE`; **v0.6** maps every stage of the segment |
+| — (no ERP stage) | — | Fully Live: set in PM by IT after the warranty period | |
+| — (no ERP stage) | — | Changes: PM only, set by hand | |
+
+**Extended stages (v0.6, adjusted v0.7).** ERP adds extended stages only when a CR is extended, and their names can vary. Their types **contain** `extended` or `extender` (e.g. `extended_development`, `extender_uat`), so they don't equal those words. ERP sends an optional **`stageType`**. When it **contains** `extended` or `extender`, PM maps by segment instead of by name.
+
+ERP's extend templates (from their code, to be matched with their query):
+
+| Template | Stages added |
+|---|---|
+| `extended_development` | Extended Development, Extended SIT |
+| `extended_development_with_fsd` | Update FSD Change Request, Extended Developer Review, Extended Development, Extended SIT |
+| `extender_uat` | Extended UAT |
+| `extender_uat_with_fsd` | Update FSD Change Request, Extended Developer Review, Extended Development, Extended UAT |
+
+Mapping by segment:
+
+| Segment of the extended stage | PM milestone |
+|---|---|
+| Development and SIT, an extended *development* or *developer review* stage | Development - Extended |
+| Development and SIT, an extended *SIT* stage | SIT |
+| UAT (any extended stage) | UAT |
+
+Without `stageType`, the name rows above still apply as a fallback.
+
+**New PM milestones (v0.6)** are added everywhere PM lists CR milestones:
+- the backend list and CR task template (`crTaskTemplates.js`)
+- the milestone dropdown and the CR list's phase groups (`frontend/main.js`: CR - Section 1 in *Initiation*, Configuration in *Build*)
+- the Management Dashboard milestone list
+
+The order becomes: User Initiate, CR Created, **CR - Section 1**, CR Signed sec 2, CR Signed Sec 3, FSD, Development, **Configuration**, Changes, Signed Changes, Development - Extended, SIT, UAT, Live (Warranty Period), Fully Live.
+
+Existing CRs don't change. `/api/v1` list results may now contain the two new values; tell other API consumers.
 
 Rules:
-- Segment and stage names are compared ignoring case and extra spaces, because the workbook values contain tabs and spellings such as `user initation`.
+- Segment and stage names are compared ignoring case and extra spaces, because the workbook values contain tabs and spellings such as `user initation`. From v0.6, a trailing "s" on the segment name is also ignored ("Approval" = "Approvals").
 - If ERP sends a (segment, stage) pair that isn't in the table, the milestone is left unchanged and an `UNMAPPED_STAGE` warning is raised. The other fields still update.
 - **Fully Live and Changes are PM-owned.**
   - ERP never sets them. Once IT has set Fully Live, ERP's GO-LIVE doesn't move the CR back to Live (Warranty Period).
   - PM users may set Changes by hand. The next ERP stage change overwrites it.
 - The legacy PM value `Live` is never produced.
-- When a milestone is passed, the matching auto-created PM CR task is set to `done`. When the CR is cancelled, its tasks are set to `cancel`.
+- When a milestone is passed, the matching auto-created PM CR task is set to `done`. When the CR is cancelled, its tasks are set to `cancel`. From v0.6, when ERP sends its stage structure, tasks follow the ERP stages instead (§4.6).
 
 ### 4.3 Priority (workbook "Priority" tab)
 High → P0, Medium → P1, Low → P2. The PM priority list is fixed.
@@ -190,6 +240,93 @@ Notes from the workbook data:
   4. Rules PM enforces: a code may appear on **only one** system (saving a duplicate is refused); codes are compared ignoring case; an unknown module → System Impacted left empty plus an `UNMAPPED_MODULE` warning.
 - **Departments need clean-up before mapping.** There are duplicates (`TAX` / `Tax`) and legacy names (`Operation`, `Trader`, which PM already shows as Industrial and Commercial).
 
+### 4.6 ERP progress structure: segments, stages, developer teams (v0.6, decided 16 Nov, not built yet)
+
+ERP tracks a CR in five layers (`docs/hierarki-segment-stage.md`):
+
+| ERP layer | What it holds |
+|---|---|
+| CR | Progress = sum of the weights of completed segments (0 → 20 → 40 → 70 → 85 → 100) |
+| Segment | Weight (Preparation 20, FSD 20, Development and SIT 30, UAT 15, Go-Live 15), status, % |
+| Stage | Status, start/end, cumulative %, iteration |
+| Detail Stage | Dated progress entries: % change, remarks, attachment |
+| Sub Stage | Developer teams under Development (ABAP, BW, Digital App), % |
+| Detail Sub Stage | Dated entries per team |
+
+PM's model stays the same for every CR: **one milestone plus one task per milestone**. ERP's structure is added **for display**, and to **fill PM's tasks**.
+
+| ERP layer | Decision | In PM |
+|---|---|---|
+| CR progress % | ✅ Add | Own field `erpProgress` (number): shown on the CR, and a column and filter on the CR list |
+| Segment | ✅ Add, display only | Snapshot (below), "ERP progress" panel |
+| Stage | ✅ Add | Snapshot and panel, **and fills PM's CR tasks** (below) |
+| Sub Stage (developer teams) | ✅ Add, display only | Snapshot, shown under the Development stage in the panel |
+| Detail Stage, Detail Sub Stage | ❌ Not copied | "View in ERP" link (`url`). They are ERP's working log, with edits, negative entries and attachments, and nobody edits them in PM. |
+
+#### What ERP sends (all optional; messages without them keep working)
+```json
+"progress": 40,
+"stageType": null,
+"segments": [
+  { "name": "Preparation", "sequence": 1, "weight": 20, "status": "completed", "progress": 100,
+    "stages": [
+      { "name": "CR - Section 1", "type": null, "sequence": 1, "status": "completed",
+        "startDate": "2026-11-02", "endDate": "2026-11-03", "progress": 100, "iteration": 1 } ] },
+  { "name": "Development and SIT", "sequence": 3, "weight": 30, "status": "active", "progress": 15,
+    "stages": [
+      { "name": "Development", "type": null, "sequence": 1, "status": "active", "startDate": "2026-11-20",
+        "endDate": null, "progress": 30, "iteration": 1,
+        "subStages": [ { "name": "ABAP Development", "status": "active", "progress": 60 },
+                       { "name": "BW Development", "status": "inactive", "progress": 0 } ] },
+      { "name": "SIT", "type": null, "sequence": 2, "status": "inactive", "progress": 0, "iteration": 1 } ] }
+]
+```
+- **Field names (v0.7):** ERP's draft used `bobot`; the API uses **`weight`**. Please include each stage's **`iteration`** (`cr_stages.iteration`). An optional **`stageCode`** per stage is reserved for later, if ERP adds `cr_stages.master_stage_id` (Q2 / K9). Until then, PM matches by name.
+- **`subStages` stays optional.** ERP proposes not sending developer teams yet; the panel shows them once ERP sends them.
+- Extended stages are added at the end of their segment, with the next `sequence`; PM handles a stage list that grows.
+- `stageType` belongs to the current stage (§4.2, extended stages).
+- Each stage's `type` is used the same way when filling tasks.
+- Status values follow ERP: `inactive` / `active` / `completed`.
+
+#### How PM stores it ("display only")
+- **One snapshot per CR**, in the existing JSON field `initiatives.externalData`, under key `erpProgress`: `{ progress, asOf: occurredAt, segments: [...] }`.
+- Each message **replaces** the snapshot completely, so PM always equals ERP, including stages that ERP removed or reordered. There is nothing to sync and no new table or migration. The size is a few KB per CR.
+- **CR % is also copied** into its own field `initiatives.erpProgress`, so lists and dashboards can sort and filter on a plain number.
+- Trade-off: reports *across* CRs at stage level (e.g. "average days in SIT") would have to read the JSON. Move stages into a real table if that is ever needed.
+- **Display:** a read-only "ERP progress" panel on the CR detail page:
+  - one bar per segment, with its weight and %
+  - under each bar, its stages with status, dates, % and "×n" when repeated
+  - developer teams under Development
+  - a "View in ERP" link
+
+#### How ERP stages fill PM's CR tasks
+Each ERP stage maps to a PM milestone, using the same table as §4.2, and **each PM milestone has one task**. Several stages can feed one task (FSD Creation, Developer Review and FSD Approval all feed the **FSD** task). For each task, from its stages:
+
+| Task field | Rule |
+|---|---|
+| Status | Any stage `active` → `in progress`. **All** `completed` → `done`. None started → `not started`. CR Cancelled → every open task becomes `cancel`. |
+| Start date | Earliest stage start date |
+| End date | Latest stage end date, only once all of its stages are completed (otherwise empty) |
+| Description | One generated line, e.g. "From ERP: FSD Creation ✔, Developer Review ✔, FSD Approval 40% (×2)" |
+| Assignee | Not touched (IT PIC; managed in PM) |
+
+Special cases:
+- **Sent back.** ERP can reopen a completed stage (a negative % entry, e.g. FSD returned for revision). The task goes back from `done` to `in progress`, and its end date is cleared. Tasks of later milestones whose stages are back to `inactive` go back to `not started`.
+- **Tasks created on demand.** CR - Section 1, Signed Changes, Development - Extended and Configuration get a task when ERP first sends a stage that maps to them. An extended CR gains a "Development - Extended" task; a normal CR doesn't carry an empty one.
+- **User Initiate and CR Created** have no ERP stage. They are set to `done` when the CR first arrives from ERP.
+- **Fully Live** stays PM-only and is never touched.
+- **ERP-owned.** Task fields filled from ERP are overwritten by the next message, like the other ERP fields.
+- **No `segments` in the message:** tasks follow the v0.5 rule (milestones before the current one → `done`).
+
+Example, FSD sent back:
+
+| ERP event | FSD task | Development task |
+|---|---|---|
+| FSD Creation starts | in progress, start = that day | not started |
+| FSD Approval completes | done, end = that day | in progress, start = that day |
+| Approval sent back (FSD Approval reopened, ×2) | in progress, end cleared | not started, start cleared |
+| Approved again | done, new end date | in progress |
+
 ---
 
 ## 5. API contract (PM as provider)
@@ -200,6 +337,14 @@ Notes from the workbook data:
 - New scope **`cr:sync`**, accepted only on the integration endpoints.
 
 ### 5.2 `PUT /api/v1/integrations/erp/crs/{ticketNumber}` — create or update
+
+> **v0.7 / API v1.1 (decided 16 Nov, not built yet):**
+> - The key in the URL becomes ERP's **CR ID**: `PUT /api/v1/integrations/erp/crs/{crId}`. The same applies to PATCH, GET and `/document`.
+> - `crId` is **required**; `ticketNumber` becomes **optional**.
+> - `requesterEmail`, `functionalEmail` and `targetResolved` become **optional** (a warning when missing).
+> - New optional fields: `impactAreas[]`, `progress`, `stageType`, `segments[]` (§4.6).
+> - The ERP-facing brief is `docs/ERP-CR-SYNC-API-v1.1-ERP-BRIEF.md`.
+> - The v1.0 example below is kept for reference.
 
 ```json
 {
@@ -306,6 +451,10 @@ Notes from the workbook data:
 | 5 | Mapper | `services/erp-cr-mapper.js` with unit tests built from the workbook tabs | M |
 | 6 | Admin | Integration Log, Needs-mapping queue, ERP link screen | L |
 | 7 | Email | Suppress the creation email for ERP CRs | S |
+| 8 | **v0.6** Milestones and mapping | Add the CR - Section 1 and Configuration milestones (backend, dropdowns, phase groups, Management Dashboard). Mapping: plural segment names, any stage under Go-Live, Configuration, the optional `stageType` (§4.2). | S |
+| 9 | **v0.6** ERP progress | Accept the optional `progress` and `segments[]`; store the `erpProgress` field and snapshot; fill CR tasks from stages (§4.6); unit tests | M |
+| 10 | **v0.6** UI | "ERP progress" panel on the CR detail page; ERP % column and filter on the CR list | M |
+| 11 | **v0.6** API guide | Update `docs/ERP-CR-SYNC-API.md` and the shared page to v1.1 with the new optional fields and milestones | S |
 
 **ERP side (from the workbook):**
 - Add a requester-department table and a Business Impact table.
@@ -320,6 +469,7 @@ Notes from the workbook data:
 - **Volume:** low. Reconciliation and back-fill must use the batch endpoint, because every PM save rewrites the whole store.
 - **Timeouts:** 5 s for a single call, 30 s for a batch or document.
 - **Security:** HTTPS in production; a separate secret per environment; `cr:sync` scope only. The integration log contains emails, so it is admin-only and kept for 180 days.
+- **Staging runs on HTTP (risk accepted, 16 Nov, N9).** The client secret and tokens travel unencrypted on staging. Accepted for testing; production uses HTTPS. Rule: **no real CR data on staging**, and the staging secret is never reused anywhere else.
 
 ## 9. Rollout
 1. Close the OPEN items.
@@ -346,8 +496,39 @@ Notes from the workbook data:
 | OPEN-9 | **The main flow is ERP → PM only.** PM still builds a `PATCH` partial-update endpoint now, for later use (§5.3). |
 | OPEN-10 | **Development and SIT / SIT → `SIT`**, not Development as the workbook row said. Extended Developer Review → `SIT` stays as written. |
 
+### Decided on 16 Nov 2026 (ERP hierarchy, `docs/hierarki-segment-stage.md`; not built yet)
+| # | Decision |
+|---|---|
+| OPEN-12 | **"CR - Section 1" becomes its own PM milestone.** It is not User Initiation (§4.2). |
+| OPEN-13 | **"Configuration" becomes its own PM milestone** for config CRs, not mapped to Development (§4.2). |
+| OPEN-14 | **Any stage under Go-Live → Live (Warranty Period)**; stage names don't matter (§4.2). |
+| OPEN-15 | **Extended stages are recognised by an optional `stageType`** (`extended` / `extender`), with the name match as fallback (§4.2). |
+| OPEN-16 | **CR progress % is added** as its own field (`erpProgress`), shown on the CR and on the CR list (§4.6). |
+| OPEN-17 | **Segments and developer teams (Sub Stages) are stored display-only**, as a snapshot in `externalData.erpProgress` (§4.6). |
+| OPEN-18 | **ERP stages fill PM's CR tasks** (status, start/end, generated description), including reopening on send-back (§4.6). |
+| OPEN-19 | **Detail Stage and Detail Sub Stage entries are not copied**; the CR links to ERP (§4.6). |
+
+### Decided on 16 Nov 2026, after ERP's answers (`erp-cr-sync-plan.md` §5.4, §9, §10), v0.7, not built yet
+| # | Decision |
+|---|---|
+| K1 / N1 | **ERP tickets aren't unique, so the key is ERP's CR ID.** The CR ID is stored hidden in `externalIds`, and the "External IDs" field is removed from the CR screens. The ERP Ticket Number goes into PM's existing **Ticket** field, which is optional and not unique. API v1.1 path: `/crs/{crId}`. |
+| K2 / N3 | `requesterEmail`, `functionalEmail` and `targetResolved` become **optional**: a warning when missing, not a `400`. |
+| N15 | ERP sends `requesterDepartmentCode: null` until it stores the requester's department. |
+| N4 | PM accepts `impactAreas[]` and keeps all of them (refine later). |
+| N6 | API guide examples use real ERP module ids (`MD000000001`), not `FI`. |
+| N9 | Staging stays on HTTP (risk accepted); production uses HTTPS. |
+| K3, K4, K5, K6 | Agree with ERP's proposals: `rejected` → Cancelled; imported CRs use `date_receive` for both dates; a CR without stages → Preparation / CR Creation; hard delete → send Cancelled first. |
+| K10 | `segments[]` uses `weight` (not `bobot`) and includes `iteration`; `subStages` optional. |
+| K11 / Q5 | **Configuration is its own PM milestone** (OPEN-13), not Development as ERP assumed. Mapping is PM's job, so ERP isn't affected. |
+| Q1 | Mapping additions: CR Verification → CR Created; Update FSD Change Request Approval (legacy) → Signed Changes; an extended `stageType` is detected by *contains*. |
+| K9 / Q2 | Name matching for now. ERP may later add `master_stage_id` and send it as optional `stageCode`. |
+
 ### Still open
 | # | Question | Who / next step |
 |---|---|---|
 | OPEN-3 | **Module codes for SAP FICO and SAP NON FICO.** | ERP team to send their Module list; Rian fills workbook "System Impacted" column A (steps in §4.5) |
 | OPEN-11 | **Resolver Department values and codes** (new PM table). | ERP team to send the list. Proposal: capture them automatically from ERP, the same way as Ownership / Impact Area. |
+| OPEN-20 | **Config template:** the segment and stage names of a config CR. Does Configuration cover everything up to Go-Live, or does a config CR also have its own testing / UAT stages? This decides which tasks a config CR gets. | ERP team |
+| OPEN-21 | **Stable codes:** do segments (`categories`) and stages (`master_stages`) have a stable code or id ERP can send, so PM doesn't match by names that an ERP admin can rename? | ERP team |
+| OPEN-22 | **Stage names under Go-Live** and the **extended stage names**, for the documentation (the mapping no longer depends on them). | ERP team |
+| OPEN-23 | **Can ERP send the optional `progress`, `stageType` and `segments[]` block on every message** (§4.6)? It's already computed in ERP. | ERP team |

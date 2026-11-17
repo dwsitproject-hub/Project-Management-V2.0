@@ -34,12 +34,22 @@ export function mapPriority(erpPriority) {
   return PRIORITY_MAP[normKey(erpPriority)] || null;
 }
 
-// Workbook "Milestone" tab: (segment, stage) -> PM CR milestone. Development and SIT /
-// SIT -> SIT was confirmed on 11 Nov 2026 (the workbook row said Development).
+// Segment names compared without a trailing "s" per word, so ERP's "FSD Creation & Approvals"
+// matches the workbook's "FSD Creation & Approval".
+function segKey(v) {
+  return normKey(v).split(' ').map((w) => (w.length > 3 && w.endsWith('s') ? w.slice(0, -1) : w)).join(' ');
+}
+
+// Workbook "Milestone" tab + ERP hierarchy decisions (docs/ERP-CR-INTEGRATION-DESIGN.md §4.2):
+// (segment, stage) -> PM CR milestone. Development and SIT / SIT -> SIT was confirmed on
+// 11 Nov 2026 (the workbook row said Development). v1.1 (16 Nov): CR - Section 1, CR
+// Verification, the legacy "Update FSD Change Request Approval".
 const MILESTONE_ROWS = [
   ['Preparation', 'User Initiation', 'User Initiate'],
   ['Preparation', 'User Initation', 'User Initiate'], // workbook spelling
   ['Preparation', 'CR Creation', 'CR Created'],
+  ['Preparation', 'CR Verification', 'CR Created'],
+  ['Preparation', 'CR - Section 1', 'CR - Section 1'],
   ['Preparation', 'CR Signed - Section 2', 'CR Signed sec 2'],
   ['Preparation', 'CR Signed - Section 3', 'CR Signed Sec 3'],
   ['FSD Creation & Approval', 'FSD Creation', 'FSD'],
@@ -50,20 +60,40 @@ const MILESTONE_ROWS = [
   ['Development and SIT', 'Extended Development', 'Development - Extended'],
   ['Development and SIT', 'Extended SIT', 'SIT'],
   ['Development and SIT', 'Update FSD Change Request', 'Signed Changes'],
+  ['Development and SIT', 'Update FSD Change Request Approval', 'Signed Changes'], // legacy (before 21 Aug 2026)
   ['Development and SIT', 'Extended Developer Review', 'SIT'],
-  ['GO-Live', 'GO-LIVE', 'Live (Warranty Period)'],
 ];
-const MILESTONE_MAP = new Map(MILESTONE_ROWS.map(([seg, stage, m]) => [`${normKey(seg)}|${normKey(stage)}`, m]));
-const SEGMENT_WIDE = { uat: 'UAT' }; // every stage of the UAT segment -> UAT
+const MILESTONE_MAP = new Map(MILESTONE_ROWS.map(([seg, stage, m]) => [`${segKey(seg)}|${normKey(stage)}`, m]));
+// Every stage of these segments maps to one milestone, whatever its name.
+const SEGMENT_WIDE = {
+  [segKey('UAT')]: 'UAT',
+  [segKey('Go-Live')]: 'Live (Warranty Period)',
+  [segKey('Configuration')]: 'Configuration',
+};
 
-/** All (segment, stage) pairs PM understands, for the API docs / error messages. */
-export const KNOWN_SEGMENTS = ['Preparation', 'FSD Creation & Approval', 'Development and SIT', 'UAT', 'GO-Live'];
+/** Segment names PM understands, for warnings. */
+export const KNOWN_SEGMENTS = ['Preparation', 'FSD Creation & Approvals', 'Development and SIT', 'Configuration', 'UAT', 'Go-Live'];
 
-/** ERP (segment, stage) -> PM CR milestone, or null when the pair is not in the mapping. */
-export function mapMilestone(segment, stage) {
-  const seg = normKey(segment);
+/** Is this ERP stage type an extended stage (`extended_development`, `extender_uat`, …)? */
+export function isExtendedStageType(type) {
+  const t = normKey(type);
+  return t.includes('extended') || t.includes('extender');
+}
+
+/**
+ * ERP (segment, stage[, stageType]) -> PM CR milestone, or null when not in the mapping.
+ * Extended stages (stageType contains extended/extender) whose name isn't in the table map by
+ * segment: in Development and SIT a SIT stage -> SIT, anything else -> Development - Extended.
+ */
+export function mapMilestone(segment, stage, stageType) {
+  const seg = segKey(segment);
   if (SEGMENT_WIDE[seg]) return SEGMENT_WIDE[seg];
-  return MILESTONE_MAP.get(`${seg}|${normKey(stage)}`) || null;
+  const byName = MILESTONE_MAP.get(`${seg}|${normKey(stage)}`);
+  if (byName) return byName;
+  if (isExtendedStageType(stageType) && seg === segKey('Development and SIT')) {
+    return /\bsit\b/.test(normKey(stage)) ? 'SIT' : 'Development - Extended';
+  }
+  return null;
 }
 
 const ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ', '#39': "'" };
