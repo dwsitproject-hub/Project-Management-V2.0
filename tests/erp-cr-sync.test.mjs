@@ -149,6 +149,24 @@ test('no Ticket Number: PM shows the CR ID as Ticket', () => {
   assert.equal(data.initiatives[0].ticket, CR1);
 });
 
+test('an ERP person with no PM user is stored for display and does not warn', () => {
+  const data = fixture();
+  const r = put(data, '2026-11-02T03:00:00Z', fullCr({
+    requesterEmail: 'nobody@kpn-corp.com',
+    functionalEmail: 'also.nobody@kpn-corp.com',
+    functionalDepartment: 'SAP FI',
+  }));
+  assert.equal(r.warnings.some((w) => w.code === 'USER_UNMAPPED'), false);
+  const i = data.initiatives[0];
+  assert.equal(i.businessOwnerId, null);
+  assert.deepEqual(i.businessUserIds, []);
+  assert.equal(i.itPicId, null);
+  assert.deepEqual(i.itPicIds, []);
+  assert.equal(i.functionalDepartment, 'SAP FI');
+  assert.equal(i.externalData.requesterEmail, 'nobody@kpn-corp.com');
+  assert.equal(i.externalData.functionalEmail, 'also.nobody@kpn-corp.com');
+});
+
 test('requester, functional and target are optional (warnings, not errors)', () => {
   const data = fixture();
   const cr = fullCr();
@@ -313,7 +331,9 @@ test('validation and warnings', () => {
     moduleId: 'MD000000009', moduleName: 'Sales', requesterDepartmentCode: 'ZZ', requesterEmail: 'gone@kpn-corp.com', stage: 'Odd',
   }));
   const codes = r.warnings.map((w) => w.code).sort();
-  assert.deepEqual(codes, ['UNMAPPED_DEPARTMENT', 'UNMAPPED_MODULE', 'UNMAPPED_STAGE', 'USER_CREATED', 'USER_UNMAPPED']);
+  assert.deepEqual(codes, ['UNMAPPED_DEPARTMENT', 'UNMAPPED_MODULE', 'UNMAPPED_STAGE', 'USER_CREATED']);
+  assert.equal(data.initiatives[0].businessOwnerId, null);
+  assert.equal(data.initiatives[0].externalData.requesterEmail, 'gone@kpn-corp.com');
   assert.ok(data.erpModules.some((m) => m.id === 'MD000000009' && m.name === 'Sales'));
   assert.equal(data.initiatives[0].milestone, 'CR Created'); // default on create when the stage is unknown
 });
