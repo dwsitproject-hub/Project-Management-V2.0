@@ -2656,8 +2656,8 @@ function wireRecentActivityFab() {
 
 function initiativeRow(i, crData = null, colVisibility = null) {
   const dep = nameById(LOOKUPS.departments, i.departmentId);
-  const itpic = nameById(LOOKUPS.users, i.itPicId);
-  const bo = nameById(LOOKUPS.users, i.businessOwnerId);
+  const itpic = erpPeopleHtml(i, i.itPicId, 'functionalEmail');
+  const bo = erpPeopleHtml(i, i.businessOwnerId, 'requesterEmail');
   const doc = i.documentationLink || '';
   // Normalize status to lowercase for case-insensitive CSS matching
   const statusClass = i.status?.toLowerCase().replace(/\s+/g, '-') || '';
@@ -2840,9 +2840,11 @@ function exportCellValueForCR(i, key) {
     case 'departmentId':
       return nameById(LOOKUPS.departments, i.departmentId);
     case 'businessOwnerId':
-      return nameById(LOOKUPS.users, i.businessOwnerId);
+      return erpPersonText(i, i.businessOwnerId, 'requesterEmail');
     case 'itPicId':
-      return nameById(LOOKUPS.users, i.itPicId);
+      return erpPersonText(i, i.itPicId, 'functionalEmail');
+    case 'functionalDepartment':
+      return i.functionalDepartment || '';
     case 'systemImpactedIds':
       return dwsSystemNamesFromInitiative(i);
     case 'milestone':
@@ -4096,7 +4098,7 @@ function erpCrFieldRows(i) {
   return [
     formRow('ERP Module', erpModuleSelect(i?.erpModuleId || '')),
     formRow('T-Code', `<input name="tCode" value="${escapeHtml(i?.tCode || '')}" maxlength="255" placeholder="e.g. ZMM001" autocomplete="off" />`),
-    formRow('Functional Department', `<input name="functionalDepartment" value="${escapeHtml(i?.functionalDepartment || '')}" maxlength="255" autocomplete="off" />`),
+    formRow(`Functional Department${i?.externalSource === 'ERP' && i?.functionalDepartment ? externalSourceBadge() : ''}`, `<input name="functionalDepartment" value="${escapeHtml(i?.functionalDepartment || '')}" maxlength="255" autocomplete="off" />`),
     formRow('CR Reference', `<input name="crReference" value="${escapeHtml(i?.crReference || '')}" maxlength="255" placeholder="Ticket number of a related CR" autocomplete="off" />`),
   ].join('');
 }
@@ -4105,6 +4107,46 @@ function erpCrFieldRows(i) {
 function erpCrFieldsFromForm(obj) {
   const t = (v) => String(v ?? '').trim() || null;
   return { erpModuleId: t(obj.erpModuleId), tCode: t(obj.tCode), functionalDepartment: t(obj.functionalDepartment), crReference: t(obj.crReference) };
+}
+
+/** Mark for a value sent by the CR system that is not a record in this system. */
+function externalSourceBadge() {
+  return '<span class="erp-badge" title="Sent by the CR system. Not a user or department in this system.">CR System</span>';
+}
+
+function externalErpValue(i, key) {
+  if (!i || i.externalSource !== 'ERP' || !i.externalData) return '';
+  return String(i.externalData[key] || '').trim();
+}
+
+/** PM user names, or the email ERP sent when none of those people exist here. */
+function erpPeopleHtml(i, ids, emailKey) {
+  const list = Array.isArray(ids) ? ids : (ids ? [ids] : []);
+  const names = list.map((id) => nameById(LOOKUPS.users, id)).filter(Boolean);
+  if (names.length) return escapeHtml(names.join(', '));
+  const email = externalErpValue(i, emailKey);
+  if (!email) return '';
+  return `${escapeHtml(email)}${externalSourceBadge()}`;
+}
+
+function erpPersonText(i, ids, emailKey) {
+  const list = Array.isArray(ids) ? ids : (ids ? [ids] : []);
+  const names = list.map((id) => nameById(LOOKUPS.users, id)).filter(Boolean);
+  if (names.length) return names.join(', ');
+  return externalErpValue(i, emailKey);
+}
+
+/** Note under a person field when ERP sent someone who is not a user here. */
+function externalPersonNote(i, ids, emailKey) {
+  const html = erpPeopleHtml(i, ids, emailKey);
+  if (!html || !html.includes('erp-badge')) return '';
+  return `<div class="muted" style="margin-top:4px;">${html}</div>`;
+}
+
+function functionalDepartmentHtml(i) {
+  const value = String(i?.functionalDepartment || '').trim();
+  if (!value) return '';
+  return i?.externalSource === 'ERP' ? `${escapeHtml(value)}${externalSourceBadge()}` : escapeHtml(value);
 }
 
 /** Small "ERP 40%" badge for CRs synced from ERP that report a progress (CR list). */
@@ -4408,10 +4450,10 @@ function commonFields(initiative = null, defaultType = 'Project', nameLabel = 'I
     formRow('Description', `<textarea name="description" class="long-text" required>${initiative ? (initiative.description || '').replace(/</g, '&lt;').replace(/>/g, '&gt;') : ''}</textarea>`),
     formRow('Business Impact', `<textarea name="businessImpact" class="long-text" required>${initiative ? (initiative.businessImpact || '').replace(/</g, '&lt;').replace(/>/g, '&gt;') : ''}</textarea>`),
     formRow('Priority', `<select name="priority">${option('P0', 'P0', initiative?.priority === 'P0')}${option('P1', 'P1', initiative?.priority === 'P1')}${option('P2', 'P2', !initiative || initiative.priority === 'P2')}</select>`),
-    formRow('Business Owner / Requestor', createSearchableSelect('businessOwnerId', businessOwnerUsers, initiative?.businessOwnerId || '', 'Select...')),
-    formRow('Business Users', createMultiSelect('businessUserIds', LOOKUPS.users, initiative?.businessUserIds || [])),
+    formRow('Business Owner / Requestor', createSearchableSelect('businessOwnerId', businessOwnerUsers, initiative?.businessOwnerId || '', 'Select...') + externalPersonNote(initiative, initiative?.businessOwnerId, 'requesterEmail')),
+    formRow('Business Users', createMultiSelect('businessUserIds', LOOKUPS.users, initiative?.businessUserIds || []) + externalPersonNote(initiative, initiative?.businessUserIds, 'requesterEmail')),
     formRow('Department', createSearchableSelect('departmentId', LOOKUPS.departments, initiative?.departmentId || '', 'Select...')),
-    formRow('IT PIC', createMultiSelect('itPicIds', itPicUsers, initiative?.itPicIds || (initiative?.itPicId ? [initiative.itPicId] : []))),
+    formRow('IT PIC', createMultiSelect('itPicIds', itPicUsers, initiative?.itPicIds || (initiative?.itPicId ? [initiative.itPicId] : [])) + externalPersonNote(initiative, initiative?.itPicIds?.length ? initiative.itPicIds : initiative?.itPicId, 'functionalEmail')),
     formRow('IT PM', createSearchableSelect('itPmId', itPmUsers, initiative?.itPmId || '', 'Select...', true)),
     formRow('IT Manager', createMultiSelect('itManagerIds', itManagerUsers, initiative?.itManagerIds || [])),
     ...(selectedType === 'CR'
@@ -4788,11 +4830,10 @@ async function renderView(id) {
   
   // Set active nav based on initiative type
   setActive(i.type === 'CR' ? '#crlist' : '#list');
-  const boName = nameById(LOOKUPS.users, i.businessOwnerId);
+  const boHtml = erpPeopleHtml(i, i.businessOwnerId, 'requesterEmail');
   const depName = nameById(LOOKUPS.departments, i.departmentId);
-  const itPicName = nameById(LOOKUPS.users, i.itPicId);
-  const itPicNames = (i.itPicIds || []).map(id => nameById(LOOKUPS.users, id)).filter(Boolean).join(', ') || itPicName || 'N/A';
-  const businessUserNames = (i.businessUserIds || []).map(id => nameById(LOOKUPS.users, id)).filter(Boolean).join(', ') || 'None';
+  const itPicHtml = erpPeopleHtml(i, (i.itPicIds && i.itPicIds.length) ? i.itPicIds : i.itPicId, 'functionalEmail');
+  const businessUserHtml = erpPeopleHtml(i, i.businessUserIds, 'requesterEmail');
   const itPmName = i.itPmId ? nameById(LOOKUPS.users, i.itPmId) : 'None';
   const itManagerNames = (i.itManagerIds || []).map(id => nameById(LOOKUPS.users, id)).filter(Boolean).join(', ') || 'None';
   
@@ -5056,8 +5097,8 @@ async function renderView(id) {
           <div class="detail-meta-item"><div class="muted">Type</div><div>${escapeHtml(i.type)}</div></div>
           <div class="detail-meta-item"><div class="muted">Department</div><div>${escapeHtml(depName || '—')}</div></div>
           <div class="detail-meta-item"><div class="muted">IT PM</div><div>${escapeHtml(itPmName || '—')}</div></div>
-          <div class="detail-meta-item"><div class="muted">IT PIC</div><div>${escapeHtml(itPicNames || '—')}</div></div>
-          <div class="detail-meta-item"><div class="muted">Owner</div><div>${escapeHtml(boName || '—')}</div></div>
+          <div class="detail-meta-item"><div class="muted">IT PIC</div><div>${itPicHtml || '<span class="muted">—</span>'}</div></div>
+          <div class="detail-meta-item"><div class="muted">Owner</div><div>${boHtml || '<span class="muted">—</span>'}</div></div>
         </div>
       </header>
 
@@ -5085,7 +5126,7 @@ async function renderView(id) {
           ${i.type === 'CR' ? `
           <div><div class="muted">ERP Module</div><div>${escapeHtml(erpModuleLabel(i.erpModuleId)) || '<span class="muted">—</span>'}</div></div>
           <div><div class="muted">T-Code</div><div>${escapeHtml(i.tCode || '') || '<span class="muted">—</span>'}</div></div>
-          <div><div class="muted">Functional Department</div><div>${escapeHtml(i.functionalDepartment || '') || '<span class="muted">—</span>'}</div></div>
+          <div><div class="muted">Functional Department</div><div>${functionalDepartmentHtml(i) || '<span class="muted">—</span>'}</div></div>
           <div><div class="muted">CR Reference</div><div>${escapeHtml(i.crReference || '') || '<span class="muted">—</span>'}</div></div>` : ''}
           ${erpProgressPanel(i)}
           <div style="grid-column: 1 / -1"><div class="muted">Description</div><div style="white-space: pre-wrap; line-height: 1.6;">${escapeHtml(i.description || '')}</div></div>
@@ -5099,10 +5140,10 @@ async function renderView(id) {
         <h3>Project Team</h3>
         <div class="detail-team-grid">
           <div><div class="muted">IT PM</div><div style="font-weight: 500;">${escapeHtml(itPmName)}</div></div>
-          <div><div class="muted">IT PIC</div><div style="font-weight: 500;">${escapeHtml(itPicNames)}</div></div>
+          <div><div class="muted">IT PIC</div><div style="font-weight: 500;">${itPicHtml || 'N/A'}</div></div>
           <div><div class="muted">IT Manager</div><div style="font-weight: 500;">${escapeHtml(itManagerNames)}</div></div>
-          <div><div class="muted">Business Owner / Requestor</div><div style="font-weight: 500;">${escapeHtml(boName)}</div></div>
-          <div><div class="muted">Business Users</div><div style="font-weight: 500;">${escapeHtml(businessUserNames)}</div></div>
+          <div><div class="muted">Business Owner / Requestor</div><div style="font-weight: 500;">${boHtml || 'N/A'}</div></div>
+          <div><div class="muted">Business Users</div><div style="font-weight: 500;">${businessUserHtml || 'None'}</div></div>
         </div>
       </section>
 
@@ -5567,10 +5608,10 @@ async function renderView(id) {
         <div style="margin-top: 24px; padding: 20px; background: var(--gray-50); border-radius: 8px;">
           <h3 style="margin: 0 0 16px 0; color: var(--text);">Project Team</h3>
           ${formRow('IT PM', createSearchableSelect('itPmId', itPmUsers, i.itPmId || '', 'Select...', true))}
-          ${formRow('IT PIC', createMultiSelect('itPicIds', itPicUsers, itPicIds))}
+          ${formRow('IT PIC', createMultiSelect('itPicIds', itPicUsers, itPicIds) + externalPersonNote(i, itPicIds, 'functionalEmail'))}
           ${formRow('IT Manager', createMultiSelect('itManagerIds', itManagerUsers, i.itManagerIds || []))}
-          ${formRow('Business Owner / Requestor', createSearchableSelect('businessOwnerId', businessOwnerUsers, i.businessOwnerId || '', 'Select...'))}
-          ${formRow('Business Users', createMultiSelect('businessUserIds', LOOKUPS.users, i.businessUserIds || []))}
+          ${formRow('Business Owner / Requestor', createSearchableSelect('businessOwnerId', businessOwnerUsers, i.businessOwnerId || '', 'Select...') + externalPersonNote(i, i.businessOwnerId, 'requesterEmail'))}
+          ${formRow('Business Users', createMultiSelect('businessUserIds', LOOKUPS.users, i.businessUserIds || []) + externalPersonNote(i, i.businessUserIds, 'requesterEmail'))}
         </div>
         
         <div style="margin-top: 20px; display: flex; gap: 12px;">

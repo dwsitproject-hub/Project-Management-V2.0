@@ -429,21 +429,32 @@ function applyCr(data, body, mode, crIdFromPath) {
     }
   }
 
-  // ---- people (optional in v1.1: missing -> warning, field left unchanged)
-  const person = (k, apply, label) => {
+  // ---- people. A matching PM user fills the role. An email with no PM user is kept
+  // on the CR and shown as external; it is not a warning. A missing email still warns.
+  const person = (k, apply, clear, label) => {
     const sent = has(cr, k);
     const email = sent ? optText(cr, k) : null;
     if (email) {
       const u = findUserByEmail(data, email, { activeOnly: true });
       if (u) apply(u);
-      else warn('USER_UNMAPPED', `cr.${k}`, email, `No active PM user with this email; ${label} left unchanged`);
+      else clear();
     } else if (sent || mode === 'full') {
       warn('USER_UNMAPPED', `cr.${k}`, undefined, `Not sent; ${label} left unchanged`);
     }
     if (sent) erp[k] = email;
   };
-  person('requesterEmail', (u) => { set.businessOwnerId = u.id; set.businessUserIds = [u.id]; }, 'Business Owner / Business Users');
-  person('functionalEmail', (u) => { set.itPicId = u.id; set.itPicIds = [u.id]; }, 'IT PIC');
+  person(
+    'requesterEmail',
+    (u) => { set.businessOwnerId = u.id; set.businessUserIds = [u.id]; },
+    () => { set.businessOwnerId = null; set.businessUserIds = []; },
+    'Business Owner / Business Users',
+  );
+  person(
+    'functionalEmail',
+    (u) => { set.itPicId = u.id; set.itPicIds = [u.id]; },
+    () => { set.itPicId = null; set.itPicIds = []; },
+    'IT PIC',
+  );
   if (has(cr, 'deptHeadEmail')) {
     const email = optText(cr, 'deptHeadEmail');
     if (!email) set.itManagerIds = [];
