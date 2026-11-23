@@ -249,10 +249,12 @@ router.get('/', requireManagementDashboardView, async (req, res) => {
       const preferred = [
         'User Initiate',
         'CR Created',
+        'CR - Section 1',
         'CR Signed sec 2',
         'CR Signed Sec 3',
         'FSD',
         'Development',
+        'Configuration',
         'Changes',
         'Signed Changes',
         'Development - Extended',

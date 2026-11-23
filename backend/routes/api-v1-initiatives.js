@@ -23,6 +23,8 @@ import {
   isValidProjectMilestone,
   projectMilestoneMatchesFilter,
 } from '../projectMilestones.js';
+import { normalizeExternalIds, findExternalIdConflict } from '../externalIds.js';
+import { ERP_CR_FIELDS, readErpCrFields } from '../erpCrFields.js';
 
 // Per-type rules. `cr` = the type has the nested `cr` change-request dates object.
 const TYPES = {
@@ -71,6 +73,8 @@ const UPDATABLE_FIELDS = [
   'planEndDate',
   'remark',
   'documentationLink',
+  'externalIds',
+  ...ERP_CR_FIELDS,
 ];
 
 const CR_DATE_FIELDS = [
@@ -139,7 +143,10 @@ function applyFilters(rows, reqBody, rules) {
       return (
         String(r.name || '').toLowerCase().includes(qLower) ||
         String(r.description || '').toLowerCase().includes(qLower) ||
-        String(r.ticket || '').toLowerCase().includes(qLower)
+        String(r.ticket || '').toLowerCase().includes(qLower) ||
+        (r.externalIds || []).some((x) => String(x).toLowerCase().includes(qLower)) ||
+        String(r.tCode || '').toLowerCase().includes(qLower) ||
+        String(r.crReference || '').toLowerCase().includes(qLower)
       );
     });
   }
@@ -249,6 +256,18 @@ async function updateInitiative(req, res, type) {
     if (!rules.cr && body.cr != null) {
       return res.status(400).json({ error: 'cr dates apply to CR initiatives only' });
     }
+    if ('externalIds' in body) {
+      const result = normalizeExternalIds(body.externalIds);
+      if (result.error) return res.status(400).json({ error: result.error });
+      const clash = findExternalIdConflict(data.initiatives, result.ids, id);
+      if (clash) {
+        return res.status(409).json({ error: `External ID "${clash.externalId}" is already used by another initiative (${clash.row.id})` });
+      }
+      body.externalIds = result.ids;
+    }
+    const erpCr = readErpCrFields(body, data);
+    if (erpCr.error) return res.status(400).json({ error: erpCr.error });
+    Object.assign(body, erpCr.values);
 
     for (const k of UPDATABLE_FIELDS) {
       if (!(k in body)) continue;
@@ -256,7 +275,7 @@ async function updateInitiative(req, res, type) {
       if (k === 'milestone' && v != null && v !== '') {
         v = rules.normalizeMilestone(v);
       }
-      if (k === 'businessUserIds' || k === 'itPicIds' || k === 'itManagerIds') {
+      if (k === 'businessUserIds' || k === 'itPicIds' || k === 'itManagerIds' || k === 'externalIds') {
         stored[k] = Array.isArray(v) ? v : v == null ? [] : [String(v)];
       } else {
         stored[k] = v;

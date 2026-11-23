@@ -7,6 +7,8 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import http from 'http';
 import dbStore from './store.js';
+import { startCrEmailSweeper } from './services/cr-email-queue.js';
+import { checkUploadsDir } from './services/uploads.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -46,6 +48,8 @@ import { requestTimeout } from './middleware/timeout.js';
 import { crsRouter as apiV1CrsRouter, initiativesRouter as apiV1InitiativesRouter } from './routes/api-v1-initiatives.js';
 import dwsApplicationsRouter from './routes/dws-applications.js';
 import departmentsRouter from './routes/departments.js';
+import erpModulesRouter from './routes/erp-modules.js';
+import erpIntegrationRouter from './routes/erp-integration.js';
 import managementDashboardRouter from './routes/management-dashboard.js';
 import ssoRouter from './routes/sso.js';
 import hubSdkRouter from './routes/hub-sdk.js';
@@ -73,11 +77,14 @@ app.use('/api/documents', documentsRouter);
 app.use('/api/profile', authenticateToken, profileRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/meeting-notes', meetingNotesRouter);
+// ERP CR sync (scope cr:sync). Longer timeout: batches and 30 MB documents.
+app.use('/api/v1/integrations/erp', authenticateToken, requestTimeout(30000), erpIntegrationRouter);
 app.use('/api/v1/crs', authenticateToken, requestTimeout(5000), apiV1CrsRouter);
 app.use('/api/v1/initiatives', authenticateToken, requestTimeout(5000), apiV1InitiativesRouter);
 app.use('/api/dws-applications', authenticateToken, dwsApplicationsRouter);
 // Department Master (admin only); everyone else reads departments via /api/lookups
 app.use('/api/departments', authenticateToken, requireAdmin, departmentsRouter);
+app.use('/api/erp-modules', authenticateToken, erpModulesRouter);
 app.use('/api/management-dashboard', authenticateToken, managementDashboardRouter);
 
 // Health
@@ -121,8 +128,16 @@ app.listen(PORT, HOST, () => {
 
   // Read-only DB health signal for deployments (replaces the old boot-time full rewrite).
   dbStore.read()
-    .then((d) => console.log(`[STORE] Connected - Users: ${(d.users || []).length}, Initiatives: ${(d.initiatives || []).length}`))
-    .catch((e) => console.error('[STORE] Initial read failed:', e.message));
+    .then((d) => {
+      console.log(`[STORE] Connected - Users: ${(d.users || []).length}, Initiatives: ${(d.initiatives || []).length}`);
+      // Needs the schema (crEmailQueue), which the first read creates.
+      startCrEmailSweeper();
+    })
+    .catch((e) => {
+      console.error('[STORE] Initial read failed:', e.message);
+      startCrEmailSweeper(); // its sweeps retry until the DB is reachable
+    });
+  checkUploadsDir();
 
   // Initialize daily snapshots on server start
   import('./daily-snapshots.js').then(async m => {
@@ -190,34 +205,5 @@ setInterval(async () => {
     console.error('Daily snapshot error:', e.message);
   }
 }, 24 * 60 * 60 * 1000); // 24 hours
-
-// 5-minute Google Sheets auto-sync (Project and CR tabs) if env configured
-const SHEET_ID = process.env.SHEET_ID;
-const GID = process.env.GID;
-const CR_GID = process.env.CR_GID;
-if (SHEET_ID && GID) {
-  const runSync = async () => {
-    try {
-      // Sync Project tab
-      const projectMod = await import('./sync_google_sheets.js');
-      await projectMod.default();
-
-      // Sync CR tab if configured
-      if (CR_GID) {
-        const crMod = await import('./sync_google_sheets_cr.js');
-        await crMod.default();
-      }
-
-      // Create daily snapshot after sync to capture changes
-      const snapshotMod = await import('./daily-snapshots.js');
-      snapshotMod.createDailySnapshot();
-    } catch (e) {
-      console.error('Auto-sync error:', e.message);
-    }
-  };
-  setInterval(runSync, 5 * 60 * 1000);
-  // initial sync on boot (non-blocking)
-  runSync();
-}
 
 

@@ -1018,3 +1018,33 @@ nav.dash-nav { justify-content: flex-start; width: auto; }
 }
 .mgmt-dashboard .mgmt-section[class*="mgmt-section--"] tbody tr:hover,
 .mgmt-dashboard .mgmt-box[class*="mgmt-box--"] tbody tr:hover { background: color-mix(in srgb, var(--sec-tint) 45%, #fff); }
+
+/* External IDs (ERP mapping): chips + form hint */
+.ext-ids { display: flex; flex-wrap: wrap; gap: 6px; }
+.ext-ids .muted { margin: 0; }
+.chip.ext-id { font-family: var(--font-family-mono); font-size: 12px; }
+input[name="externalIds"] + small { display: block; margin-top: 4px; font-size: 12px; }
+
+.ext-hint { display: block; margin-top: 4px; font-size: 12px; }
+
+
+/* ERP CR sync v1.1: read-only ERP progress panel (CR detail) and ERP % badge (CR list) */
+.erp-badge { display: inline-block; margin-left: 6px; padding: 1px 6px; border-radius: 999px; font-size: 11px; font-weight: 600; background: var(--st-progress-bg); color: var(--st-progress-fg); white-space: nowrap; }
+.erp-panel { border: 1px solid var(--pm-line); border-radius: var(--radius-md, 10px); background: var(--pm-subtle); padding: 12px 14px; }
+.erp-panel-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px; margin-bottom: 10px; }
+.erp-panel-head .erp-total { font-family: var(--font-family-heading); font-size: 18px; font-weight: 700; color: var(--pm-accent); }
+.erp-panel-link { margin-left: auto; }
+.erp-segs { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }
+.erp-seg { background: var(--pm-surface); border: 1px solid var(--pm-line-soft); border-radius: var(--radius-sm, 8px); padding: 10px; min-width: 0; }
+.erp-seg-row { display: flex; justify-content: space-between; gap: 8px; font-weight: 600; font-size: 13px; }
+.erp-seg-pct { font-variant-numeric: tabular-nums; }
+.erp-bar { height: 6px; background: var(--pm-fill); border-radius: 999px; overflow: hidden; margin: 6px 0 8px; }
+.erp-bar span { display: block; height: 100%; background: var(--st-live-dot); border-radius: 999px; }
+.erp-seg.erp-active .erp-bar span { background: var(--st-progress-dot); }
+.erp-stages { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.erp-stage { display: grid; gap: 1px; font-size: 12.5px; padding-left: 10px; border-left: 3px solid var(--st-notstarted-dot); }
+.erp-stage.erp-completed { border-left-color: var(--st-live-dot); }
+.erp-stage.erp-active { border-left-color: var(--st-progress-dot); }
+.erp-stage-name { font-weight: 600; color: var(--pm-ink); }
+.erp-teams { color: var(--pm-ink-2); font-size: 12px; }
+.erp-note { margin: 8px 0 0; font-size: 12px; }

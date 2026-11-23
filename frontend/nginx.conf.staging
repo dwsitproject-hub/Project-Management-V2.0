@@ -24,7 +24,8 @@ server {
         add_header Expires "0";
     }
 
-    client_max_body_size 15M;
+    # Uploads: ERP CR documents can be up to 30 MB (ERP CR sync API); PM screens allow 10 MB.
+    client_max_body_size 31M;
 
     # STAGING: Backend on private IP 172.28.92.57, host port 3010
     location /api/ {

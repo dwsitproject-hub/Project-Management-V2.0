@@ -20,6 +20,8 @@ export const CR_INITIATIVE_MILESTONE_MAP = {
   'cr signed sec 2 and 3': 'Preparation',
   'cr signed sec 2': 'Preparation',
   'cr signed sec 3': 'Preparation',
+  'cr - section 1': 'Preparation',
+  configuration: 'Development',
   'fsd': 'Tech Assessment',
   'development': 'Development',
   'changes': 'Development',
@@ -65,10 +67,12 @@ export const CR_TASK_DEFINITIONS = [
 export const CR_MILESTONE_PHASES = [
   'User Initiate',
   'CR Created',
+  'CR - Section 1', // ERP CRs (ERP CR sync v1.1); ERP adds Section 1 before Section 2
   'CR Signed sec 2',
   'CR Signed Sec 3',
   'FSD',
   'Development',
+  'Configuration', // ERP config CRs: replaces Development and SIT (ERP CR sync v1.1)
   'Changes',
   'Signed Changes',
   'Development - Extended',
