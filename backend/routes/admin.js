@@ -355,7 +355,7 @@ router.post('/api-clients', async (req, res) => {
 
 // Change an existing client: scopes (e.g. add project:read project:write), active
 // (false = its tokens stop working on the next request), name, or rotate the secret.
-const API_CLIENT_SCOPES = ['cr:read', 'cr:write', 'project:read', 'project:write'];
+const API_CLIENT_SCOPES = ['cr:read', 'cr:write', 'project:read', 'project:write', 'cr:sync'];
 
 router.patch('/api-clients/:id', async (req, res) => {
   try {

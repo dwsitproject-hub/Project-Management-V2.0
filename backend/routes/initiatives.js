@@ -1,9 +1,12 @@
 import express from 'express';
 import store from '../store.js';
 import crypto from 'crypto';
-import { sendCRCreationEmail } from '../services/email.js';
+import { queueCrCreationEmail } from '../services/cr-email-queue.js';
+import { resolveDocumentPath } from '../services/uploads.js';
 import { initiativeTriggersCrCreationEmail } from '../services/cr-email-eligibility.js';
 import fs from 'fs/promises';
+import { normalizeExternalIds, findExternalIdConflict } from '../externalIds.js';
+import { ERP_CR_FIELDS, readErpCrFields } from '../erpCrFields.js';
 import {
   CR_TASK_DEFINITIONS,
   getCrAssigneeIdFromBody,
@@ -28,6 +31,24 @@ const uuid = () => crypto.randomUUID();
 
 function requiresCrFullyLiveEndDate(type, status, milestone) {
   return type === 'CR' && crRequiresFullyLiveEndDate(status, milestone);
+}
+
+// Validate body.externalIds (IDs of the matching ERP record) for initiative `selfId`.
+// An external ID may belong to one initiative only. Sends the error response and
+// returns null when invalid; otherwise returns the clean list.
+function readExternalIds(req, res, data, selfId) {
+  const result = normalizeExternalIds(req.body?.externalIds);
+  if (result.error) {
+    res.status(400).json({ error: result.error });
+    return null;
+  }
+  const clash = findExternalIdConflict(data.initiatives, result.ids, selfId);
+  if (clash) {
+    const label = clash.row.ticket ? `${clash.row.ticket} – ${clash.row.name}` : clash.row.name;
+    res.status(409).json({ error: `External ID "${clash.externalId}" is already used by ${clash.row.type} "${label}"` });
+    return null;
+  }
+  return result.ids;
 }
 
 // Generate ticket number for CR in format: CRDDMMYYYYRunningNumber
@@ -158,7 +179,10 @@ router.get('/', async (req, res) => {
     rows = rows.filter(r => 
       (r.name || '').toLowerCase().includes(qLower) ||
       (r.description || '').toLowerCase().includes(qLower) ||
-      (r.ticket || '').toLowerCase().includes(qLower)
+      (r.ticket || '').toLowerCase().includes(qLower) ||
+      (r.externalIds || []).some((x) => String(x).toLowerCase().includes(qLower)) ||
+      (r.tCode || '').toLowerCase().includes(qLower) ||
+      (r.crReference || '').toLowerCase().includes(qLower)
     );
   }
   if (type) rows = rows.filter(r => r.type === type);
@@ -323,7 +347,11 @@ router.post('/', async (req, res) => {
     type,name,ticket,description,businessImpact,priority,businessOwnerId,businessUserIds,departmentId,itPicId,itPicIds,itPmId,itManagerIds,systemImpactedIds,status,milestone,startDate,endDate,planStartDate,planEndDate,remark,documentationLink
   } = req.body;
   const data = await store.read();
-  
+  const externalIds = readExternalIds(req, res, data, null);
+  if (!externalIds) return;
+  const erpCr = readErpCrFields(req.body, data);
+  if (erpCr.error) return res.status(400).json({ error: erpCr.error });
+
   // Convert arrays to comma-separated strings for storage
   const businessUserIdsStr = Array.isArray(businessUserIds) ? businessUserIds.join(',') : (businessUserIds || null);
   const itPicIdsStr = Array.isArray(itPicIds) ? itPicIds.join(',') : (itPicIds || null);
@@ -353,8 +381,11 @@ router.post('/', async (req, res) => {
     systemImpactedIds: systemImpactedIdsStr,
     status,milestone: finalMilestone,
     crMilestonePhase: null,
-    startDate,endDate: endDate||null,planStartDate: planStartDate||null,planEndDate: planEndDate||null,remark: remark||null,documentationLink: documentationLink||null, 
-    createdAt, updatedAt 
+    startDate,endDate: endDate||null,planStartDate: planStartDate||null,planEndDate: planEndDate||null,remark: remark||null,documentationLink: documentationLink||null,
+    externalIds,
+    erpModuleId: null, tCode: null, functionalDepartment: null, crReference: null,
+    ...erpCr.values,
+    createdAt, updatedAt
   });
   if (type === 'CR') {
     const cr = req.body.cr || {};
@@ -411,71 +442,25 @@ router.post('/', async (req, res) => {
   
   await store.write(data);
 
-  // Send email notification for new CR creation only when System Impacted includes SAP FICO or SAP NON FICO
-  // Note: Email will be sent when documents are uploaded (if within 10 minutes)
-  // If no documents are uploaded within 10 minutes, email will be sent via delayed check
+  // CR creation email (only when System Impacted includes SAP FICO or SAP NON FICO). It is
+  // queued, not sent here: documents are uploaded right after creation and must be
+  // attached, so it goes out ~15 s after the last upload, or after 10 minutes if none
+  // come (services/cr-email-queue.js — works across several backend nodes).
   if (type === 'CR') {
     const createdInitiative = data.initiatives.find((i) => i.id === id);
-    const emailEligible =
-      createdInitiative && initiativeTriggersCrCreationEmail(data, createdInitiative);
-
-    if (emailEligible) {
-      console.log(`[CR CREATION] New CR created (SAP email eligible): ${name} (ID: ${id})`);
-      const emailFlag = `cr_email_pending_${id}`;
-      global[emailFlag] = {
-        initiativeId: id,
-        createdAt: new Date(),
-        sent: false,
-      };
-
-      setTimeout(async () => {
-        try {
-          const flag = global[emailFlag];
-          if (flag && !flag.sent) {
-            console.log(
-              `[CR CREATION] No documents uploaded within 10 minutes, sending email without documents...`
-            );
-            const currentData = await store.read();
-            const initiative = currentData.initiatives.find((i) => i.id === id);
-            if (
-              initiative &&
-              initiative.type === 'CR' &&
-              initiativeTriggersCrCreationEmail(currentData, initiative)
-            ) {
-              const userLookups = currentData.users.map((u) => ({
-                id: u.id,
-                name: u.name,
-                email: u.email || null,
-              }));
-
-              const documents = (currentData.documents || []).filter((d) => d.initiativeId === id);
-
-              const crData = {
-                name: initiative.name,
-                description: initiative.description,
-                businessImpact: initiative.businessImpact,
-                priority: initiative.priority,
-                businessOwnerId: initiative.businessOwnerId,
-                businessUserIds: initiative.businessUserIds,
-                itPicId: initiative.itPicId,
-                itPicIds: initiative.itPicIds,
-                itManagerIds: initiative.itManagerIds,
-              };
-
-              await sendCRCreationEmail(crData, userLookups, documents);
-              flag.sent = true;
-            }
-            delete global[emailFlag];
-          }
-        } catch (error) {
-          console.error('[EMAIL ERROR] Error sending delayed CR creation email:', error);
-        }
-      }, 10 * 60 * 1000); // 10 minutes
+    if (createdInitiative && initiativeTriggersCrCreationEmail(data, createdInitiative)) {
+      try {
+        await queueCrCreationEmail(id);
+        console.log(`[CR CREATION] New CR created (SAP email queued): ${name} (ID: ${id})`);
+      } catch (e) {
+        // The CR is saved; don't fail the request because the email couldn't be queued.
+        console.error(`[CR CREATION] Could not queue the creation email for ${id}:`, e.message);
+      }
     } else {
       console.log(`[CR CREATION] New CR created (no SAP FICO / SAP NON FICO email): ${name} (ID: ${id})`);
     }
   }
-  
+
   res.status(201).json({ id });
 });
 
@@ -488,7 +473,16 @@ router.put('/:id', async (req, res) => {
   const initiative = data.initiatives[idx];
   const changes = [];
   const updatedAt = now();
-  const allowed = ['name','ticket','description','businessImpact','priority','businessOwnerId','businessUserIds','departmentId','itPicId','itPicIds','itPmId','itManagerIds','systemImpactedIds','status','milestone','startDate','endDate','planStartDate','planEndDate','remark','documentationLink'];
+  // externalIds is optional: leaving it out keeps the stored list (the edit form doesn't send it yet).
+  if ('externalIds' in req.body) {
+    const externalIds = readExternalIds(req, res, data, initiative.id);
+    if (!externalIds) return;
+    req.body.externalIds = externalIds;
+  }
+  const erpCr = readErpCrFields(req.body, data);
+  if (erpCr.error) return res.status(400).json({ error: erpCr.error });
+  Object.assign(req.body, erpCr.values); // trimmed; empty -> null
+  const allowed = ['name','ticket','description','businessImpact','priority','businessOwnerId','businessUserIds','departmentId','itPicId','itPicIds','itPmId','itManagerIds','systemImpactedIds','status','milestone','startDate','endDate','planStartDate','planEndDate','remark','documentationLink','externalIds', ...ERP_CR_FIELDS];
   
   // Track changes and update fields
   for (const k of allowed) {
@@ -504,7 +498,7 @@ router.put('/:id', async (req, res) => {
       }
       
       // Convert arrays to comma-separated strings for storage
-      if ((k === 'businessUserIds' || k === 'itPicIds' || k === 'itManagerIds' || k === 'systemImpactedIds') && Array.isArray(newValue)) {
+      if ((k === 'businessUserIds' || k === 'itPicIds' || k === 'itManagerIds' || k === 'systemImpactedIds' || k === 'externalIds') && Array.isArray(newValue)) {
         newValue = newValue.length > 0 ? newValue.join(',') : null;
       }
       
@@ -515,7 +509,7 @@ router.put('/:id', async (req, res) => {
       
       // Normalize values for comparison (handle null, undefined, empty string)
       // For array fields (comma-separated strings), normalize by sorting and trimming
-      const isArrayField = k === 'businessUserIds' || k === 'itPicIds' || k === 'itManagerIds' || k === 'systemImpactedIds';
+      const isArrayField = k === 'businessUserIds' || k === 'itPicIds' || k === 'itManagerIds' || k === 'systemImpactedIds' || k === 'externalIds';
       
       let oldVal, newVal;
       if (isArrayField) {
@@ -560,7 +554,9 @@ router.put('/:id', async (req, res) => {
         console.log(`[Change Tracking] Detected change for ${k}: "${oldVal}" -> "${newVal}"`);
         changes.push({
           field: k,
-          oldValue: initiative[k] || null,
+          // Multi-value fields come from store.read() as arrays; log them as the same
+          // comma-separated text as newValue (an array would be saved as '{"a","b"}').
+          oldValue: (Array.isArray(initiative[k]) ? initiative[k].join(',') : initiative[k]) || null,
           newValue: newValue || null,
           changedAt: updatedAt,
           changedBy: req.body.changedBy || 'Unknown'
@@ -714,7 +710,10 @@ router.delete('/:id', async (req, res) => {
     await store.write(data);
 
     // Files only after the records are gone (a failed write leaves everything intact).
-    await Promise.all(documents.filter((d) => d.filePath).map((d) => fs.unlink(d.filePath).catch(() => {})));
+    await Promise.all(documents.filter((d) => d.filePath).map(async (d) => {
+      const filePath = await resolveDocumentPath(d.filePath);
+      if (filePath) await fs.unlink(filePath).catch(() => {});
+    }));
 
     const summary = Object.entries(removed).filter(([, n]) => n).map(([t, n]) => `${t}=${n}`).join(', ') || 'no related records';
     console.log(`[DELETE] ${initiative.type} "${initiative.name}" (${id}) by ${req.user.email || req.user.id}: ${summary}`);

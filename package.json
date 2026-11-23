@@ -14,8 +14,6 @@
     "migrate": "node backend/migrate.js",
     "migrate:cr-milestones": "node backend/migrate_cr_milestones_tasks.js",
     "import:xlsx": "node backend/import_excel.js \"docs/Project & CR Portfolio.xlsx\"",
-    "sync:sheet": "node backend/sync_google_sheets.js",
-    "sync:cr": "node backend/sync_google_sheets_cr.js",
     "test": "node tests/test-suite.js",
     "docker:build": "docker-compose build",
     "docker:up": "docker-compose up -d",

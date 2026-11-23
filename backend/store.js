@@ -7,18 +7,46 @@ const databaseUrl =
   'postgres://postgres:postgres123@localhost:5544/project_management_v2';
 
 const pool = new Pool({ connectionString: databaseUrl });
-let initialized = false;
 
-async function initializeSchema() {
-  if (initialized) return;
-  initialized = true;
+/** Comma-separated TEXT column -> trimmed, non-empty array ([] when NULL). */
+function splitIds(raw) {
+  if (raw == null || raw === '') return [];
+  return String(raw).split(',').map((v) => v.trim()).filter(Boolean);
+}
+/** JSON TEXT column -> object (null when empty or unreadable). */
+function parseJson(raw) {
+  if (raw == null || raw === '') return null;
+  if (typeof raw === 'object') return raw;
+  try { return JSON.parse(raw); } catch { return null; }
+}
+let schemaReady = null; // promise of the one-time schema set-up in this process
+
+// Lock id for the schema set-up, so two nodes starting together don't run the DDL at
+// the same time (concurrent CREATE / ALTER ... IF NOT EXISTS can fail or deadlock).
+const SCHEMA_LOCK_ID = 727274001;
+
+/** Creates / upgrades the tables once per process; retried on the next call if it failed. */
+function initializeSchema() {
+  if (!schemaReady) {
+    schemaReady = runSchemaSetup().catch((e) => {
+      schemaReady = null;
+      throw e;
+    });
+  }
+  return schemaReady;
+}
+
+async function runSchemaSetup() {
   const client = await pool.connect();
   try {
+    await client.query('SELECT pg_advisory_lock($1)', [SCHEMA_LOCK_ID]);
     const ddl = `
       CREATE TABLE IF NOT EXISTS "departments" (
         "id" TEXT PRIMARY KEY,
         "name" TEXT NOT NULL
       );
+      -- ERP requester-department codes that map to this department (e.g. "AP1"), comma-separated.
+      ALTER TABLE "departments" ADD COLUMN IF NOT EXISTS "externalIds" TEXT;
       CREATE TABLE IF NOT EXISTS "users" (
         "id" TEXT PRIMARY KEY,
         "name" TEXT NOT NULL,
@@ -100,6 +128,22 @@ async function initializeSchema() {
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "documentationLink" TEXT;
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "createdAt" TEXT;
       ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "updatedAt" TEXT;
+      -- Identifiers of the matching record(s) in an external system (e.g. ERP CR Ticket
+      -- Number), comma-separated like the other *Ids columns.
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "externalIds" TEXT;
+      -- CR fields from the ERP CR system (ERP change_requests columns of the same meaning).
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "erpModuleId" TEXT;          -- ERP module_id -> "erpModules"."id"
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "tCode" TEXT;                -- ERP t_code (free text)
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "functionalDepartment" TEXT; -- ERP functional_department (department name)
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "crReference" TEXT;          -- ERP cr_reference (ticket number); has_reference = filled in
+      -- ERP CR sync (routes/erp-integration.js): which system feeds this CR, when it was
+      -- last applied (ERP occurredAt), ERP-only details as JSON, Ownership / Impact Area codes.
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "externalSource" TEXT;
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "externalSyncedAt" TEXT;
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "externalData" TEXT;
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "ownershipCode" TEXT;        -- "erpOptions" kind=ownership
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "impactAreaCode" TEXT;       -- "erpOptions" kind=impactArea (comma-separated: ERP may send several)
+      ALTER TABLE "initiatives" ADD COLUMN IF NOT EXISTS "erpProgress" DOUBLE PRECISION; -- ERP CR progress 0-100 (sum of completed segment weights)
       CREATE TABLE IF NOT EXISTS "changeRequests" (
         "initiativeId" TEXT PRIMARY KEY,
         "crSubmissionStart" TEXT,
@@ -330,6 +374,9 @@ async function initializeSchema() {
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "deploymentSteps" TEXT;
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "createdAt" TEXT;
       ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "updatedAt" TEXT;
+      -- External system codes that map to this application (e.g. ERP SAP module codes
+      -- "FI,CO" for SAP FICO), comma-separated.
+      ALTER TABLE "dwsApplications" ADD COLUMN IF NOT EXISTS "externalIds" TEXT;
 
       CREATE TABLE IF NOT EXISTS "managementDashboard" (
         "id" TEXT PRIMARY KEY,
@@ -458,45 +505,136 @@ async function initializeSchema() {
       ALTER TABLE "meetingNoteHistory" ADD COLUMN IF NOT EXISTS "newValue" TEXT;
       ALTER TABLE "meetingNoteHistory" ADD COLUMN IF NOT EXISTS "changedBy" TEXT;
       ALTER TABLE "meetingNoteHistory" ADD COLUMN IF NOT EXISTS "changedAt" TEXT;
+
+      -- ERP CR system's module master (ERP "modules"), kept as a reference copy. "id" is
+      -- ERP's modules.id: the value ERP sends on a CR and the External ID that
+      -- dwsApplications.externalIds holds to map a module to a System Impacted.
+      -- Deliberately no foreign keys (ERP cascades deletes to its CRs; PM must not), and
+      -- "erpDepartmentId" is ERP's departments.id, kept for reference only.
+      CREATE TABLE IF NOT EXISTS "erpModules" (
+        "id" TEXT PRIMARY KEY,
+        "name" TEXT NOT NULL,
+        "description" TEXT,
+        "erpDepartmentId" TEXT,
+        "isActive" BOOLEAN DEFAULT TRUE,
+        "createdAt" TEXT,
+        "updatedAt" TEXT
+      );
+      ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "name" TEXT;
+      ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "description" TEXT;
+      ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "erpDepartmentId" TEXT;
+      ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "isActive" BOOLEAN DEFAULT TRUE;
+      ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "createdAt" TEXT;
+      ALTER TABLE "erpModules" ADD COLUMN IF NOT EXISTS "updatedAt" TEXT;
+
+      -- Value lists that exist only in ERP and are captured from the CRs ERP sends:
+      -- kind = 'ownership' | 'impactArea'. "id" = kind + ':' + code.
+      CREATE TABLE IF NOT EXISTS "erpOptions" (
+        "id" TEXT PRIMARY KEY,
+        "kind" TEXT NOT NULL,
+        "code" TEXT NOT NULL,
+        "name" TEXT,
+        "updatedAt" TEXT
+      );
+
+      -- Bumped by every write() that changes something. Each node compares it with the
+      -- version its cache was loaded at, so a save on one node is seen on all of them.
+      CREATE TABLE IF NOT EXISTS "storeMeta" (
+        "id" TEXT PRIMARY KEY,
+        "version" BIGINT NOT NULL DEFAULT 0
+      );
+      INSERT INTO "storeMeta"("id", "version") VALUES ('store', 0) ON CONFLICT ("id") DO NOTHING;
+
+      -- CR creation emails waiting to be sent (services/cr-email-queue.js). Not part of
+      -- read()/write(): only the queue touches it.
+      CREATE TABLE IF NOT EXISTS "crEmailQueue" (
+        "initiativeId" TEXT PRIMARY KEY,
+        "status" TEXT NOT NULL DEFAULT 'pending',
+        "dueAt" TIMESTAMPTZ NOT NULL,
+        "attempts" INTEGER NOT NULL DEFAULT 0,
+        "claimedAt" TIMESTAMPTZ,
+        "sentAt" TIMESTAMPTZ,
+        "lastError" TEXT,
+        "createdAt" TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS "crEmailQueue_due" ON "crEmailQueue" ("status", "dueAt");
     `;
     await client.query(ddl);
   } finally {
+    await client.query('SELECT pg_advisory_unlock($1)', [SCHEMA_LOCK_ID]).catch(() => {});
     client.release();
   }
 }
 
 // ---- Read cache --------------------------------------------------------------
 // Every request reads the whole store (the auth middleware AND the route each call
-// read()). Against a remote DB (ApsaraDB RDS) one read is ~21 sequential round-trips
-// plus ~1.4 MB over the wire. We cache the last read and drop it on every write(),
-// so reads in this process are never staler than the last write. The short TTL only
-// bounds staleness from writers OUTSIDE this process (e.g. `node backend/seed_admin.js`
-// run via docker exec). store.write() only writes the rows a request changed, so a
-// stale snapshot can't overwrite such an external change; it just shows up later.
-// Set STORE_READ_CACHE_TTL_MS=0 to disable.
+// read()). Against a remote DB (ApsaraDB RDS) a full read is ~23 queries plus ~1.4 MB
+// over the wire, so each process keeps the last read in memory.
+//
+// Several backend nodes (HA) each have their own cache, so before answering from it we
+// compare the "storeMeta" version (one tiny query; write() bumps it in the same
+// transaction) with the version the cache was loaded at. A save on any node is
+// therefore seen by the very next request on every node. A write in this process also
+// drops its own cache straight away.
+//
+// The TTL only matters for changes that bypass write() (SQL typed by hand): an expired
+// cache is still answered from, and refreshed in the background.
+// Set STORE_READ_CACHE_TTL_MS=0 to disable the cache.
 const READ_CACHE_TTL_MS = Number(process.env.STORE_READ_CACHE_TTL_MS ?? 30000);
-let readCache = null; // { data, at }
+let readCache = null; // { data, version, at }
 let cacheGeneration = 0; // bumped on invalidate so an in-flight read can't cache stale data
 let inflightRead = null; // coalesces concurrent cache misses into a single DB read
+let inflightVersion = null; // coalesces concurrent version checks
 
-function loadShared() {
-  if (READ_CACHE_TTL_MS > 0 && readCache) {
-    // Expired: answer from the cache and refresh it in the background. The cache is
-    // dropped on every write in this process, so this is only ever behind writers
-    // outside it, and by at most one refresh.
-    if (Date.now() - readCache.at >= READ_CACHE_TTL_MS) startDbRead().catch((e) => console.error('[STORE] Background refresh failed:', e.message));
-    return Promise.resolve(readCache.data);
+/** The current store version in the DB (concurrent callers share one query). */
+function currentVersion() {
+  if (!inflightVersion) {
+    const p = (async () => {
+      await initializeSchema();
+      const res = await pool.query('SELECT "version" FROM "storeMeta" WHERE "id" = $1', ['store']);
+      return Number(res.rows[0]?.version ?? 0);
+    })().finally(() => {
+      if (inflightVersion === p) inflightVersion = null;
+    });
+    inflightVersion = p;
   }
-  return startDbRead();
+  return inflightVersion;
 }
 
-function startDbRead() {
-  if (!inflightRead) {
+async function loadShared() {
+  if (READ_CACHE_TTL_MS <= 0) return (await readFromDb()).data;
+  const cached = readCache;
+  if (!cached) return (await startDbRead()).data;
+
+  let version;
+  try {
+    version = await currentVersion();
+  } catch (e) {
+    // DB unreachable: keep answering reads from memory (writes will fail anyway).
+    console.error('[STORE] Version check failed, serving cached data:', e.message);
+    return cached.data;
+  }
+  if (version === cached.version) {
+    if (Date.now() - cached.at >= READ_CACHE_TTL_MS) {
+      startDbRead().catch((e) => console.error('[STORE] Background refresh failed:', e.message));
+    }
+    return cached.data;
+  }
+  // Another node (or a script) saved since this cache was loaded: reload. A read that
+  // was already running may have started before that save, so check what it got.
+  let entry = await startDbRead();
+  if (entry.version < version) entry = await startDbRead({ fresh: true });
+  return entry.data;
+}
+
+function startDbRead({ fresh = false } = {}) {
+  if (!inflightRead || fresh) {
     const gen = cacheGeneration;
     const p = readFromDb()
-      .then((data) => {
-        if (gen === cacheGeneration && READ_CACHE_TTL_MS > 0) readCache = { data, at: Date.now() };
-        return data;
+      .then((entry) => {
+        const newer = !readCache || entry.version >= readCache.version;
+        if (gen === cacheGeneration && READ_CACHE_TTL_MS > 0 && newer) readCache = entry;
+        return entry;
       })
       .finally(() => {
         if (inflightRead === p) inflightRead = null;
@@ -556,6 +694,10 @@ async function readShared() {
 
 async function readFromDb() {
   await initializeSchema();
+  // Read the version BEFORE the tables: the data is then at least that new, so a save
+  // landing mid-read only causes one extra reload later, never a stale cache.
+  const versionRes = await pool.query('SELECT "version" FROM "storeMeta" WHERE "id" = $1', ['store']);
+  const version = Number(versionRes.rows[0]?.version ?? 0);
   const data = {};
   const tables = [
     'departments',
@@ -579,6 +721,8 @@ async function readFromDb() {
     'meetingNoteActionItems',
     'meetingNoteEmailLog',
     'meetingNoteHistory',
+    'erpModules',
+    'erpOptions',
   ];
   // Query all tables at once (each on its own pooled connection): against a remote DB
   // the ~23 sequential round-trips were most of a cold read.
@@ -636,6 +780,17 @@ async function readFromDb() {
         planEndDate: row.planEndDate || row.planenddate || null,
         remark: row.remark || null,
         documentationLink: row.documentationLink || row.documentationlink || null,
+        externalIds: splitIds(row.externalIds ?? row.externalids),
+        erpModuleId: row.erpModuleId || row.erpmoduleid || null,
+        tCode: row.tCode || row.tcode || null,
+        functionalDepartment: row.functionalDepartment || row.functionaldepartment || null,
+        crReference: row.crReference || row.crreference || null,
+        externalSource: row.externalSource || row.externalsource || null,
+        externalSyncedAt: row.externalSyncedAt || row.externalsyncedat || null,
+        externalData: parseJson(row.externalData ?? row.externaldata),
+        ownershipCode: row.ownershipCode || row.ownershipcode || null,
+        impactAreaCode: row.impactAreaCode || row.impactareacode || null,
+        erpProgress: (row.erpProgress ?? row.erpprogress) == null ? null : Number(row.erpProgress ?? row.erpprogress),
         createdAt: row.createdAt || row.createdat || null,
         updatedAt: row.updatedAt || row.updatedat || null
       }));
@@ -679,6 +834,7 @@ async function readFromDb() {
         stagingUrl: row.stagingUrl || row.stagingurl || null,
         githubUrl: row.githubUrl || row.githuburl || null,
         deploymentSteps: row.deploymentSteps || row.deploymentsteps || null,
+        externalIds: splitIds(row.externalIds ?? row.externalids),
         createdAt: row.createdAt || row.createdat,
         updatedAt: row.updatedAt || row.updatedat,
       }));
@@ -749,6 +905,27 @@ async function readFromDb() {
         providerMessageId: row.providerMessageId || row.providermessageid || null,
         errorMessage: row.errorMessage || row.errormessage || null,
       }));
+    } else if (table === 'departments') {
+      data[table] = res.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        externalIds: splitIds(row.externalIds ?? row.externalids),
+      }));
+    } else if (table === 'erpOptions') {
+      data[table] = res.rows.map((row) => ({
+        id: row.id, kind: row.kind, code: row.code, name: row.name || null,
+        updatedAt: row.updatedAt || row.updatedat || null,
+      }));
+    } else if (table === 'erpModules') {
+      data[table] = res.rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        description: row.description || null,
+        erpDepartmentId: row.erpDepartmentId || row.erpdepartmentid || null,
+        isActive: row.isActive ?? row.isactive ?? true,
+        createdAt: row.createdAt || row.createdat || null,
+        updatedAt: row.updatedAt || row.updatedat || null,
+      }));
     } else if (table === 'meetingNoteHistory') {
       data[table] = res.rows.map(row => ({
         id: row.id,
@@ -790,7 +967,7 @@ async function readFromDb() {
     // Filter out entries without initiativeId to avoid breaking lookups
     .filter((h) => !!h.initiativeId);
 
-  return data;
+  return { data, version, at: Date.now() };
 }
 
 /** Serialize writes (one transaction at a time) to avoid races (502 / duplicate key). */
@@ -818,7 +995,7 @@ async function write(data) {
 // `data[source]` into one parameter array per row (same coercions as before).
 const arr = (v) => (Array.isArray(v) ? v.join(',') : (v || null));
 const TABLE_SPECS = [
-  { table: 'departments', cols: ['id', 'name'], row: (d) => [d.id, d.name] },
+  { table: 'departments', cols: ['id', 'name', 'externalIds'], row: (d) => [d.id, d.name, arr(d.externalIds)] },
   {
     table: 'users',
     cols: ['id', 'name', 'email', 'role', 'type', 'departmentId', 'active', 'passwordHash', 'isAdmin', 'emailActivated', 'activationToken', 'activationTokenExpiry', 'resetToken', 'resetTokenExpiry', 'teamMemberIds', 'hubUserId'],
@@ -832,7 +1009,7 @@ const TABLE_SPECS = [
   },
   {
     table: 'initiatives',
-    cols: ['id', 'type', 'name', 'ticket', 'description', 'businessImpact', 'priority', 'businessOwnerId', 'businessUserIds', 'departmentId', 'itPicId', 'itPicIds', 'itPmId', 'itManagerIds', 'systemImpactedIds', 'status', 'milestone', 'crMilestonePhase', 'startDate', 'endDate', 'planStartDate', 'planEndDate', 'remark', 'documentationLink', 'createdAt', 'updatedAt'],
+    cols: ['id', 'type', 'name', 'ticket', 'description', 'businessImpact', 'priority', 'businessOwnerId', 'businessUserIds', 'departmentId', 'itPicId', 'itPicIds', 'itPmId', 'itManagerIds', 'systemImpactedIds', 'status', 'milestone', 'crMilestonePhase', 'startDate', 'endDate', 'planStartDate', 'planEndDate', 'remark', 'documentationLink', 'externalIds', 'erpModuleId', 'tCode', 'functionalDepartment', 'crReference', 'externalSource', 'externalSyncedAt', 'externalData', 'ownershipCode', 'impactAreaCode', 'erpProgress', 'createdAt', 'updatedAt'],
     row: (i) => [
       i.id, i.type, i.name, i.ticket || null, i.description || null, i.businessImpact || null, i.priority || null,
       i.businessOwnerId || null, arr(i.businessUserIds), i.departmentId || null,
@@ -840,6 +1017,10 @@ const TABLE_SPECS = [
       arr(i.itPicIds), i.itPmId || null, arr(i.itManagerIds), arr(i.systemImpactedIds),
       i.status || null, i.milestone || null, i.crMilestonePhase || null, i.startDate || null, i.endDate || null,
       i.planStartDate || null, i.planEndDate || null, i.remark || null, i.documentationLink || null,
+      arr(i.externalIds), i.erpModuleId || null, i.tCode || null, i.functionalDepartment || null, i.crReference || null,
+      i.externalSource || null, i.externalSyncedAt || null, i.externalData ? JSON.stringify(i.externalData) : null,
+      i.ownershipCode || null, i.impactAreaCode || null,
+      i.erpProgress == null || i.erpProgress === '' ? null : Number(i.erpProgress),
       i.createdAt || null, i.updatedAt || null,
     ],
   },
@@ -886,8 +1067,8 @@ const TABLE_SPECS = [
   },
   {
     table: 'dwsApplications',
-    cols: ['id', 'systemName', 'productionUrl', 'stagingUrl', 'githubUrl', 'deploymentSteps', 'createdAt', 'updatedAt'],
-    row: (a) => [a.id, a.systemName, a.productionUrl || null, a.stagingUrl || null, a.githubUrl || null, a.deploymentSteps || null, a.createdAt, a.updatedAt],
+    cols: ['id', 'systemName', 'productionUrl', 'stagingUrl', 'githubUrl', 'deploymentSteps', 'externalIds', 'createdAt', 'updatedAt'],
+    row: (a) => [a.id, a.systemName, a.productionUrl || null, a.stagingUrl || null, a.githubUrl || null, a.deploymentSteps || null, arr(a.externalIds), a.createdAt, a.updatedAt],
   },
   {
     table: 'accessRules',
@@ -930,6 +1111,16 @@ const TABLE_SPECS = [
     table: 'meetingNoteHistory',
     cols: ['id', 'meetingNoteId', 'version', 'field', 'oldValue', 'newValue', 'changedBy', 'changedAt'],
     row: (h) => [h.id, h.meetingNoteId, h.version || 1, h.field, h.oldValue || null, h.newValue || null, h.changedBy || 'Unknown', h.changedAt],
+  },
+  {
+    table: 'erpModules',
+    cols: ['id', 'name', 'description', 'erpDepartmentId', 'isActive', 'createdAt', 'updatedAt'],
+    row: (m) => [m.id, m.name, m.description || null, m.erpDepartmentId || null, m.isActive !== false, m.createdAt || null, m.updatedAt || null],
+  },
+  {
+    table: 'erpOptions',
+    cols: ['id', 'kind', 'code', 'name', 'updatedAt'],
+    row: (o) => [o.id, o.kind, o.code, o.name || null, o.updatedAt || null],
   },
 ];
 const CHANGE_ITEM_COLS = ['id', 'changeHistoryId', 'field', 'oldValue', 'newValue', 'changedAt'];
@@ -1014,6 +1205,9 @@ async function writeImpl(data) {
   let written = 0;
   try {
     await client.query('BEGIN');
+    // Take the version row's lock first: saves from several nodes then run one at a
+    // time (like the in-process writeQueue), so they can't deadlock on each other's rows.
+    await client.query('SELECT "version" FROM "storeMeta" WHERE "id" = $1 FOR UPDATE', ['store']);
     for (const spec of TABLE_SPECS) {
       const key = spec.key || 'id';
       if (origin && isUntouched(data, spec.table)) continue;
@@ -1050,6 +1244,10 @@ async function writeImpl(data) {
       if (spec.children) await upsertRows(client, 'changeHistoryItem', CHANGE_ITEM_COLS, 'id', uniqueChildRows(changed));
       written += changed.length + removed.length;
     }
+    // Tell every node's cache that the data changed (only when something did).
+    if (written > 0 || !origin) {
+      await client.query('UPDATE "storeMeta" SET "version" = "version" + 1 WHERE "id" = $1', ['store']);
+    }
     await client.query('COMMIT');
     console.log(`[STORE] Write completed (${origin ? 'changes only' : 'full'}) - ${written} rows in ${Date.now() - started}ms`);
   } catch (e) {
@@ -1071,5 +1269,5 @@ function originRows(origin, spec) {
   return perTable.get(spec.table);
 }
 
-export default { read, readShared, write, invalidateReadCache, pool, databaseUrl };
+export default { read, readShared, write, invalidateReadCache, ensureSchema: initializeSchema, pool, databaseUrl };
 
