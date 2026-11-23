@@ -29,7 +29,7 @@ import {
 const router = express.Router();
 const uuid = () => crypto.randomUUID();
 const SOURCE = 'ERP';
-const CHANGED_BY = 'ERP Integration';
+const CHANGED_BY = 'CRS Integration'; // shown as the author of history entries (was 'ERP Integration' until 23 Nov 2026)
 const MAX_BATCH = 200;
 const MAX_TEXT = 255; // ERP VARCHAR(255) columns
 const MAX_RICH_TEXT = 20000; // ERP limits Change Request to 5,000 visible characters; HTML adds markup
@@ -687,7 +687,7 @@ function syncTasksFromStages(data, initiative, segments, now, warnings) {
       status,
       startDate: anyStarted ? (starts[0] || null) : null,
       endDate: allDone ? (ends[ends.length - 1] || null) : null,
-      description: `From ERP: ${detail}`,
+      description: `From CRS: ${detail}`,
     });
   }
 

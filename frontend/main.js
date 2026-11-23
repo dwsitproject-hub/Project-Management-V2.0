@@ -2427,6 +2427,18 @@ async function ensureLookups() {
   return lookupsLoading;
 }
 
+// Change-history entries written by the CR System sync before it was renamed CRS
+// (16–23 Nov 2026) are stored as "ERP Integration"; show them with today's name.
+// CR tasks fed by the CRS sync before 23 Nov 2026 have descriptions starting "From ERP: ";
+// the sync rewrites them on the CR's next message. Show today's name meanwhile.
+function taskDescriptionText(d) {
+  return String(d ?? '').replace(/^From ERP: /, 'From CRS: ');
+}
+
+function syncAuthorLabel(v) {
+  return v === 'ERP Integration' ? 'CRS Integration' : v;
+}
+
 function nameById(arr, id) {
   const m = arr.find(x => x.id === id);
   return m ? m.name : id || '';
@@ -2517,9 +2529,9 @@ function formatActivityFieldLabelGlobal(field) {
     planStartDate: 'Plan Start Date',
     planEndDate: 'Plan End Date',
     documentationLink: 'Project Doc Link',
-    externalIds: 'ERP CR ID',
-    erpProgress: 'ERP Progress',
-    erpModuleId: 'ERP Module',
+    externalIds: 'CRS ID',
+    erpProgress: 'CRS Progress',
+    erpModuleId: 'CRS Module',
     tCode: 'T-Code',
     functionalDepartment: 'Functional Department',
     crReference: 'CR Reference',
@@ -2532,7 +2544,7 @@ function formatActivityValueGlobal(field, raw) {
   if (raw === null || raw === undefined || raw === '') return '(empty)';
     if (field === 'erpModuleId') return erpModuleLabel(String(raw));
   if (field === 'businessOwnerId' || field === 'itPicId' || field === 'itPmId' || field === 'changedBy') {
-    const name = nameById(LOOKUPS.users, raw);
+    const name = nameById(LOOKUPS.users, syncAuthorLabel(raw));
     return name || String(raw);
   }
   if (field === 'departmentId') {
@@ -3491,9 +3503,9 @@ async function renderList() {
       planStartDate: 'Plan Start Date',
       planEndDate: 'Plan End Date',
       documentationLink: 'Project Doc Link',
-      externalIds: 'ERP CR ID',
-    erpProgress: 'ERP Progress',
-      erpModuleId: 'ERP Module',
+      externalIds: 'CRS ID',
+    erpProgress: 'CRS Progress',
+      erpModuleId: 'CRS Module',
       tCode: 'T-Code',
       functionalDepartment: 'Functional Department',
       crReference: 'CR Reference'
@@ -3509,7 +3521,7 @@ async function renderList() {
 
     // For user single-value fields
     if (field === 'businessOwnerId' || field === 'itPicId' || field === 'itPmId' || field === 'changedBy') {
-      const name = nameById(LOOKUPS.users, raw);
+      const name = nameById(LOOKUPS.users, syncAuthorLabel(raw));
       return name || raw;
     }
 
@@ -4064,7 +4076,7 @@ function erpModuleChips(raw, empty = '') {
   if (!ids.length) return empty;
   return ids.map((id) => {
     const m = erpModuleById(id);
-    return `<span class="chip ext-id" title="${escapeHtml(id)}">${escapeHtml(m ? m.name : id)}${m ? '' : ' <span class="tag-muted">not in ERP modules</span>'}</span>`;
+    return `<span class="chip ext-id" title="${escapeHtml(id)}">${escapeHtml(m ? m.name : id)}${m ? '' : ' <span class="tag-muted">not in CRS modules</span>'}</span>`;
   }).join(' ');
 }
 
@@ -4078,7 +4090,7 @@ function erpModulesMultiSelect(selectedRaw) {
   const opts = (LOOKUPS.erpModules || [])
     .filter((m) => m.isActive !== false || selected.includes(m.id))
     .map((m) => ({ id: m.id, name: `${m.name}${m.isActive === false ? ' (inactive)' : ''}` }));
-  for (const id of selected) if (!opts.some((o) => o.id === id)) opts.push({ id, name: `${id} (not in ERP modules)` });
+  for (const id of selected) if (!opts.some((o) => o.id === id)) opts.push({ id, name: `${id} (not in CRS modules)` });
   return createMultiSelect('externalIds', opts.map((o) => ({ id: escapeHtml(o.id), name: escapeHtml(o.name) })), selected.map(escapeHtml));
 }
 
@@ -4089,14 +4101,14 @@ function erpModuleSelect(selectedId) {
   return `<select name="erpModuleId">
     <option value="">— None —</option>
     ${mods.map((m) => `<option value="${escapeHtml(m.id)}" ${m.id === selectedId ? 'selected' : ''}>${escapeHtml(erpModuleLabel(m.id))}</option>`).join('')}
-    ${selectedId && !known ? `<option value="${escapeHtml(selectedId)}" selected>${escapeHtml(selectedId)} (not in ERP modules)</option>` : ''}
+    ${selectedId && !known ? `<option value="${escapeHtml(selectedId)}" selected>${escapeHtml(selectedId)} (not in CRS modules)</option>` : ''}
   </select>`;
 }
 
 /** Form rows for the CR fields that come from ERP (CR type only). */
 function erpCrFieldRows(i) {
   return [
-    formRow('ERP Module', erpModuleSelect(i?.erpModuleId || '')),
+    formRow('CRS Module', erpModuleSelect(i?.erpModuleId || '')),
     formRow('T-Code', `<input name="tCode" value="${escapeHtml(i?.tCode || '')}" maxlength="255" placeholder="e.g. ZMM001" autocomplete="off" />`),
     formRow(`Functional Department${i?.externalSource === 'ERP' && i?.functionalDepartment ? externalSourceBadge() : ''}`, `<input name="functionalDepartment" value="${escapeHtml(i?.functionalDepartment || '')}" maxlength="255" autocomplete="off" />`),
     formRow('CR Reference', `<input name="crReference" value="${escapeHtml(i?.crReference || '')}" maxlength="255" placeholder="Ticket number of a related CR" autocomplete="off" />`),
@@ -4111,7 +4123,7 @@ function erpCrFieldsFromForm(obj) {
 
 /** Mark for a value sent by the CR system that is not a record in this system. */
 function externalSourceBadge() {
-  return '<span class="erp-badge" title="Sent by the CR system. Not a user or department in this system.">CR System</span>';
+  return '<span class="erp-badge" title="Sent by CRS, the CR System. Not a user or department in PM.">CRS</span>';
 }
 
 function externalErpValue(i, key) {
@@ -4153,7 +4165,7 @@ function functionalDepartmentHtml(i) {
 function erpProgressBadge(i) {
   if (!i || i.erpProgress == null || i.erpProgress === '') return '';
   const p = Math.round(Number(i.erpProgress));
-  return Number.isFinite(p) ? ` <span class="erp-badge" title="Progress reported by ERP">ERP ${p}%</span>` : '';
+  return Number.isFinite(p) ? ` <span class="erp-badge" title="Progress reported by CRS">CRS ${p}%</span>` : '';
 }
 
 /**
@@ -4169,16 +4181,16 @@ function erpProgressPanel(i) {
   const total = pct(i.erpProgress != null ? i.erpProgress : snap && snap.progress);
   const statusLabel = { completed: 'Done', active: 'In progress', inactive: 'Not started' };
   const cls = (v) => (['completed', 'active', 'inactive'].includes(v) ? v : 'inactive');
-  const link = x.url && /^https?:\/\//i.test(x.url) ? `<a href="${escapeHtml(x.url)}" target="_blank" rel="noopener">View in ERP ↗</a>` : '';
+  const link = x.url && /^https?:\/\//i.test(x.url) ? `<a href="${escapeHtml(x.url)}" target="_blank" rel="noopener">View in CRS ↗</a>` : '';
   const head = `
     <div class="erp-panel-head">
-      <strong>ERP progress</strong>
+      <strong>CRS progress</strong>
       ${total != null ? `<span class="erp-total">${total}%</span>` : ''}
       <span class="muted">${x.segment ? escapeHtml(`${x.segment} / ${x.stage || ''}`) : ''}</span>
       <span class="erp-panel-link">${link}</span>
     </div>`;
   if (!segs.length) {
-    return `<div class="erp-panel" style="grid-column: 1 / -1">${head}<p class="muted">ERP hasn't sent its stage details for this CR yet.</p></div>`;
+    return `<div class="erp-panel" style="grid-column: 1 / -1">${head}<p class="muted">CRS hasn't sent its stage details for this CR yet.</p></div>`;
   }
   const body = segs.map((sg) => {
     const sp = pct(sg.status === 'completed' ? 100 : sg.progress) || 0;
@@ -4202,7 +4214,7 @@ function erpProgressPanel(i) {
     </div>`;
   }).join('');
   return `<div class="erp-panel" style="grid-column: 1 / -1">${head}<div class="erp-segs">${body}</div>
-    <p class="muted erp-note">From ERP${snap.asOf ? `, as of ${escapeHtml(String(snap.asOf).slice(0, 16).replace('T', ' '))} UTC` : ''}. Read-only: ERP updates it.</p></div>`;
+    <p class="muted erp-note">From CRS${snap.asOf ? `, as of ${escapeHtml(String(snap.asOf).slice(0, 16).replace('T', ' '))} UTC` : ''}. Read-only: CRS updates it.</p></div>`;
 }
 
 // Helper function to create searchable single-select dropdown
@@ -4984,9 +4996,9 @@ async function renderView(id) {
       planStartDate: 'Plan Start Date',
       planEndDate: 'Plan End Date',
       documentationLink: 'Project Doc Link',
-      externalIds: 'ERP CR ID',
-    erpProgress: 'ERP Progress',
-      erpModuleId: 'ERP Module',
+      externalIds: 'CRS ID',
+    erpProgress: 'CRS Progress',
+      erpModuleId: 'CRS Module',
       tCode: 'T-Code',
       functionalDepartment: 'Functional Department',
       crReference: 'CR Reference'
@@ -5002,7 +5014,7 @@ async function renderView(id) {
 
     // Single user ID fields
     if (field === 'businessOwnerId' || field === 'itPicId' || field === 'itPmId' || field === 'changedBy') {
-      const name = nameById(LOOKUPS.users, raw);
+      const name = nameById(LOOKUPS.users, syncAuthorLabel(raw));
       return name || String(raw);
     }
 
@@ -5122,9 +5134,9 @@ async function renderView(id) {
           <div><div class="muted">Cycle Time (Age Start to End)</div><div><strong>${cycleTime !== null ? cycleTime + ' days' : 'N/A'}</strong></div></div>
           <div><div class="muted">Total Age</div><div><strong>${totalAge !== null ? totalAge + ' days' : 'N/A'}</strong></div></div>
           ${i.type === 'CR' ? `<div><div class="muted">System Impacted</div><div>${escapeHtml(dwsSystemNamesFromInitiative(i) || '')}</div></div>` : ''}
-          ${i.externalSource === 'ERP' ? `<div><div class="muted">ERP CR ID</div><div class="mono">${escapeHtml((i.externalData && i.externalData.crId) || (i.externalIds || [])[0] || '')}</div></div>` : ''}
+          ${i.externalSource === 'ERP' ? `<div><div class="muted">CRS ID</div><div class="mono">${escapeHtml((i.externalData && i.externalData.crId) || (i.externalIds || [])[0] || '')}</div></div>` : ''}
           ${i.type === 'CR' ? `
-          <div><div class="muted">ERP Module</div><div>${escapeHtml(erpModuleLabel(i.erpModuleId)) || '<span class="muted">—</span>'}</div></div>
+          <div><div class="muted">CRS Module</div><div>${escapeHtml(erpModuleLabel(i.erpModuleId)) || '<span class="muted">—</span>'}</div></div>
           <div><div class="muted">T-Code</div><div>${escapeHtml(i.tCode || '') || '<span class="muted">—</span>'}</div></div>
           <div><div class="muted">Functional Department</div><div>${functionalDepartmentHtml(i) || '<span class="muted">—</span>'}</div></div>
           <div><div class="muted">CR Reference</div><div>${escapeHtml(i.crReference || '') || '<span class="muted">—</span>'}</div></div>` : ''}
@@ -5238,7 +5250,7 @@ async function renderView(id) {
         <div id="tab-content-activity" class="tab-content detail-tab-panel hidden" role="tabpanel" style="max-height: 600px; overflow-y: auto;">
           ${i.changeHistory && i.changeHistory.length > 0 ? `
             ${i.changeHistory.map((history, idx) => {
-              const changedByName = nameById(LOOKUPS.users, history.changedBy) || history.changedBy || 'System';
+              const changedByName = nameById(LOOKUPS.users, syncAuthorLabel(history.changedBy)) || history.changedBy || 'System';
               const timestamp = new Date(history.timestamp);
               const formattedDate = timestamp.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
               const formattedTime = timestamp.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
@@ -5325,7 +5337,7 @@ async function renderView(id) {
               const agingCell = agingDays !== null ? `${agingDays} day${agingDays === 1 ? '' : 's'}` : '—';
               return `
                 <tr>
-                  <td><strong>${t.name}</strong>${t.description ? `<br><small class="muted">${t.description}</small>` : ''}</td>
+                  <td><strong>${t.name}</strong>${t.description ? `<br><small class="muted">${escapeHtml(taskDescriptionText(t.description))}</small>` : ''}</td>
                   <td>${t.milestone || '-'}</td>
                   <td>${assignee}</td>
                   <td><span class="status-badge status-${taskStatus.replace(/\s+/g, '-')}">${taskStatusLabel}</span></td>
@@ -6765,7 +6777,7 @@ async function showTaskModal(initiativeId, taskId = null) {
         </div>
         <div style="margin-bottom: 12px;">
           <label>Description</label>
-          <textarea name="description" rows="3" style="width: 100%;">${task?.description || ''}</textarea>
+          <textarea name="description" rows="3" style="width: 100%;">${escapeHtml(taskDescriptionText(task?.description || ''))}</textarea>
         </div>
         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;">
           <div>
@@ -11425,7 +11437,7 @@ async function renderDepartmentMaster() {
           <span class="muted" id="dm-count" style="margin-left:auto;">${rows.length} departments</span>
         </div>
         <table class="dm-table">
-          <thead><tr><th>Department</th><th title="ERP requester-department codes that map to this department (ERP CR sync)">ERP codes</th><th class="num-col">Projects</th><th class="num-col">CRs</th><th class="num-col">Users</th><th class="dm-actions"><span class="sr-only">Actions</span></th></tr></thead>
+          <thead><tr><th>Department</th><th title="CRS requester-department codes that map to this department (CRS sync)">CRS codes</th><th class="num-col">Projects</th><th class="num-col" title="Change requests">Change requests</th><th class="num-col">Users</th><th class="dm-actions"><span class="sr-only">Actions</span></th></tr></thead>
           <tbody>
             ${rows.map((r) => {
               const used = r.projects + r.crs + r.users;
@@ -11443,7 +11455,7 @@ async function renderDepartmentMaster() {
                 <td class="num-col">${num(r.users)}</td>
                 <td class="dm-actions">
                   <button type="button" class="dm-edit btn-sm" data-id="${escapeHtml(r.id)}">Rename</button>
-                  <button type="button" class="dm-codes btn-sm" data-id="${escapeHtml(r.id)}">ERP codes</button>
+                  <button type="button" class="dm-codes btn-sm" data-id="${escapeHtml(r.id)}">CRS codes</button>
                   <button type="button" class="dm-delete icon-btn icon-btn-sm danger-text" data-id="${escapeHtml(r.id)}" aria-label="Delete ${escapeHtml(r.shownAs)}" title="Delete"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
                 </td>
               </tr>`;
@@ -11504,10 +11516,10 @@ async function renderDepartmentMaster() {
         const r = rows.find((x) => x.id === btn.dataset.id);
         const current = externalIdList(r.externalIds).join(', ');
         const value = await textInputDialog({
-          title: `ERP codes — ${r.shownAs}`,
-          label: 'ERP requester-department codes',
+          title: `CRS codes — ${r.shownAs}`,
+          label: 'CRS requester-department codes',
           value: current,
-          hint: 'Codes ERP sends for this department (e.g. AP1), separated by commas. A code can belong to one department only. Leave empty to remove all.',
+          hint: 'Codes CRS sends for this department (e.g. AP1), separated by commas. A code can belong to one department only. Leave empty to remove all.',
           confirmText: 'Save',
           allowEmpty: true,
           maxLength: 1000,
@@ -11515,7 +11527,7 @@ async function renderDepartmentMaster() {
         if (value == null || value.trim() === current) return;
         try {
           await fetchJSON(`/api/departments/${encodeURIComponent(r.id)}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ externalIds: value }) });
-          notify(`ERP codes saved for ${r.shownAs}`, 'success');
+          notify(`CRS codes saved for ${r.shownAs}`, 'success');
           await load(); draw();
         } catch (e) {
           if (!(e instanceof AuthRedirectError)) notify(e.message, 'error');
@@ -11618,7 +11630,7 @@ async function renderMasterDwsApplications() {
   let selectedId = apps[0]?.id || null;
 
   app.innerHTML = `
-    ${pageHeader('DWS Applications', 'The systems a CR can impact. Pick one to see its links, deployment steps and the CRs that touch it.', '<button type="button" id="btn-erp-modules">ERP modules</button> <button type="button" class="primary" id="btn-add-dws"><svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Add application</button>')}
+    ${pageHeader('DWS Applications', 'The systems a CR can impact. Pick one to see its links, deployment steps and the CRs that touch it.', '<button type="button" id="btn-erp-modules">CRS modules</button> <button type="button" class="primary" id="btn-add-dws"><svg class="btn-ico" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Add application</button>')}
     ${apps.length ? `
     <div class="dws-layout">
       <section class="dws-side">
@@ -11655,7 +11667,7 @@ async function renderMasterDwsApplications() {
           ${formRow('System Staging URL', `<input name="stagingUrl" type="url" value="${escape(existing?.stagingUrl || '')}" placeholder="https://..." />`)}
           ${formRow('Github URL', `<textarea name="githubUrl" rows="3" style="width:100%;resize:vertical;" placeholder="Repository link or description...">${escape(existing?.githubUrl || '')}</textarea>`)}
           ${formRow('Deployment Steps', `<textarea name="deploymentSteps" rows="5" style="width:100%;resize:vertical;" placeholder="Step-by-step deployment instructions for this application...">${escape(existing?.deploymentSteps || '')}</textarea>`)}
-          ${formRow('ERP Modules', `${erpModulesMultiSelect(existing?.externalIds)}<small class="muted ext-hint">ERP modules that map to this application (saved as its External IDs). Each module can belong to one application only.${(LOOKUPS.erpModules || []).length ? '' : ' No ERP modules loaded yet.'}</small>`)}
+          ${formRow('CRS Modules', `${erpModulesMultiSelect(existing?.externalIds)}<small class="muted ext-hint">CRS modules that map to this application (saved as its External IDs). Each module can belong to one application only.${(LOOKUPS.erpModules || []).length ? '' : ' No CRS modules loaded yet.'}</small>`)}
           <div style="display:flex; gap: 12px;">
             <button type="submit" class="primary">${mode === 'create' ? 'Create' : 'Save'}</button>
             <button type="button" id="btn-cancel">Cancel</button>
@@ -11812,12 +11824,12 @@ async function renderMasterDwsApplications() {
       modal.innerHTML = `
         <div class="modal-content" style="max-width: 820px; width: 95%;">
           <div style="display:flex; justify-content: space-between; align-items:center; gap:12px;">
-            <h3 style="margin:0;">ERP modules <span class="tag-muted">${mods.length}</span></h3>
+            <h3 style="margin:0;">CRS modules <span class="tag-muted">${mods.length}</span></h3>
             <button type="button" data-act="close">Close</button>
           </div>
-          <p class="muted" style="margin:8px 0 12px;">Copy of the ERP CR system's <code>modules</code>. The ID is ERP's <code>modules.id</code>; map modules to applications with Edit → ERP Modules.</p>
+          <p class="muted" style="margin:8px 0 12px;">Copy of CRS's module list (<code>modules</code>). The ID is CRS's <code>modules.id</code>; map modules to applications with Edit → CRS Modules.</p>
           <div class="erp-mod-list" style="max-height:340px;overflow:auto;">
-            ${mods.length ? `<table class="table" style="width:100%;"><thead><tr><th>Name</th><th>ERP ID</th><th>Used by</th><th>Active</th></tr></thead><tbody>
+            ${mods.length ? `<table class="table" style="width:100%;"><thead><tr><th>Name</th><th>CRS ID</th><th>Used by</th><th>Active</th></tr></thead><tbody>
               ${mods.map((m) => {
                 const usedBy = apps.filter((a) => externalIdList(a.externalIds).includes(m.id)).map((a) => a.systemName);
                 return `<tr>
@@ -11826,9 +11838,9 @@ async function renderMasterDwsApplications() {
                   <td>${usedBy.length ? escape(usedBy.join(', ')) : '<span class="muted">—</span>'}</td>
                   <td><input type="checkbox" class="switch" data-act="toggle" data-id="${escape(m.id)}" ${m.isActive !== false ? 'checked' : ''} aria-label="Active"></td>
                 </tr>`;
-              }).join('')}</tbody></table>` : '<p class="panel-empty">No ERP modules yet. Paste them below.</p>'}
+              }).join('')}</tbody></table>` : '<p class="panel-empty">No CRS modules yet. Paste them below.</p>'}
           </div>
-          <h4 style="margin:16px 0 6px;">Import / update from ERP</h4>
+          <h4 style="margin:16px 0 6px;">Import / update from CRS</h4>
           <textarea id="erp-mod-paste" rows="5" style="width:100%;resize:vertical;font-family:var(--font-family-mono);" placeholder="One module per line: id, name, department_id (optional), description (optional)&#10;Tab-separated rows copied from Excel also work."></textarea>
           <div style="display:flex; gap:12px; align-items:center; margin-top:8px;">
             <button type="button" class="primary" data-act="import">Import</button>
@@ -11917,15 +11929,15 @@ async function renderMasterDwsApplications() {
         ${ghSingleUrl ? linkCard('GitHub', gh) : `<div class="dws-link ${gh ? '' : 'is-empty'}"><span class="dws-link-k">GitHub</span><span class="dws-link-v dws-wrap">${gh ? linkify(gh) : 'Not set'}</span></div>`}
       </div>
       <div class="dws-block">
-        <h3>ERP modules</h3>
-        <div class="ext-ids">${erpModuleChips(a.externalIds, '<p class="muted">No ERP modules mapped yet. Use Edit to add them.</p>')}</div>
+        <h3>CRS modules</h3>
+        <div class="ext-ids">${erpModuleChips(a.externalIds, '<p class="muted">No CRS modules mapped yet. Use Edit to add them.</p>')}</div>
       </div>
       <div class="dws-block">
         <h3>Deployment steps</h3>
         ${steps.length ? `<ol class="dws-steps">${steps.map((t, i) => `<li><span class="dws-step-n">${String(i + 1).padStart(2, '0')}</span><span class="dws-wrap">${linkify(t)}</span></li>`).join('')}</ol>` : '<p class="muted">No deployment steps written yet. Use Edit to add them.</p>'}
       </div>
       <div class="dws-block">
-        <div class="dws-block-head"><h3>CRs impacting this system</h3><button type="button" class="btn-sm" data-act="all-crs" hidden>See all</button></div>
+        <div class="dws-block-head"><h3>Change requests impacting this system</h3><button type="button" class="btn-sm" data-act="all-crs" hidden>See all</button></div>
         <div id="dws-crs-inline"><p class="muted">Loading…</p></div>
       </div>`;
     box.querySelector('[data-act="edit"]').onclick = () => openModal('edit', a);
