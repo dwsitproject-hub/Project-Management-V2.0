@@ -32,12 +32,50 @@ export async function checkUploadsDir() {
     await fs.mkdir(UPLOADS_DIR, { recursive: true });
     await fs.writeFile(probe, 'ok');
     await fs.unlink(probe);
-    console.log(`[UPLOADS] Documents folder OK: ${UPLOADS_DIR}`);
+    const mount = await uploadsHealth();
+    if (!mount.ok) {
+      console.error(`[UPLOADS] !!! ${mount.error}. /health/ready stays 503 until the share is mounted.`);
+      return false;
+    }
+    console.log(`[UPLOADS] Documents folder OK: ${UPLOADS_DIR}${mount.fs ? ` (${mount.fs} mount)` : ''}`);
     return true;
   } catch (e) {
     console.error(`[UPLOADS] !!! Documents folder ${UPLOADS_DIR} is NOT writable (${e.code || e.message}). ` +
       'Uploads will fail. Is the shared (Synology) folder mounted?');
     return false;
+  }
+}
+
+// statfs() type numbers of network file systems (linux/magic.h).
+const NETWORK_FS = new Map([
+  [0xff534d42, 'cifs'],
+  [0xfe534d42, 'smb2'],
+  [0x517b, 'smb'],
+  [0x6969, 'nfs'],
+]);
+const REQUIRE_NETWORK_FS = String(process.env.UPLOADS_REQUIRE_NETWORK_FS || '').toLowerCase() === 'true';
+
+/**
+ * With UPLOADS_REQUIRE_NETWORK_FS=true, UPLOADS_DIR must be the shared (Synology / NFS)
+ * mount. Docker silently bind-mounts an EMPTY local folder when the host mount is
+ * missing; that node would then keep its uploads to itself and lose them later. Used at
+ * start-up and by /health/ready, so such a node gets no traffic. A hung mount answers
+ * "not ready" after 2 s instead of hanging the health check.
+ */
+export async function uploadsHealth() {
+  if (!REQUIRE_NETWORK_FS) return { ok: true };
+  let timer;
+  try {
+    const st = await Promise.race([
+      fs.statfs(UPLOADS_DIR),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('no answer in 2000 ms')), 2000); }),
+    ]);
+    const kind = NETWORK_FS.get(Number(st.type));
+    return kind ? { ok: true, fs: kind } : { ok: false, error: `${UPLOADS_DIR} is a local folder, not the shared mount` };
+  } catch (e) {
+    return { ok: false, error: `${UPLOADS_DIR}: ${e.code || e.message}` };
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -8,7 +8,7 @@ import { fileURLToPath } from 'url';
 import http from 'http';
 import dbStore from './store.js';
 import { startCrEmailSweeper, stopCrEmailSweeper } from './services/cr-email-queue.js';
-import { checkUploadsDir } from './services/uploads.js';
+import { checkUploadsDir, uploadsHealth } from './services/uploads.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -100,14 +100,16 @@ app.use('/api/management-dashboard', authenticateToken, managementDashboardRoute
 // Health — for the ALB / API Gateway health checks. Also under /api/ so a check sent
 // through the gateway's /api/* route reaches it.
 //   /health/live   the process is up (never touches the DB)
-//   /health/ready  ready for traffic: DB answers within 2 s, and not shutting down
+//   /health/ready  ready for traffic: DB answers within 2 s, uploads folder is the shared
+//                  mount (when UPLOADS_REQUIRE_NETWORK_FS=true), and not shutting down
 //   /health        kept for existing checks (same as live)
 let shuttingDown = false;
 const live = (_req, res) => res.json({ ok: true });
 const ready = async (_req, res) => {
   if (shuttingDown) return res.status(503).json({ ok: false, reason: 'shutting down' });
-  const db = await dbStore.ping(2000);
-  res.status(db.ok ? 200 : 503).json({ ok: db.ok, db: db.ok ? 'ok' : db.error });
+  const [db, files] = await Promise.all([dbStore.ping(2000), uploadsHealth()]);
+  const ok = db.ok && files.ok;
+  res.status(ok ? 200 : 503).json({ ok, db: db.ok ? 'ok' : db.error, files: files.ok ? (files.fs || 'ok') : files.error });
 };
 app.get(['/health', '/health/live', '/api/health', '/api/health/live'], live);
 app.get(['/health/ready', '/api/health/ready'], ready);

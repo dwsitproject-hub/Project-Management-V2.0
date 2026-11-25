@@ -1,0 +1,62 @@
+# PM Tool — Zone B HA pilot, BACKEND server (172.31.96.51). Guide: docs/ZONE-B-PILOT.md
+#
+# Two identical API containers (ports 13000 and 13001) on ONE database and ONE shared
+# uploads folder: the same shape as two backend nodes behind the ALB later. Mailpit
+# catches every e-mail, so the pilot never mails real people (sap.support included).
+# Run through dc.sh, which reads the filled-in files from /opt/pm-pilot:
+#   /opt/pm-pilot/src/deploy/zone-b-pilot/dc.sh be ps
+name: pm-pilot
+
+x-api: &api
+  image: pm-pilot-backend:pilot          # built on this server by release.sh, never shipped
+  restart: unless-stopped
+  env_file:
+    - ./pilot.env
+    - ./secrets.pilot.env
+  volumes:
+    # The pilot's OWN Synology folder (APPs/dev/PM-PILOT), mounted on the host by fstab.
+    # Docker creates an EMPTY local folder when the host mount is missing; the backend
+    # (UPLOADS_REQUIRE_NETWORK_FS=true) then stays "not ready" instead of losing files.
+    - ${PM_NAS_MOUNT:?set PM_NAS_MOUNT in /opt/pm-pilot/.env}:/app/uploads
+  networks: [pm-pilot]
+  depends_on: [mailpit]
+  healthcheck:
+    test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health/ready"]
+    interval: 10s
+    timeout: 4s
+    retries: 6
+    start_period: 20s
+  stop_grace_period: 30s
+
+services:
+  pm-api-1:
+    <<: *api
+    container_name: pm-pilot-api-1
+    ports:
+      # private IP only (never 0.0.0.0); the frontend server and the tests reach it here
+      - "${PM_BE_IP:?set PM_BE_IP in /opt/pm-pilot/.env}:13000:3000"
+
+  pm-api-2:
+    <<: *api
+    container_name: pm-pilot-api-2
+    ports:
+      - "${PM_BE_IP:?set PM_BE_IP in /opt/pm-pilot/.env}:13001:3000"
+
+  mailpit:
+    image: axllent/mailpit:v1.21
+    container_name: pm-pilot-mailpit
+    restart: unless-stopped
+    # SMTP stays inside the pilot network; the web inbox only on loopback (PuTTY tunnel).
+    ports:
+      - "127.0.0.1:8025:8025"
+    networks: [pm-pilot]
+
+networks:
+  pm-pilot:
+    name: pm-pilot_net
+    ipam:
+      config:
+        # A fixed subnet with NO default, chosen by preflight.sh. These servers sit in
+        # 172.31.x and the Synology is 172.30.1.94: an auto-allocated Docker network in
+        # 172.29-172.31 would cut the host off from them.
+        - subnet: ${PM_SUBNET:?set PM_SUBNET in /opt/pm-pilot/.env - run preflight.sh}
