@@ -63,12 +63,14 @@ if [ "$ROLE" = be ]; then
     $DC up -d --no-deps --force-recreate "$svc"
     wait_healthy "pm-pilot-${svc#pm-}"
   done
-  echo "OK - backend $SHA running on :13000 and :13001"
+  echo "OK - backend $SHA running on both API containers"
 else
   IMAGE=pm-pilot-frontend
   docker image inspect "$IMAGE:pilot" >/dev/null 2>&1 && docker tag "$IMAGE:pilot" "$IMAGE:prev"
   docker build -t "$IMAGE:pilot" "$SRC/frontend"
   $DC up -d --force-recreate
   wait_healthy pm-pilot-web
-  echo "OK - frontend $SHA on http://$(grep -E '^PM_FE_IP=' "$RUN/.env" | cut -d= -f2):8081"
+  FE_IP=$(grep -E '^PM_FE_IP=' "$RUN/.env" | cut -d= -f2)
+  FE_PORT=$(grep -E '^PM_WEB_PORT=' "$RUN/.env" | cut -d= -f2)
+  echo "OK - frontend $SHA on http://$FE_IP:${FE_PORT:-8081}"
 fi

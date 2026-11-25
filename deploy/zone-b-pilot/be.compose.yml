@@ -1,6 +1,6 @@
 # PM Tool — Zone B HA pilot, BACKEND server (172.31.96.51). Guide: docs/ZONE-B-PILOT.md
 #
-# Two identical API containers (ports 13000 and 13001) on ONE database and ONE shared
+# Two identical API containers (ports 13000 and 13001 unless .env says otherwise) on ONE database and ONE shared
 # uploads folder: the same shape as two backend nodes behind the ALB later. Mailpit
 # catches every e-mail, so the pilot never mails real people (sap.support included).
 # Run through dc.sh, which reads the filled-in files from /opt/pm-pilot:
@@ -34,13 +34,13 @@ services:
     container_name: pm-pilot-api-1
     ports:
       # private IP only (never 0.0.0.0); the frontend server and the tests reach it here
-      - "${PM_BE_IP:?set PM_BE_IP in /opt/pm-pilot/.env}:13000:3000"
+      - "${PM_BE_IP:?set PM_BE_IP in /opt/pm-pilot/.env}:${PM_API1_PORT:-13000}:3000"
 
   pm-api-2:
     <<: *api
     container_name: pm-pilot-api-2
     ports:
-      - "${PM_BE_IP:?set PM_BE_IP in /opt/pm-pilot/.env}:13001:3000"
+      - "${PM_BE_IP:?set PM_BE_IP in /opt/pm-pilot/.env}:${PM_API2_PORT:-13001}:3000"
 
   mailpit:
     image: axllent/mailpit:v1.21
@@ -48,7 +48,7 @@ services:
     restart: unless-stopped
     # SMTP stays inside the pilot network; the web inbox only on loopback (PuTTY tunnel).
     ports:
-      - "127.0.0.1:8025:8025"
+      - "127.0.0.1:${PM_MAILPIT_PORT:-8025}:8025"
     networks: [pm-pilot]
 
 networks:
