@@ -26,7 +26,8 @@ warnAboutUnsafeConfig();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
-app.use(morgan('dev'));
+// Access log; the load balancers' health checks (every few seconds per node) are left out.
+app.use(morgan('dev', { skip: (req) => /^\/(api\/)?health(\/|$)/.test(req.path) }));
 
 // (No /docs route any more: nothing uses it, and it published every file in docs/ —
 // deployment notes, portfolio CSVs — to anyone, without a login.)
@@ -146,7 +147,6 @@ const HOST = process.env.HOST || '0.0.0.0'; // Listen on all network interfaces
 const server = app.listen(PORT, HOST, () => {
   console.log(`Backend API server listening on:`);
   console.log(`  - Local:   http://localhost:${PORT}`);
-  console.log(`  - Network: http://172.30.18.102:${PORT}`);
 
   // Read-only DB health signal for deployments (replaces the old boot-time full rewrite).
   dbStore.read()
@@ -247,6 +247,5 @@ if (process.env.NODE_ENV !== 'production' || process.env.SERVE_FRONTEND === 'tru
   frontendApp.listen(FRONTEND_PORT, HOST, () => {
     console.log(`Frontend server listening on:`);
     console.log(`  - Local:   http://localhost:${FRONTEND_PORT}`);
-    console.log(`  - Network: http://172.30.18.102:${FRONTEND_PORT}`);
   });
 }
