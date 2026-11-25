@@ -1,30 +1,18 @@
-# Use nginx to serve static frontend files
+# Static frontend served by nginx. Config is chosen at start by start-nginx.sh:
+# BACKEND_UPSTREAM set = HA template, else nginx.conf.${NGINX_ENV:-local} (legacy).
 FROM nginx:alpine
 
-# Copy frontend files to nginx html directory
 COPY . /usr/share/nginx/html
 
-# Copy all nginx config files
-COPY nginx.conf.local /etc/nginx/conf.d/nginx.conf.local
-COPY nginx.conf.testing /etc/nginx/conf.d/nginx.conf.testing
-COPY nginx.conf.staging /etc/nginx/conf.d/nginx.conf.staging
-COPY nginx.conf.production /etc/nginx/conf.d/nginx.conf.production
+# Keep nginx configs, scripts and notes out of the web root (they were publicly
+# downloadable, e.g. /nginx.conf.production showed the backend address).
+RUN mkdir -p /etc/nginx/pm \
+ && cd /usr/share/nginx/html \
+ && mv nginx.conf* nginx-ssl.conf /etc/nginx/pm/ \
+ && mv start-nginx.sh /start-nginx.sh \
+ && rm -f Dockerfile .dockerignore *.md \
+ && cp /etc/nginx/pm/nginx.conf.local /etc/nginx/conf.d/default.conf \
+ && chmod +x /start-nginx.sh
 
-# Copy default config (defaults to local)
-COPY nginx.conf.local /etc/nginx/conf.d/default.conf
-
-# Create startup script to select config based on environment variable
-RUN echo '#!/bin/sh' > /start-nginx.sh && \
-    echo 'ENV_TYPE=${NGINX_ENV:-local}' >> /start-nginx.sh && \
-    echo 'echo "Using nginx config for environment: ${ENV_TYPE}"' >> /start-nginx.sh && \
-    echo 'cp /etc/nginx/conf.d/nginx.conf.${ENV_TYPE} /etc/nginx/conf.d/default.conf' >> /start-nginx.sh && \
-    echo 'nginx -t' >> /start-nginx.sh && \
-    echo 'exec nginx -g "daemon off;"' >> /start-nginx.sh && \
-    chmod +x /start-nginx.sh
-
-# Expose port 80
 EXPOSE 80
-
-# Use custom startup script
 CMD ["/start-nginx.sh"]
-

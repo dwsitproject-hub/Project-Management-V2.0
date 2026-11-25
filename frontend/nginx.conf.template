@@ -1,0 +1,76 @@
+# Frontend for the HA topology (WAF -> ALB -> this container, in zone A and B).
+#
+# Used when the container is started with BACKEND_UPSTREAM set (see Dockerfile): it is
+# rendered with envsubst, so the same image runs on every node, in staging and in DR,
+# with no IP address baked in. TLS ends at the WAF / ALB, so this listens on plain HTTP.
+#
+#   BACKEND_UPSTREAM  where /api/ goes until the API Gateway route is live, as a DNS
+#                     name, e.g. http://pm-api.internal:3000 (PrivateZone). Once the ALB
+#                     sends /api/* to the API Gateway, requests never reach this block.
+server {
+    listen 80;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    gzip on;
+    gzip_vary on;
+    gzip_min_length 1024;
+    gzip_types text/plain text/css text/xml text/javascript application/x-javascript application/xml+rss application/json application/javascript;
+
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+
+    # Real client IP from the ALB (X-Forwarded-For), not the ALB's own address.
+    real_ip_header X-Forwarded-For;
+    set_real_ip_from 10.0.0.0/8;
+    set_real_ip_from 172.16.0.0/12;
+    set_real_ip_from 192.168.0.0/16;
+    real_ip_recursive on;
+
+    # Uploads: documents 10 MB, ERP CR documents 30 MB (backend limits).
+    client_max_body_size 31M;
+
+    # Never serve configs, scripts or notes that sit in the web root (the folder is
+    # bind-mounted from the server, so /nginx.conf.production etc. were downloadable).
+    location ~* (^/nginx|^/Dockerfile|^/start-nginx|\.md$|\.sh$|\.conf$) {
+        return 404;
+    }
+
+    location ~* \.(jpg|jpeg|png|gif|ico|css|js|svg|woff|woff2|ttf|eot)$ {
+        expires 1y;
+        add_header Cache-Control "public, immutable";
+    }
+
+    location ~* \.html$ {
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Pragma "no-cache";
+        add_header Expires "0";
+    }
+
+    location /api/ {
+        proxy_pass ${BACKEND_UPSTREAM};
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # Keep the browser's scheme as the ALB saw it (https), not this hop's (http).
+        proxy_set_header X-Forwarded-Proto $http_x_forwarded_proto;
+        proxy_read_timeout 120s;
+    }
+
+    # ALB health check for this frontend node.
+    location = /health {
+        access_log off;
+        default_type text/plain;
+        return 200 "healthy\n";
+    }
+
+    # SPA routing
+    location / {
+        try_files $uri $uri/ /index.html;
+        add_header Cache-Control "no-cache, no-store, must-revalidate";
+        add_header Pragma "no-cache";
+        add_header Expires "0";
+    }
+}

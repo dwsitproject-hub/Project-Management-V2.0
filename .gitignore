@@ -89,3 +89,6 @@ uploads/
 # Database dumps (may contain production personal data)
 backups/
 *.dump
+
+# ApsaraDB CA certificate(s) for DATABASE_SSL=verify-* (per server, not in git)
+certs/

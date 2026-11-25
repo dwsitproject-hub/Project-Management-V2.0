@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import fs from 'fs';
 import pkg from 'pg';
 const { Pool } = pkg;
 
@@ -6,7 +7,56 @@ const databaseUrl =
   process.env.DATABASE_URL ||
   'postgres://postgres:postgres123@localhost:5544/project_management_v2';
 
-const pool = new Pool({ connectionString: databaseUrl });
+const pool = new Pool(poolConfig());
+// A pooled connection that dies while idle (e.g. ApsaraDB fails over to its standby)
+// is reported here. Without a listener Node treats it as an unhandled 'error' event
+// and the whole backend crashes; with it the pool just opens a new connection.
+pool.on('error', (e) => console.error('[STORE] Idle DB connection lost:', e.message));
+
+/**
+ * Pool settings from env (defaults keep today's behaviour):
+ *   PG_POOL_MAX              connections per backend node (default 10). With 2 nodes the
+ *                            DB sees twice this, for every app on the shared RDS.
+ *   PG_CONNECT_TIMEOUT_MS    give up opening a connection after this (default 10000)
+ *   PG_IDLE_TIMEOUT_MS       close idle connections after this (default 30000)
+ *   DATABASE_SSL             disable | require | verify-ca | verify-full. When set it
+ *                            overrides any sslmode in DATABASE_URL. node-postgres treats
+ *                            a plain `sslmode=require` URL as verify-full against Node's
+ *                            built-in CAs, which ApsaraDB's own CA is not one of, so use
+ *                            this instead:
+ *                              require      encrypted, certificate not checked
+ *                              verify-ca    encrypted, signed by DATABASE_SSL_CA
+ *                              verify-full  verify-ca + host name must match
+ *   DATABASE_SSL_CA          path to the ApsaraDB CA certificate (PEM), for verify-*
+ */
+function poolConfig() {
+  const config = {
+    connectionString: databaseUrl,
+    max: Number(process.env.PG_POOL_MAX || 10),
+    connectionTimeoutMillis: Number(process.env.PG_CONNECT_TIMEOUT_MS || 10000),
+    idleTimeoutMillis: Number(process.env.PG_IDLE_TIMEOUT_MS || 30000),
+    keepAlive: true,
+  };
+  const mode = String(process.env.DATABASE_SSL || '').trim().toLowerCase();
+  if (!mode) return config;
+  // Settings parsed from the URL win over `ssl`, so drop the URL's own ssl* parameters.
+  const url = new URL(databaseUrl);
+  for (const k of [...url.searchParams.keys()]) if (k.startsWith('ssl')) url.searchParams.delete(k);
+  config.connectionString = url.toString();
+  if (mode === 'disable') {
+    config.ssl = false;
+  } else if (mode === 'require') {
+    config.ssl = { rejectUnauthorized: false };
+  } else if (mode === 'verify-ca' || mode === 'verify-full') {
+    const caPath = process.env.DATABASE_SSL_CA;
+    if (!caPath) throw new Error(`DATABASE_SSL=${mode} needs DATABASE_SSL_CA (path to the CA certificate)`);
+    config.ssl = { ca: fs.readFileSync(caPath, 'utf8'), rejectUnauthorized: true };
+    if (mode === 'verify-ca') config.ssl.checkServerIdentity = () => undefined;
+  } else {
+    throw new Error(`DATABASE_SSL must be disable, require, verify-ca or verify-full (got "${mode}")`);
+  }
+  return config;
+}
 
 /** Comma-separated TEXT column -> trimmed, non-empty array ([] when NULL). */
 function splitIds(raw) {
@@ -25,8 +75,13 @@ let schemaReady = null; // promise of the one-time schema set-up in this process
 // the same time (concurrent CREATE / ALTER ... IF NOT EXISTS can fail or deadlock).
 const SCHEMA_LOCK_ID = 727274001;
 
-/** Creates / upgrades the tables once per process; retried on the next call if it failed. */
+/**
+ * Creates / upgrades the tables once per process; retried on the next call if it failed.
+ * SCHEMA_SETUP=skip turns it off, for when migrations run as a separate one-off step
+ * (`npm run migrate`) before a rollout.
+ */
 function initializeSchema() {
+  if (String(process.env.SCHEMA_SETUP || '').toLowerCase() === 'skip') return Promise.resolve();
   if (!schemaReady) {
     schemaReady = runSchemaSetup().catch((e) => {
       schemaReady = null;
@@ -1269,5 +1324,35 @@ function originRows(origin, spec) {
   return perTable.get(spec.table);
 }
 
-export default { read, readShared, write, invalidateReadCache, ensureSchema: initializeSchema, pool, databaseUrl };
+/** For /health/ready: true when the DB answers within `timeoutMs`. */
+async function ping(timeoutMs = 2000) {
+  let timer;
+  try {
+    await Promise.race([
+      pool.query('SELECT 1'),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(`no answer in ${timeoutMs} ms`)), timeoutMs); }),
+    ]);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e.message };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** For graceful shutdown: resolves once the saves already queued have finished. */
+function drain() {
+  return writeQueue;
+}
+
+/** Runs the schema set-up even when SCHEMA_SETUP=skip (the one-off migrate step). */
+async function migrate() {
+  schemaReady = null;
+  await runSchemaSetup();
+}
+
+export default {
+  read, readShared, write, invalidateReadCache, ensureSchema: initializeSchema, migrate, ping, drain,
+  pool, databaseUrl,
+};
 

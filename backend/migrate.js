@@ -1,25 +1,16 @@
-import 'dotenv/config';
-import dbStore from './store.js';
+// One-off schema set-up / upgrade, run before rolling out a new version:
+//   docker compose run --rm backend node backend/migrate.js      (or: npm run migrate)
+// The backend also does this itself at start-up (under an advisory lock, so two nodes
+// can't clash) unless SCHEMA_SETUP=skip is set; this script works either way.
+import store from './store.js';
 
-/**
- * Migration script to initialize database schema
- * The schema is automatically initialized on first connection,
- * but this script ensures it's set up explicitly.
- */
-async function migrate() {
-  try {
-    console.log('Initializing database schema...');
-    // Trigger schema initialization by calling read()
-    // This will automatically call initializeSchema() if not already initialized
-    await dbStore.read();
-    console.log('Database schema initialized successfully!');
-    console.log('Database URL:', dbStore.databaseUrl);
-    process.exit(0);
-  } catch (error) {
-    console.error('Migration failed:', error.message);
-    console.error('Make sure PostgreSQL is running and accessible at:', dbStore.databaseUrl);
-    process.exit(1);
-  }
+try {
+  const started = Date.now();
+  await store.migrate();
+  console.log(`[MIGRATE] Schema is up to date (${Date.now() - started} ms)`);
+  await store.pool.end();
+  process.exit(0);
+} catch (e) {
+  console.error('[MIGRATE] Failed:', e.message);
+  process.exit(1);
 }
-
-migrate();

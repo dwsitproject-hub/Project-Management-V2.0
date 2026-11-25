@@ -1,0 +1,42 @@
+# PM Tool BACKEND for the HA topology: one copy per backend node (zone A, zone B),
+# the same file for staging (zone A) and DR (zone C). Only .env differs per place.
+#
+#   docker compose -f docker-compose.ha.backend.yml --env-file .env up -d
+#
+# Differences from docker-compose.yml (today's single server):
+#   - no container_name, no postgres service: the DB is ApsaraDB (DATABASE_URL)
+#   - the code comes from the image only (no ./backend bind mount), so a node, staging
+#     or DR starts from image + .env alone; set PM_BACKEND_IMAGE to the ACR tag
+#   - uploads come from the SHARED file store mounted on every node (UPLOADS_HOST_DIR)
+#   - health check on /health/ready and a 30 s stop grace period for rolling deploys
+#
+# One-off schema migration before a rollout (then run nodes with SCHEMA_SETUP=skip):
+#   docker compose -f docker-compose.ha.backend.yml --env-file .env run --rm backend node backend/migrate.js
+services:
+  backend:
+    image: ${PM_BACKEND_IMAGE:-pm-tool-backend:local}
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - HOST=0.0.0.0
+    ports:
+      # Bind to the node's private address (BACKEND_BIND) so traffic can't skip the
+      # API Gateway; the security group should still allow only the gateway / ALB.
+      - "${BACKEND_BIND:-0.0.0.0}:${BACKEND_HOST_PORT:-13000}:3000"
+    volumes:
+      - ${UPLOADS_HOST_DIR:?set UPLOADS_HOST_DIR to the shared file store mount}:/app/uploads
+      # ApsaraDB CA certificate for DATABASE_SSL=verify-ca / verify-full
+      - ./certs:/app/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/health/ready"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
+    stop_grace_period: 30s
+    restart: unless-stopped
