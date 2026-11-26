@@ -65,7 +65,15 @@ for tok in (os.environ["SUBNETS"] + " " + os.environ["ROUTES"] + " " + os.enviro
         taken.append(ipaddress.ip_network(tok, strict=False))
     except ValueError:
         pass
-fence = [ipaddress.ip_network(x) for x in ("172.28.0.0/16", "172.29.0.0/16", "172.30.0.0/16", "172.31.0.0/16")]
+# The servers' LAN and the NAS, plus every range the VPC route table sends elsewhere
+# (read off vtb-k1aud9ikcs1qclmxrigna, 26 Nov 2026): a Docker network there would swallow
+# replies to those users / systems. 172.16.0.0/16 is the office network ("KPN Site").
+fence = [ipaddress.ip_network(x) for x in (
+    "172.28.0.0/16", "172.29.0.0/16", "172.30.0.0/16", "172.31.0.0/16",
+    "172.16.0.0/16",      # KPN Site (office), via CHR
+    "172.23.0.0/16",      # Plantation, VPC peering
+    "10.1.1.0/24", "10.10.10.0/24", "192.168.1.0/24", "192.168.100.0/29",  # GT HO, EPS, AASTAR
+)]
 fence.append(ipaddress.ip_network(os.environ["NAS_IP"] + "/16", strict=False))
 def candidates():
     # Docker's usual pool first (172.17-172.27), then 172.16.x, then 192.168.32.x
