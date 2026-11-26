@@ -2,7 +2,7 @@
 // (docs/ZONE-B-PILOT.md §10). Runs as a one-off container on the app's network, so it
 // needs nothing installed on the server:
 //
-//   /opt/pm-pilot/src/deploy/zone-b-pilot/dc.sh be run --rm --no-deps \
+//   /opt/Project-Management-V2.0/deploy/zone-b-pilot/dc.sh be run --rm --no-deps \
 //     -e PM_LOCAL_EMAIL=you@energi-up.com pm-api-1 node backend/scripts/ha-check.js
 //
 // Signs in with PM_LOCAL_EMAIL / PM_LOCAL_PASSWORD (an admin, for the clean-up), creates

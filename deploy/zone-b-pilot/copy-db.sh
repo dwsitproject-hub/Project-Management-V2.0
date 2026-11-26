@@ -3,7 +3,7 @@
 # Production is only READ (pg_dump); every write goes to the pilot database. You type
 # each password at its prompt; nothing is stored. Run on the BE server 172.31.96.51:
 #
-#   bash /opt/pm-pilot/src/deploy/zone-b-pilot/copy-db.sh
+#   bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/copy-db.sh
 #
 # Settings (environment, with these defaults):
 #   SRC_HOST  production RDS host          SRC_USER  postgres        SRC_DB  project_management_v2

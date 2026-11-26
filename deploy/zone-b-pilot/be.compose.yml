@@ -4,7 +4,7 @@
 # uploads folder: the same shape as two backend nodes behind the ALB later. Mailpit
 # catches every e-mail, so the pilot never mails real people (sap.support included).
 # Run through dc.sh, which reads the filled-in files from /opt/pm-pilot:
-#   /opt/pm-pilot/src/deploy/zone-b-pilot/dc.sh be ps
+#   /opt/Project-Management-V2.0/deploy/zone-b-pilot/dc.sh be ps
 name: pm-pilot
 
 x-api: &api

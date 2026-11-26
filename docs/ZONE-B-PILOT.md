@@ -24,8 +24,8 @@ production database is only read once, for the copy.
 | Ports | 172.31.96.50:8081 | 172.31.96.51:13000, 172.31.96.51:13001, 127.0.0.1:8025 (Mailpit inbox) |
 | Compose file | `deploy/zone-b-pilot/fe.compose.yml` | `deploy/zone-b-pilot/be.compose.yml` |
 | Settings | `/opt/pm-pilot/.env` | `/opt/pm-pilot/.env`, `pilot.env`, `secrets.pilot.env` |
-| Deploy | `release.sh fe SIT` | `release.sh be SIT` |
-| Code | `/opt/pm-pilot/src`, branch `SIT` (or a commit / tag) | same |
+| Deploy | `release.sh fe HA` | `release.sh be HA` |
+| Code | `/opt/Project-Management-V2.0` (git checkout), branch `HA` (or a commit / tag) | same |
 
 Do the sections in order. Sections 2–6 are one-time preparation; section 7 onwards is the
 deployment itself. Every command block names the machine it runs on. Passwords go in with
@@ -64,7 +64,8 @@ touches another app's mount or network.
 
 **Decisions made for the pilot:** HTTP on the private address (TLS comes with the ALB);
 SSO off, local password sign-in; Mailpit instead of the mail relay; the code runs branch
-`SIT` until a release is tagged.
+`HA` until a release is tagged. Settings with passwords live in `/opt/pm-pilot`, outside the
+git checkout, so a pull or a fresh clone never touches them.
 
 **Network rules**
 
@@ -93,7 +94,7 @@ ApsaraDB, filled with a copy of production.
 3. After §5 (the code is on the server), copy production into the pilot database.
    PuTTY on 172.31.96.51 (BE):
    ```bash
-   bash /opt/pm-pilot/src/deploy/zone-b-pilot/copy-db.sh
+   bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/copy-db.sh
    ```
    It asks three times: the production `postgres` password (read only), then the `pm_pilot`
    password twice. It ends with the number of initiatives and users, e.g. `318 | 72`. It also
@@ -111,20 +112,25 @@ When the pilot gets a hostname behind the ALB, register a separate Hub client fo
 
 ## 5. The code on each server (once per server)
 
-The repository is public, so no deploy key is needed. PuTTY on 172.31.96.51 (BE) **and** on
-172.31.96.50 (FE):
+The repository is public, so no deploy key is needed. The code lives in
+`/opt/Project-Management-V2.0` on both servers. PuTTY on 172.31.96.51 (BE) **and** on
+172.31.96.50 (FE), on a fresh server:
 
 ```bash
-mkdir -p /opt/pm-pilot && cd /opt/pm-pilot && git clone https://github.com/dwsitproject-hub/Project-Management-V2.0.git src && git -C src checkout SIT
+cd /opt && git clone https://github.com/dwsitproject-hub/Project-Management-V2.0.git && git -C /opt/Project-Management-V2.0 checkout HA
+```
+Already cloned (e.g. on another branch):
+```bash
+git -C /opt/Project-Management-V2.0 fetch origin && git -C /opt/Project-Management-V2.0 checkout HA && git -C /opt/Project-Management-V2.0 pull --ff-only
 ```
 
 Then the read-only preflight. PuTTY on 172.31.96.51 (BE):
 ```bash
-bash /opt/pm-pilot/src/deploy/zone-b-pilot/preflight.sh be
+bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/preflight.sh be
 ```
 PuTTY on 172.31.96.50 (FE):
 ```bash
-bash /opt/pm-pilot/src/deploy/zone-b-pilot/preflight.sh fe
+bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/preflight.sh fe
 ```
 Paste both outputs back for review.
 
@@ -165,7 +171,7 @@ folder is not a real network mount, so a missing mount can never lose files.
 
 PuTTY on 172.31.96.51 (BE):
 ```bash
-cd /opt/pm-pilot && cp src/deploy/zone-b-pilot/compose.env.example .env && cp src/deploy/zone-b-pilot/pilot.env pilot.env && cp src/deploy/zone-b-pilot/secrets.pilot.env.example secrets.pilot.env && chmod 600 secrets.pilot.env && sed -i "s/^JWT_SECRET=.*/JWT_SECRET=$(openssl rand -hex 32)/" secrets.pilot.env
+mkdir -p /opt/pm-pilot && cd /opt/pm-pilot && cp /opt/Project-Management-V2.0/deploy/zone-b-pilot/compose.env.example .env && cp /opt/Project-Management-V2.0/deploy/zone-b-pilot/pilot.env pilot.env && cp /opt/Project-Management-V2.0/deploy/zone-b-pilot/secrets.pilot.env.example secrets.pilot.env && chmod 600 secrets.pilot.env && sed -i "s/^JWT_SECRET=.*/JWT_SECRET=$(openssl rand -hex 32)/" secrets.pilot.env
 ```
 ```bash
 nano /opt/pm-pilot/.env
@@ -188,9 +194,9 @@ Fill `DATABASE_URL` (the `pm_pilot` password, percent-encoded, and the staging R
 
 Deploy:
 ```bash
-bash /opt/pm-pilot/src/deploy/zone-b-pilot/release.sh be SIT
+bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/release.sh be HA
 ```
-It checks the settings for `FILL_` values, checks out `SIT`, keeps the old image as `:prev`,
+It checks the settings for `FILL_` values, checks out `HA`, keeps the old image as `:prev`,
 builds, starts Mailpit, runs the schema step once (`[MIGRATE] Schema is up to date`), then
 replaces `pm-api-1` and `pm-api-2` **one at a time**, each only once the previous is healthy.
 It ends with:
@@ -204,12 +210,12 @@ OK - backend <commit> running on both API containers
 
 PuTTY on 172.31.96.50 (FE):
 ```bash
-cd /opt/pm-pilot && cp src/deploy/zone-b-pilot/compose.env.example .env && nano .env
+mkdir -p /opt/pm-pilot && cd /opt/pm-pilot && cp /opt/Project-Management-V2.0/deploy/zone-b-pilot/compose.env.example .env && nano .env
 ```
 Set `PM_SUBNET` to the subnet preflight suggested on **this** server; delete the BE lines;
 keep `PM_BACKENDS=172.31.96.51:13000 172.31.96.51:13001`.
 ```bash
-bash /opt/pm-pilot/src/deploy/zone-b-pilot/release.sh fe SIT
+bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/release.sh fe HA
 ```
 Ends with `OK - frontend <commit> on http://172.31.96.50:8081`. The log line
 `nginx: HA mode, /api/ spread over: 172.31.96.51:13000 172.31.96.51:13001` (`dc.sh fe logs`)
@@ -221,7 +227,7 @@ The database is a copy of production, where people sign in through DWS Hub and h
 password. Give your own account a local password (from `PM_LOCAL_PASSWORD`). PuTTY on
 172.31.96.51 (BE), edit the e-mail before Enter:
 ```bash
-/opt/pm-pilot/src/deploy/zone-b-pilot/dc.sh be run --rm --no-deps -e PM_LOCAL_EMAIL=FILL_YOUR_EMAIL pm-api-1 node backend/scripts/set-local-password.js
+/opt/Project-Management-V2.0/deploy/zone-b-pilot/dc.sh be run --rm --no-deps -e PM_LOCAL_EMAIL=FILL_YOUR_EMAIL pm-api-1 node backend/scripts/set-local-password.js
 ```
 Expected: `[LOCAL-PASSWORD] … can now sign in with e-mail and password`. Add
 `-e PM_LOCAL_MAKE_ADMIN=true` for an account that is not an admin yet. Then open
@@ -240,7 +246,7 @@ Expected: `[LOCAL-PASSWORD] … can now sign in with e-mail and password`. Add
 
 **HA checks** — PuTTY on 172.31.96.51 (BE), same e-mail as §9:
 ```bash
-/opt/pm-pilot/src/deploy/zone-b-pilot/dc.sh be run --rm --no-deps -e PM_LOCAL_EMAIL=FILL_YOUR_EMAIL pm-api-1 node backend/scripts/ha-check.js
+/opt/Project-Management-V2.0/deploy/zone-b-pilot/dc.sh be run --rm --no-deps -e PM_LOCAL_EMAIL=FILL_YOUR_EMAIL pm-api-1 node backend/scripts/ha-check.js
 ```
 It creates test records named `HA CHECK <time>`, checks that a save on one container is seen
 on the other at once, that a SAP CR with documents uploaded through both containers sends
@@ -274,16 +280,16 @@ When Cloud Infra delivers them (docs/HA-READINESS.md and the "Wave 1 requests" d
 
 ## 12. Updates and rollback
 
-New code reaches the pilot from `SIT` (or a commit / tag). BE first, then FE:
+New code reaches the pilot from branch `HA` (or a commit / tag). BE first, then FE:
 ```bash
-bash /opt/pm-pilot/src/deploy/zone-b-pilot/release.sh be SIT
+bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/release.sh be HA
 ```
 ```bash
-bash /opt/pm-pilot/src/deploy/zone-b-pilot/release.sh fe SIT
+bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/release.sh fe HA
 ```
 Rollback to the previous image — PuTTY on the server concerned (`backend` for BE, `frontend` for FE):
 ```bash
-docker tag pm-pilot-backend:prev pm-pilot-backend:pilot && /opt/pm-pilot/src/deploy/zone-b-pilot/dc.sh be up -d --force-recreate
+docker tag pm-pilot-backend:prev pm-pilot-backend:pilot && /opt/Project-Management-V2.0/deploy/zone-b-pilot/dc.sh be up -d --force-recreate
 ```
 Schema changes are additive, so an older image runs on a newer schema.
 
@@ -296,7 +302,7 @@ DMS, remove the whitelist entries, and delete the `PM-PILOT` folder.
 
 ## 14. Day to day
 
-- Status: `/opt/pm-pilot/src/deploy/zone-b-pilot/dc.sh be ps` (BE), `... dc.sh fe ps` (FE).
+- Status: `/opt/Project-Management-V2.0/deploy/zone-b-pilot/dc.sh be ps` (BE), `... dc.sh fe ps` (FE).
 - Logs: `... dc.sh be logs -f --tail 100 pm-api-1` (and `pm-api-2`, `mailpit`).
 - Health: `curl -s http://172.31.96.51:13000/health/ready` and `:13001`.
 - Mailpit inbox: PuTTY → Connection → SSH → Tunnels, source port `8025`, destination
@@ -309,7 +315,7 @@ DMS, remove the whitelist entries, and delete the `PM-PILOT` folder.
 | Symptom | Cause / fix |
 |---|---|
 | `STOP - fill in the FILL_ values above` | a setting file still has a `FILL_` value: `nano` it |
-| `STOP - the code in /opt/pm-pilot/src has local changes` | someone edited the checkout: `git -C /opt/pm-pilot/src status`, then `git -C /opt/pm-pilot/src checkout -- .` |
+| `STOP - the code in /opt/Project-Management-V2.0 has local changes` | someone edited the checkout: `git -C /opt/Project-Management-V2.0 status`, then `git -C /opt/Project-Management-V2.0 checkout -- .` |
 | `required variable PM_SUBNET is missing` | `/opt/pm-pilot/.env` missing or incomplete (§7 / §8) |
 | `Pool overlaps with other one on this address space` | `PM_SUBNET` is used by another network: run preflight again, take its suggestion |
 | `pm-pilot-api-1 is unhealthy` + `[UPLOADS] !!! … not the shared mount` | the Synology folder is not mounted: `findmnt /mnt/pm-pilot-nas`, `mount /mnt/pm-pilot-nas` (§6) |

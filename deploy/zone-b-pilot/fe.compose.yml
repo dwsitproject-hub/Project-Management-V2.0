@@ -3,7 +3,7 @@
 # nginx serves the web app and spreads /api/ over BOTH backend containers on the BE
 # server (PM_BACKENDS) — standing in for the ALB / API Gateway until they exist. Plain
 # HTTP on the private address; reached from the office / VPN only.
-#   /opt/pm-pilot/src/deploy/zone-b-pilot/dc.sh fe ps
+#   /opt/Project-Management-V2.0/deploy/zone-b-pilot/dc.sh fe ps
 name: pm-pilot-fe
 
 services:

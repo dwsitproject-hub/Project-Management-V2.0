@@ -2,8 +2,8 @@
 # PM Tool — Zone B HA pilot preflight - READ-ONLY, changes nothing (docs/ZONE-B-PILOT.md §1, §5).
 # Run on each Zone B server and paste the whole output back for review:
 #
-#   bash /opt/pm-pilot/src/deploy/zone-b-pilot/preflight.sh be     # on 172.31.96.51
-#   bash /opt/pm-pilot/src/deploy/zone-b-pilot/preflight.sh fe     # on 172.31.96.50
+#   bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/preflight.sh be     # on 172.31.96.51
+#   bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/preflight.sh fe     # on 172.31.96.50
 #
 # Every line starts with OK / WARN / FAIL / INFO. (From the prod-deploy-prep template.)
 set -u
@@ -130,5 +130,6 @@ if have nginx; then
   nginx -T 2>/dev/null | grep -q "server_name.*$APP_HOST" && say WARN "a server block for $APP_HOST already exists" || say INFO "no server block for $APP_HOST yet"
 fi
 getent hosts "$APP_HOST" >/dev/null && say INFO "$APP_HOST resolves to $(getent hosts "$APP_HOST" | awk '{print $1}')" || say INFO "$APP_HOST does not resolve here yet"
-[ -d "/opt/$APP/src/.git" ] && say INFO "checkout: $(git -C /opt/$APP/src log --oneline -1 2>/dev/null); $(git -C /opt/$APP/src status -sb 2>/dev/null | head -1)"
+CODE="$(cd "$(dirname "$0")/../.." && pwd)"
+[ -d "$CODE/.git" ] && say INFO "checkout $CODE: $(git -C "$CODE" log --oneline -1 2>/dev/null); $(git -C "$CODE" status -sb 2>/dev/null | head -1)"
 echo "== done"

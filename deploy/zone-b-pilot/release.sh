@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Deploy a version of PM to the Zone B pilot, on ONE server (docs/ZONE-B-PILOT.md §7, §8, §12).
 #
-#   /opt/pm-pilot/src/deploy/zone-b-pilot/release.sh be SIT        # BE 172.31.96.51 first
-#   /opt/pm-pilot/src/deploy/zone-b-pilot/release.sh fe SIT        # then FE 172.31.96.50
-#   ... be de5472e      a commit,  ... be v2.1.0   a tag,  ... be SIT   the branch's latest commit
+#   /opt/Project-Management-V2.0/deploy/zone-b-pilot/release.sh be HA         # BE 172.31.96.51 first
+#   /opt/Project-Management-V2.0/deploy/zone-b-pilot/release.sh fe HA         # then FE 172.31.96.50
+#   ... be de5472e      a commit,  ... be v2.1.0   a tag,  ... be HA    the branch's latest commit
 #
 # Guarded: refuses when the filled-in files still hold FILL_ values or the checkout has
 # local edits; keeps the running image as :prev (rollback, §12); builds on this server;
@@ -12,10 +12,11 @@
 set -euo pipefail
 ROLE="${1:-}"; REF="${2:-}"
 case "$ROLE" in be|fe) ;; *) echo "usage: release.sh be|fe <branch | tag | commit>" >&2; exit 2 ;; esac
-[ -n "$REF" ] || { echo "usage: release.sh $ROLE <branch | tag | commit>, e.g. SIT" >&2; exit 2; }
+[ -n "$REF" ] || { echo "usage: release.sh $ROLE <branch | tag | commit>, e.g. HA" >&2; exit 2; }
 
+# Settings (secrets) live OUTSIDE the git checkout; the code is the checkout this script is in.
 RUN="${PM_PILOT_RUN_DIR:-/opt/pm-pilot}"
-SRC="$RUN/src"
+SRC="$(cd "$(dirname "$0")/../.." && pwd)"
 DC="$SRC/deploy/zone-b-pilot/dc.sh $ROLE"
 stop() { echo "STOP - $*" >&2; exit 1; }
 
