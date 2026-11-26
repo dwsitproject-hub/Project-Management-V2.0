@@ -1,0 +1,26 @@
+# PM Tool FRONTEND for the HA topology: one copy per frontend node (zone A, zone B),
+# the same file for staging and DR. TLS ends at the WAF / ALB, so this serves plain
+# HTTP; only .env differs per place.
+#
+#   docker compose -f docker-compose.ha.frontend.yml --env-file .env up -d
+#
+#   BACKEND_UPSTREAM   where /api/ goes until the ALB sends /api/* to the API Gateway,
+#                      by DNS name, e.g. http://pm-api.internal:13000 (no IP addresses)
+#   PM_FRONTEND_IMAGE  the ACR image tag (static files are baked into the image)
+services:
+  frontend:
+    image: ${PM_FRONTEND_IMAGE:-pm-tool-frontend:local}
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      - BACKEND_UPSTREAM=${BACKEND_UPSTREAM:?set BACKEND_UPSTREAM, e.g. http://pm-api.internal:13000}
+    ports:
+      - "${FRONTEND_BIND:-0.0.0.0}:${FRONTEND_HOST_PORT:-8081}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    stop_grace_period: 15s
+    restart: unless-stopped

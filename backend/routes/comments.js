@@ -9,10 +9,6 @@ const now = () => new Date().toISOString();
 const uuid = () => crypto.randomUUID();
 
 // Test route to verify router is working
-router.get('/test', (req, res) => {
-  res.json({ message: 'Comments router is working' });
-});
-
 // Get all comments for an initiative
 router.get('/initiative/:initiativeId', authenticateToken, async (req, res) => {
   const data = await store.read();

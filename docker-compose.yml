@@ -86,9 +86,9 @@ services:
       # Mount frontend folder for live updates during development
       - ./frontend:/usr/share/nginx/html:ro
       # Mount all nginx configs for live updates
-      - ./frontend/nginx.conf.local:/etc/nginx/conf.d/nginx.conf.local:ro
-      - ./frontend/nginx.conf.testing:/etc/nginx/conf.d/nginx.conf.testing:ro
-      - ./frontend/nginx.conf.production:/etc/nginx/conf.d/nginx.conf.production:ro
+      - ./frontend/nginx.conf.local:/etc/nginx/pm/nginx.conf.local:ro
+      - ./frontend/nginx.conf.testing:/etc/nginx/pm/nginx.conf.testing:ro
+      - ./frontend/nginx.conf.production:/etc/nginx/pm/nginx.conf.production:ro
     networks:
       - app-network
     restart: unless-stopped

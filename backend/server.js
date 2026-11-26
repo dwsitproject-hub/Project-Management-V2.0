@@ -7,20 +7,30 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import http from 'http';
 import dbStore from './store.js';
-import { startCrEmailSweeper } from './services/cr-email-queue.js';
-import { checkUploadsDir } from './services/uploads.js';
+import { startCrEmailSweeper, stopCrEmailSweeper } from './services/cr-email-queue.js';
+import { checkUploadsDir, uploadsHealth } from './services/uploads.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
+// Behind WAF / ALB / API Gateway: trust X-Forwarded-For / -Proto from that many proxy
+// hops (TRUST_PROXY=2), or from the listed networks (e.g. TRUST_PROXY=192.168.0.0/16).
+// Unset = trust none (today's behaviour). Lets req.ip, req.secure and req.protocol show
+// the browser's real values instead of the last proxy's.
+if (process.env.TRUST_PROXY) {
+  const v = process.env.TRUST_PROXY.trim();
+  app.set('trust proxy', /^\d+$/.test(v) ? Number(v) : v === 'true' ? true : v.split(',').map((x) => x.trim()));
+}
+warnAboutUnsafeConfig();
 app.use(cors());
 app.use(express.json({ limit: '1mb' }));
 app.use(cookieParser());
-app.use(morgan('dev'));
+// Access log; the load balancers' health checks (every few seconds per node) are left out.
+app.use(morgan('dev', { skip: (req) => /^\/(api\/)?health(\/|$)/.test(req.path) }));
 
-// Serve docs folder for static assets (logo, etc)
-app.use('/docs', express.static(path.join(__dirname, '..', 'docs')));
+// (No /docs route any more: nothing uses it, and it published every file in docs/ —
+// deployment notes, portfolio CSVs — to anyone, without a login.)
 
 // Serve frontend static files (for local development)
 // In production, frontend is served by the separate frontend container (nginx)
@@ -60,7 +70,8 @@ app.use('/api/hub-sdk', hubSdkRouter);
 // SSO consumer (DWS Hub) — mounted before authRouter; additive to local login.
 app.use('/api/auth/sso', ssoRouter);
 app.use('/api/auth', authRouter);
-app.use('/api/lookups', lookupsRouter);
+// Users (names, e-mails, roles) and system URLs: signed-in users only (was public).
+app.use('/api/lookups', authenticateToken, lookupsRouter);
 
 // Protected routes (require authentication)
 app.use('/api/initiatives', authenticateToken, initiativesRouter);
@@ -87,10 +98,22 @@ app.use('/api/departments', authenticateToken, requireAdmin, departmentsRouter);
 app.use('/api/erp-modules', authenticateToken, erpModulesRouter);
 app.use('/api/management-dashboard', authenticateToken, managementDashboardRouter);
 
-// Health
-app.get('/health', (_req, res) => {
-  res.json({ ok: true });
-});
+// Health — for the ALB / API Gateway health checks. Also under /api/ so a check sent
+// through the gateway's /api/* route reaches it.
+//   /health/live   the process is up (never touches the DB)
+//   /health/ready  ready for traffic: DB answers within 2 s, uploads folder is the shared
+//                  mount (when UPLOADS_REQUIRE_NETWORK_FS=true), and not shutting down
+//   /health        kept for existing checks (same as live)
+let shuttingDown = false;
+const live = (_req, res) => res.json({ ok: true });
+const ready = async (_req, res) => {
+  if (shuttingDown) return res.status(503).json({ ok: false, reason: 'shutting down' });
+  const [db, files] = await Promise.all([dbStore.ping(2000), uploadsHealth()]);
+  const ok = db.ok && files.ok;
+  res.status(ok ? 200 : 503).json({ ok, db: db.ok ? 'ok' : db.error, files: files.ok ? (files.fs || 'ok') : files.error });
+};
+app.get(['/health', '/health/live', '/api/health', '/api/health/live'], live);
+app.get(['/health/ready', '/api/health/ready'], ready);
 
 // Global error handler
 app.use((err, req, res, next) => {
@@ -121,10 +144,9 @@ const FRONTEND_PORT = process.env.FRONTEND_PORT || 8080;
 const HOST = process.env.HOST || '0.0.0.0'; // Listen on all network interfaces
 
 // Start backend API server
-app.listen(PORT, HOST, () => {
+const server = app.listen(PORT, HOST, () => {
   console.log(`Backend API server listening on:`);
   console.log(`  - Local:   http://localhost:${PORT}`);
-  console.log(`  - Network: http://172.30.18.102:${PORT}`);
 
   // Read-only DB health signal for deployments (replaces the old boot-time full rewrite).
   dbStore.read()
@@ -138,12 +160,45 @@ app.listen(PORT, HOST, () => {
       startCrEmailSweeper(); // its sweeps retry until the DB is reachable
     });
   checkUploadsDir();
-
-  // Initialize daily snapshots on server start
-  import('./daily-snapshots.js').then(async m => {
-    await m.initializeDailySnapshots();
-  });
 });
+
+// Graceful shutdown (docker stop / a rolling deploy sends SIGTERM): fail /health/ready
+// so the load balancer stops sending traffic, stop taking new connections, let
+// in-flight requests and queued saves finish, then close the DB pool. Gives up after
+// SHUTDOWN_TIMEOUT_MS (default 25 s; set the container's stop_grace_period above it).
+const SHUTDOWN_TIMEOUT_MS = Number(process.env.SHUTDOWN_TIMEOUT_MS || 25000);
+async function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`[SHUTDOWN] ${signal} received, draining (max ${SHUTDOWN_TIMEOUT_MS} ms)...`);
+  const force = setTimeout(() => {
+    console.error('[SHUTDOWN] Timed out, exiting with requests still open');
+    process.exit(1);
+  }, SHUTDOWN_TIMEOUT_MS);
+  force.unref();
+  stopCrEmailSweeper();
+  await new Promise((resolve) => {
+    server.close(resolve);
+    server.closeIdleConnections?.(); // keep-alive sockets with no request in flight
+  });
+  await dbStore.drain().catch(() => {});
+  await dbStore.pool.end().catch(() => {});
+  console.log('[SHUTDOWN] Clean exit');
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+/** Loud start-up warnings for settings that are unsafe in production. */
+function warnAboutUnsafeConfig() {
+  if (process.env.NODE_ENV !== 'production') return;
+  const secret = process.env.JWT_SECRET || '';
+  if (!secret || /^dev-secret-change-me/.test(secret) || secret.length < 32) {
+    console.error('[CONFIG] !!! JWT_SECRET is missing, a default, or shorter than 32 characters. ' +
+      'Every node must share one long random secret.');
+  }
+  if (!process.env.DATABASE_URL) console.error('[CONFIG] !!! DATABASE_URL is not set.');
+}
 
 // Start frontend server on port 8080 (for local development)
 // This creates a separate Express server that serves the frontend and proxies API calls
@@ -192,18 +247,5 @@ if (process.env.NODE_ENV !== 'production' || process.env.SERVE_FRONTEND === 'tru
   frontendApp.listen(FRONTEND_PORT, HOST, () => {
     console.log(`Frontend server listening on:`);
     console.log(`  - Local:   http://localhost:${FRONTEND_PORT}`);
-    console.log(`  - Network: http://172.30.18.102:${FRONTEND_PORT}`);
   });
 }
-
-// Daily snapshot creation - runs every 24 hours to track milestone durations
-setInterval(async () => {
-  try {
-    const snapshotMod = await import('./daily-snapshots.js');
-    snapshotMod.createDailySnapshot();
-  } catch (e) {
-    console.error('Daily snapshot error:', e.message);
-  }
-}, 24 * 60 * 60 * 1000); // 24 hours
-
-

@@ -1,0 +1,31 @@
+# PM Tool — Zone B HA pilot, FRONTEND server (172.31.96.50). Guide: docs/ZONE-B-PILOT.md
+#
+# nginx serves the web app and spreads /api/ over BOTH backend containers on the BE
+# server (PM_BACKENDS) — standing in for the ALB / API Gateway until they exist. Plain
+# HTTP on the private address; reached from the office / VPN only.
+#   /opt/pm-pilot/src/deploy/zone-b-pilot/dc.sh fe ps
+name: pm-pilot-fe
+
+services:
+  pm-web:
+    image: pm-pilot-frontend:pilot         # built on this server by release.sh
+    container_name: pm-pilot-web
+    restart: unless-stopped
+    environment:
+      - BACKEND_SERVERS=${PM_BACKENDS:?set PM_BACKENDS in /opt/pm-pilot/.env}
+    ports:
+      - "${PM_FE_IP:?set PM_FE_IP in /opt/pm-pilot/.env}:${PM_WEB_PORT:-8081}:80"
+    networks: [pm-pilot-fe]
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]
+      interval: 10s
+      timeout: 4s
+      retries: 6
+    stop_grace_period: 15s
+
+networks:
+  pm-pilot-fe:
+    name: pm-pilot-fe_net
+    ipam:
+      config:
+        - subnet: ${PM_SUBNET:?set PM_SUBNET in /opt/pm-pilot/.env - run preflight.sh}
