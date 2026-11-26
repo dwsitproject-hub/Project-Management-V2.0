@@ -16,13 +16,13 @@ NAS_MOUNT="${NAS_MOUNT:-/mnt/pm-pilot-nas}"
 PROD_RDS="${PROD_RDS:-pgm-d9jn3khh0b3907w4.pgsql.ap-southeast-5.rds.aliyuncs.com}"
 PILOT_RDS="${PILOT_RDS:-pgm-d9jx9o06qae8gf3h.pgsql.ap-southeast-5.rds.aliyuncs.com}"
 if [ "$ROLE" = be ]; then
-  PORTS="${PORTS:-13000,13001,8025}"
+  PORTS="${PORTS:-13001,13002,8025}"
   NAS=yes
   # the pilot database, production (read once, for the copy), the Synology
   TCP_CHECKS="${TCP_CHECKS:-$PILOT_RDS:5432 $PROD_RDS:5432 $NAS_IP:445}"
   URL_CHECKS="${URL_CHECKS:-https://registry-1.docker.io/v2/ https://github.com}"
 else
-  PORTS="${PORTS:-8081}"
+  PORTS="${PORTS:-8082}"
   NAS=no
   TCP_CHECKS="${TCP_CHECKS:-172.31.96.51:22}"
   URL_CHECKS="${URL_CHECKS:-https://registry-1.docker.io/v2/ https://github.com}"

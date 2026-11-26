@@ -73,5 +73,5 @@ else
   wait_healthy pm-pilot-web
   FE_IP=$(grep -E '^PM_FE_IP=' "$RUN/.env" | cut -d= -f2)
   FE_PORT=$(grep -E '^PM_WEB_PORT=' "$RUN/.env" | cut -d= -f2)
-  echo "OK - frontend $SHA on http://$FE_IP:${FE_PORT:-8081}"
+  echo "OK - frontend $SHA on http://$FE_IP:${FE_PORT:-8082}"
 fi

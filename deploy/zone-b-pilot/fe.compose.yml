@@ -14,7 +14,7 @@ services:
     environment:
       - BACKEND_SERVERS=${PM_BACKENDS:?set PM_BACKENDS in /opt/pm-pilot/.env}
     ports:
-      - "${PM_FE_IP:?set PM_FE_IP in /opt/pm-pilot/.env}:${PM_WEB_PORT:-8081}:80"
+      - "${PM_FE_IP:?set PM_FE_IP in /opt/pm-pilot/.env}:${PM_WEB_PORT:-8082}:80"
     networks: [pm-pilot-fe]
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1/health"]

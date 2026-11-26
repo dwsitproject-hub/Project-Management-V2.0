@@ -11,17 +11,17 @@ production database is only read once, for the copy.
  Office / VPN browser
         |
         v
- FE 172.31.96.50:8081  (pm-pilot-web, nginx, spreads /api/ over both backends)
+ FE 172.31.96.50:8082  (pm-pilot-web, nginx, spreads /api/ over both backends)
         |
-        +--> BE 172.31.96.51:13000  (pm-pilot-api-1) --+--> staging ApsaraDB: database pm_pilot (copy of production)
-        +--> BE 172.31.96.51:13001  (pm-pilot-api-2) --+--> Synology //172.30.1.94/APPs/dev/PM-PILOT
+        +--> BE 172.31.96.51:13001  (pm-pilot-api-1) --+--> staging ApsaraDB: database pm_pilot (copy of production)
+        +--> BE 172.31.96.51:13002  (pm-pilot-api-2) --+--> Synology //172.30.1.94/APPs/dev/PM-PILOT
                                                        +--> Mailpit (pm-pilot-mailpit, catches every e-mail)
 ```
 
 | | FE 172.31.96.50 | BE 172.31.96.51 |
 |---|---|---|
 | Containers | `pm-pilot-web` | `pm-pilot-api-1`, `pm-pilot-api-2`, `pm-pilot-mailpit` |
-| Ports | 172.31.96.50:8081 | 172.31.96.51:13000, 172.31.96.51:13001, 127.0.0.1:8025 (Mailpit inbox) |
+| Ports | 172.31.96.50:8082 | 172.31.96.51:13001, 172.31.96.51:13002, 127.0.0.1:8025 (Mailpit inbox) |
 | Compose file | `deploy/zone-b-pilot/fe.compose.yml` | `deploy/zone-b-pilot/be.compose.yml` |
 | Settings | `/opt/pm-pilot/.env` | `/opt/pm-pilot/.env`, `pilot.env`, `secrets.pilot.env` |
 | Deploy | `release.sh fe HA` | `release.sh be HA` |
@@ -33,10 +33,14 @@ deployment itself. Every command block names the machine it runs on. Passwords g
 
 ## 1. Ports and the Docker network
 
+The Zone B servers were created as copies of the Zone A servers, so other apps' ports are
+already taken there (PM's production copy holds 13000 on the BE and 8081 on the FE). The pilot
+therefore uses 13001 / 13002 and 8082.
+
 | Server | The pilot publishes | Bound to |
 |---|---|---|
-| FE 172.31.96.50 | 8081 | the private address only |
-| BE 172.31.96.51 | 13000, 13001 | the private address only |
+| FE 172.31.96.50 | 8082 | the private address only |
+| BE 172.31.96.51 | 13001, 13002 | the private address only |
 | BE 172.31.96.51 | 8025 (Mailpit inbox) | 127.0.0.1 only (reach it with a PuTTY tunnel, §14) |
 
 `preflight.sh` (§5) checks each port against `ss` and every container, stopped ones included.
@@ -58,8 +62,8 @@ touches another app's mount or network.
 | 172.31.96.51 on the whitelist of the staging RDS **and** the production RDS (read once for the copy) | Cloud Infra / RDS console | §3 |
 | Folder `APPs/dev/PM-PILOT` on the Synology + an SMB account that can write it (other apps use `app-prj`) | IT / you | §6 |
 | 172.31.96.51 → 172.30.1.94:445 (Synology) | Cloud Infra (VPN / CEN) | §6 |
-| 172.31.96.50 → 172.31.96.51:13000-13001 | Cloud Infra (security group) | §8 |
-| Office / VPN → 172.31.96.50:8081 | Cloud Infra (security group) | §8 |
+| 172.31.96.50 → 172.31.96.51:13001-13002 | Cloud Infra (security group) | §8 |
+| Office / VPN → 172.31.96.50:8082 | Cloud Infra (security group) | §8 |
 | Both servers → github.com and Docker Hub (HTTPS) | Cloud Infra | §5, §7 |
 
 **Decisions made for the pilot:** HTTP on the private address (TLS comes with the ALB);
@@ -71,12 +75,12 @@ git checkout, so a pull or a fresh clone never touches them.
 
 | From | To | Why |
 |---|---|---|
-| FE 172.31.96.50 | BE 172.31.96.51:13000, :13001 | `/api/` |
+| FE 172.31.96.50 | BE 172.31.96.51:13001, :13002 | `/api/` |
 | BE 172.31.96.51 | staging RDS :5432 | the pilot database |
 | BE 172.31.96.51 | production RDS :5432 | `copy-db.sh` reads production once |
 | BE 172.31.96.51 | 172.30.1.94:445 | the Synology folder |
-| Office / VPN | FE 172.31.96.50:8081 | people testing the pilot |
-| BE 172.31.96.51 | FE 172.31.96.50:8081 | only for the failover check in §10 |
+| Office / VPN | FE 172.31.96.50:8082 | people testing the pilot |
+| BE 172.31.96.51 | FE 172.31.96.50:8082 | only for the failover check in §10 |
 
 ## 3. The pilot database (once)
 
@@ -213,12 +217,12 @@ PuTTY on 172.31.96.50 (FE):
 mkdir -p /opt/pm-pilot && cd /opt/pm-pilot && cp /opt/Project-Management-V2.0/deploy/zone-b-pilot/compose.env.example .env && nano .env
 ```
 Set `PM_SUBNET` to the subnet preflight suggested on **this** server; delete the BE lines;
-keep `PM_BACKENDS=172.31.96.51:13000 172.31.96.51:13001`.
+keep `PM_BACKENDS=172.31.96.51:13001 172.31.96.51:13002`.
 ```bash
 bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/release.sh fe HA
 ```
-Ends with `OK - frontend <commit> on http://172.31.96.50:8081`. The log line
-`nginx: HA mode, /api/ spread over: 172.31.96.51:13000 172.31.96.51:13001` (`dc.sh fe logs`)
+Ends with `OK - frontend <commit> on http://172.31.96.50:8082`. The log line
+`nginx: HA mode, /api/ spread over: 172.31.96.51:13001 172.31.96.51:13002` (`dc.sh fe logs`)
 shows nginx uses both backends. There is no host nginx and no DNS in the pilot.
 
 ## 9. First sign-in
@@ -231,7 +235,7 @@ password. Give your own account a local password (from `PM_LOCAL_PASSWORD`). PuT
 ```
 Expected: `[LOCAL-PASSWORD] … can now sign in with e-mail and password`. Add
 `-e PM_LOCAL_MAKE_ADMIN=true` for an account that is not an admin yet. Then open
-`http://172.31.96.50:8081` from the office or VPN and sign in with e-mail and password.
+`http://172.31.96.50:8082` from the office or VPN and sign in with e-mail and password.
 
 ## 10. Pilot checks
 
@@ -256,7 +260,7 @@ the other; then it deletes the test records. It takes about a minute.
 **Failover** — one backend stops while requests flow through the frontend. PuTTY on
 172.31.96.51 (BE):
 ```bash
-(for i in $(seq 1 80); do curl -s -o /dev/null -w "%{http_code}\n" http://172.31.96.50:8081/api/health/live; sleep 0.1; done | sort | uniq -c) & sleep 2; docker stop pm-pilot-api-1; wait; docker start pm-pilot-api-1
+(for i in $(seq 1 80); do curl -s -o /dev/null -w "%{http_code}\n" http://172.31.96.50:8082/api/health/live; sleep 0.1; done | sort | uniq -c) & sleep 2; docker stop pm-pilot-api-1; wait; docker start pm-pilot-api-1
 ```
 Expected: `80 200`, and `docker logs pm-pilot-api-1 | grep SHUTDOWN` shows `Clean exit`.
 
@@ -265,12 +269,12 @@ Expected: `80 200`, and `docker logs pm-pilot-api-1 | grep SHUTDOWN` shows `Clea
 SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename = 'pm_pilot';
 ```
 Then PuTTY on 172.31.96.51 (BE): `docker ps --filter name=pm-pilot-api` shows both still up,
-and `curl -s http://172.31.96.51:13000/health/ready` answers `{"ok":true,"db":"ok",…}`.
+and `curl -s http://172.31.96.51:13001/health/ready` answers `{"ok":true,"db":"ok",…}`.
 
 ## 11. Later: ALB, API Gateway and HTTPS
 
 When Cloud Infra delivers them (docs/HA-READINESS.md and the "Wave 1 requests" doc):
-1. ALB target groups: FE 172.31.96.50:8081 (`/health`) and BE 172.31.96.51:13000 + :13001
+1. ALB target groups: FE 172.31.96.50:8082 (`/health`) and BE 172.31.96.51:13001 + :13002
    (`/health/ready`), 30 s drain. TLS ends at the WAF / ALB.
 2. `TRUST_PROXY` in `pilot.env` = the number of proxy hops in front of the backend.
 3. SSL to the database: put the ApsaraDB CA file in `/opt/pm-pilot/certs`, mount it, set
@@ -304,7 +308,7 @@ DMS, remove the whitelist entries, and delete the `PM-PILOT` folder.
 
 - Status: `/opt/Project-Management-V2.0/deploy/zone-b-pilot/dc.sh be ps` (BE), `... dc.sh fe ps` (FE).
 - Logs: `... dc.sh be logs -f --tail 100 pm-api-1` (and `pm-api-2`, `mailpit`).
-- Health: `curl -s http://172.31.96.51:13000/health/ready` and `:13001`.
+- Health: `curl -s http://172.31.96.51:13001/health/ready` and `:13002`.
 - Mailpit inbox: PuTTY → Connection → SSH → Tunnels, source port `8025`, destination
   `127.0.0.1:8025`, Add; reconnect to the BE, then open `http://localhost:8025` on your PC.
 - Never on these hosts: `systemctl restart docker`, edits to `/etc/docker/daemon.json`,
@@ -324,4 +328,4 @@ DMS, remove the whitelist entries, and delete the `PM-PILOT` folder.
 | Sign-in "Invalid credentials" | run §9 for that e-mail; the password is `PM_LOCAL_PASSWORD` |
 | No e-mail in Mailpit | `dc.sh be logs pm-api-1 \| grep "CR EMAIL"`; only SAP FICO / SAP NON FICO CRs send one |
 | `copy-db.sh`: `connection refused` / `timeout` | whitelist the BE on that RDS instance (§3) |
-| Browser cannot open `:8081` | security group: office / VPN → 172.31.96.50:8081 |
+| Browser cannot open `:8082` | security group: office / VPN → 172.31.96.50:8082 |
