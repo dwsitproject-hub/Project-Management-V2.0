@@ -4,6 +4,7 @@
 # each password at its prompt; nothing is stored. Run on the BE server 172.31.96.51:
 #
 #   bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/copy-db.sh
+#   DUMP_FILE=prod-copy-YYYYMMDD-HHMM.dump bash ...copy-db.sh    # restore an earlier copy again
 #
 # Settings (environment, with these defaults):
 #   SRC_HOST  production RDS host          SRC_USER  postgres        SRC_DB  project_management_v2
@@ -23,14 +24,31 @@ PG="docker run --rm -it -v $DIR:/backup postgres:18-alpine"
 case "$DST_DB" in project_management_v2) echo "STOP - the target must be the pilot's own database, not $DST_DB" >&2; exit 1 ;; esac
 mkdir -p "$DIR" && chmod 700 "$DIR"
 
-echo "1/3  Reading production ($SRC_USER@$SRC_HOST/$SRC_DB) - password of $SRC_USER:"
-$PG pg_dump -h "$SRC_HOST" -U "$SRC_USER" -d "$SRC_DB" -Fc -W -f "/backup/$FILE"
-echo "     saved $DIR/$FILE ($(du -h "$DIR/$FILE" | cut -f1))"
+echo "0/3  Checking the pilot database first ($DST_USER@$DST_HOST/$DST_DB) - password of $DST_USER:"
+$PG psql -h "$DST_HOST" -U "$DST_USER" -d "$DST_DB" -W -At -c "SELECT 'pilot database reachable'"   || { echo "STOP - cannot open $DST_DB as $DST_USER (create it in the RDS console, check the whitelist)" >&2; exit 1; }
+
+if [ -n "${DUMP_FILE:-}" ]; then
+  FILE="$DUMP_FILE"
+  [ -f "$DIR/$FILE" ] || { echo "STOP - $DIR/$FILE not found" >&2; exit 1; }
+  echo "1/3  Re-using the earlier copy $DIR/$FILE (production is not read again)"
+else
+  echo "1/3  Reading production ($SRC_USER@$SRC_HOST/$SRC_DB) - password of $SRC_USER:"
+  $PG pg_dump -h "$SRC_HOST" -U "$SRC_USER" -d "$SRC_DB" -Fc -W -f "/backup/$FILE"
+  echo "     saved $DIR/$FILE ($(du -h "$DIR/$FILE" | cut -f1))"
+fi
 
 echo "2/3  Restoring into the pilot ($DST_USER@$DST_HOST/$DST_DB) - password of $DST_USER:"
-# --clean replaces what an earlier copy left; errors about the RDS-only setting
-# transaction_timeout are harmless (the dump comes from a newer client).
-$PG pg_restore -h "$DST_HOST" -U "$DST_USER" -d "$DST_DB" --clean --if-exists --no-owner --no-privileges -W "/backup/$FILE" || true
+# --clean replaces what an earlier copy left. pg_restore exits non-zero for the RDS-only
+# setting transaction_timeout (the dump comes from a newer client): that one is harmless,
+# any other error stops here.
+LOG="restore-$(date +%Y%m%d-%H%M%S).log"
+$PG sh -c "pg_restore -h '$DST_HOST' -U '$DST_USER' -d '$DST_DB' --clean --if-exists --no-owner --no-privileges -W '/backup/$FILE' 2>'/backup/$LOG'" || true
+if grep -i 'error' "$DIR/$LOG" | grep -vi 'errors ignored on restore' | grep -vqi 'transaction_timeout'; then
+  grep -i 'error' "$DIR/$LOG" | grep -vi 'errors ignored on restore' | grep -vi 'transaction_timeout' | head -20 >&2
+  echo "STOP - the restore failed (full log: $DIR/$LOG)" >&2
+  exit 1
+fi
+echo "     restored (only harmless messages, see $DIR/$LOG)"
 
 echo "3/3  Making the copy safe for a pilot - password of $DST_USER again:"
 # - no production e-mail still waiting in the queue is sent again (Mailpit would catch it anyway)

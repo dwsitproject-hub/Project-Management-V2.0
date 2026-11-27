@@ -100,8 +100,11 @@ ApsaraDB, filled with a copy of production.
    ```bash
    bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/copy-db.sh
    ```
-   It asks three times: the production `postgres` password (read only), then the `pm_pilot`
-   password twice. It ends with the number of initiatives and users, e.g. `318 | 72`. It also
+   It first checks that the pilot database can be opened (`pm_pilot` password), so nothing
+   is read from production if the pilot side is not ready. Then it asks for the production
+   `postgres` password (read only) and the `pm_pilot` password twice more. If the restore
+   fails it stops and shows why; to restore the same copy again without reading production:
+   `DUMP_FILE=prod-copy-…dump bash /opt/Project-Management-V2.0/deploy/zone-b-pilot/copy-db.sh`. It ends with the number of initiatives and users, e.g. `318 | 72`. It also
    empties the copy's e-mail queue and switches off its API clients (ERP), so nothing in the
    copy can mail or be pushed to. Messages about `transaction_timeout` are harmless.
 
