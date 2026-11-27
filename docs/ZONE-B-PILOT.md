@@ -194,7 +194,7 @@ Fill `DATABASE_URL` (the `pm_pilot` password, percent-encoded, and the staging R
 | `PM_NAS_MOUNT` (.env) | /mnt/pm-pilot-nas |
 | `DATABASE_URL` (secrets) | `postgres://pm_pilot:…@<staging RDS host>:5432/pm_pilot` |
 | `JWT_SECRET` (secrets) | generated above; the pilot's own |
-| everything else (`pilot.env`) | as shipped: Mailpit, SSO and SDK off, 2 × 10 DB connections |
+| everything else (`pilot.env`) | as shipped: Mailpit, SSO and SDK off, API only (`BACKEND_API_ONLY`), 2 × 10 DB connections |
 
 Deploy:
 ```bash
