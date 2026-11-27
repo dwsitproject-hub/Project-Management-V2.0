@@ -9,6 +9,13 @@
 #     or DR starts from image + .env alone; set PM_BACKEND_IMAGE to the ACR tag
 #   - uploads come from the SHARED file store mounted on every node (UPLOADS_HOST_DIR)
 #   - health check on /health/ready and a 30 s stop grace period for rolling deploys
+#   - API only (BACKEND_API_ONLY): the ALB sends /api/* here, the web app is on the frontend
+#   - its Docker network is pinned to PM_SUBNET, outside the VPC 172.16.0.0/12
+#
+# API Gateway (PLACEHOLDER - not set up by Infra yet): /api/v1/* (public CR / initiative
+# API) and /api/v1/integrations/erp/* (ERP CR sync) are the routes to publish on the API
+# Gateway for external systems. Until it exists they are reached through the ALB like the
+# rest of /api, with PM's own client-credentials tokens (POST /api/auth/client-token).
 #
 # One-off schema migration before a rollout (then run nodes with SCHEMA_SETUP=skip):
 #   docker compose -f docker-compose.ha.backend.yml --env-file .env run --rm backend node backend/migrate.js
@@ -24,6 +31,7 @@ services:
       - NODE_ENV=production
       - PORT=3000
       - HOST=0.0.0.0
+      - BACKEND_API_ONLY=true
     ports:
       # Bind to the node's private address (BACKEND_BIND) so traffic can't skip the
       # API Gateway; the security group should still allow only the gateway / ALB.
@@ -40,3 +48,14 @@ services:
       start_period: 20s
     stop_grace_period: 30s
     restart: unless-stopped
+    networks: [pm]
+
+networks:
+  pm:
+    name: pm_net
+    ipam:
+      config:
+        # Fixed, and OUTSIDE the VPC 172.16.0.0/12 (Zone A 172.28.80.0/20, Zone B
+        # 172.31.96.0/20, office 172.16.0.0/16): a Docker network there would swallow
+        # replies to the other zone or to office users. E.g. 192.168.250.0/24.
+        - subnet: ${PM_SUBNET:?set PM_SUBNET (e.g. 192.168.250.0/24) - outside 172.16.0.0/12}

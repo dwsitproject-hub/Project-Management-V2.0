@@ -35,7 +35,13 @@ app.use(morgan('dev', { skip: (req) => /^\/(api\/)?health(\/|$)/.test(req.path) 
 // Serve frontend static files (for local development)
 // In production, frontend is served by the separate frontend container (nginx)
 const frontendPath = path.join(__dirname, '..', 'frontend');
-app.use(express.static(frontendPath));
+// BACKEND_API_ONLY=true: the backend answers only /api/* and the health checks; the web
+// app comes from the frontend nodes (topology v3: the ALB sends /api/* here and everything
+// else to the frontend, and nothing but /api may be exposed on a backend). Unset keeps
+// serving the web app here too, as today's single server may still route the whole site
+// to this port.
+const API_ONLY = String(process.env.BACKEND_API_ONLY || '').toLowerCase() === 'true';
+if (!API_ONLY) app.use(express.static(frontendPath));
 
 // API routes
 import initiativesRouter from './routes/initiatives.js';
@@ -145,7 +151,7 @@ const HOST = process.env.HOST || '0.0.0.0'; // Listen on all network interfaces
 
 // Start backend API server
 const server = app.listen(PORT, HOST, () => {
-  console.log(`Backend API server listening on:`);
+  console.log(`Backend API server listening on:${API_ONLY ? ' (API only: /api and /health)' : ''}`);
   console.log(`  - Local:   http://localhost:${PORT}`);
 
   // Read-only DB health signal for deployments (replaces the old boot-time full rewrite).
@@ -202,7 +208,7 @@ function warnAboutUnsafeConfig() {
 
 // Start frontend server on port 8080 (for local development)
 // This creates a separate Express server that serves the frontend and proxies API calls
-if (process.env.NODE_ENV !== 'production' || process.env.SERVE_FRONTEND === 'true') {
+if (!API_ONLY && (process.env.NODE_ENV !== 'production' || process.env.SERVE_FRONTEND === 'true')) {
   const frontendApp = express();
   frontendApp.use(express.json());
   frontendApp.use(cors());
@@ -235,11 +241,10 @@ if (process.env.NODE_ENV !== 'production' || process.env.SERVE_FRONTEND === 'tru
   
   // Serve frontend static files
   frontendApp.use(express.static(frontendPath));
-  frontendApp.use('/docs', express.static(path.join(__dirname, '..', 'docs')));
   
   // SPA routing - serve index.html for all non-API routes
   frontendApp.get('*', (req, res) => {
-    if (!req.path.startsWith('/api') && !req.path.startsWith('/docs')) {
+    if (!req.path.startsWith('/api')) {
       res.sendFile(path.join(frontendPath, 'index.html'));
     }
   });

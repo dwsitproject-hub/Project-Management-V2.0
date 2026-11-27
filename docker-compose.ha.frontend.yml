@@ -4,7 +4,7 @@
 #
 #   docker compose -f docker-compose.ha.frontend.yml --env-file .env up -d
 #
-#   BACKEND_UPSTREAM   where /api/ goes until the ALB sends /api/* to the API Gateway,
+#   BACKEND_UPSTREAM   where /api/ goes until the ALB sends /api/* to the backends,
 #                      by DNS name, e.g. http://pm-api.internal:13000 (no IP addresses)
 #   PM_FRONTEND_IMAGE  the ACR image tag (static files are baked into the image)
 services:
@@ -24,3 +24,12 @@ services:
       retries: 3
     stop_grace_period: 15s
     restart: unless-stopped
+    networks: [pm-web]
+
+networks:
+  pm-web:
+    name: pm-web_net
+    ipam:
+      config:
+        # Fixed, and OUTSIDE the VPC 172.16.0.0/12 (see docker-compose.ha.backend.yml)
+        - subnet: ${PM_SUBNET:?set PM_SUBNET (e.g. 192.168.250.0/24) - outside 172.16.0.0/12}
